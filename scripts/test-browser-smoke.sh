@@ -26,6 +26,9 @@ if [ -z "$chrome" ]; then
     exit 1
 fi
 
+browser_name=$("$chrome" --version 2>/dev/null || basename "$chrome")
+browser_name=$(printf '%s' "$browser_name" | tr -s '[:space:]' ' ' | sed 's/[[:space:]]$//')
+
 port=${PWMTF_SMOKE_PORT:-4173}
 server_log=$(mktemp "${TMPDIR:-/tmp}/pwmtf-http.XXXXXX")
 browser_log=$(mktemp "${TMPDIR:-/tmp}/pwmtf-browser.XXXXXX")
@@ -72,6 +75,11 @@ if grep -q 'id="loading"' "$browser_log"; then
     printf '%s\n' "browser client did not finish loading" >&2
     exit 1
 fi
+if ! grep -q 'data-client-state="ready"' "$browser_log"; then
+    cat "$browser_log" >&2
+    printf '%s\n' "browser client did not report its ready state" >&2
+    exit 1
+fi
 if grep -q 'id="load-error"[^>]*hidden=""' "$browser_log"; then
     :
 elif grep -q 'id="load-error"[^>]*hidden' "$browser_log"; then
@@ -87,4 +95,4 @@ if ! grep -q 'id="pwmtf-canvas"' "$browser_log"; then
     exit 1
 fi
 
-printf '%s\n' "browser smoke test passed"
+printf '%s\n' "browser smoke test passed: $browser_name at 1280x720"

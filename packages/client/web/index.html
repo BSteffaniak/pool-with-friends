@@ -8,7 +8,7 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main id="game-shell" aria-label="Pool with More Than Friends">
+    <main id="game-shell" aria-label="Pool with More Than Friends" data-client-state="loading">
       <canvas id="pwmtf-canvas" tabindex="0"></canvas>
       <section id="rotate-device" role="status" aria-live="polite">
         <strong>Rotate your device</strong>
@@ -20,26 +20,17 @@
         <span>Reload this page. If the problem continues, update your browser or enable WebGL 2.</span>
         <button type="button">Reload</button>
       </section>
+      <aside id="feasibility-tools" hidden>
+        <strong>Feasibility capture</strong>
+        <output id="feasibility-metrics">Waiting for the client…</output>
+        <div>
+          <button id="capture-toggle" type="button">Start capture</button>
+          <button id="audio-probe" type="button">Play audio probe</button>
+          <button id="audio-mute" type="button" disabled>Mute</button>
+          <button id="download-report" type="button">Download report</button>
+        </div>
+      </aside>
     </main>
-    <script type="module">
-      const loading = document.querySelector("#loading");
-      const loadError = document.querySelector("#load-error");
-      const reload = loadError.querySelector("button");
-      reload.addEventListener("click", () => window.location.reload());
-
-      try {
-        if (!document.createElement("canvas").getContext("webgl2")) {
-          throw new Error("WebGL 2 is unavailable");
-        }
-        const { default: init } = await import("./pwmtf_client.js");
-        await init();
-        loading.remove();
-        document.querySelector("#pwmtf-canvas").focus({ preventScroll: true });
-      } catch (error) {
-        console.error("PWMTF client startup failed", error);
-        loading.remove();
-        loadError.hidden = false;
-      }
-    </script>
+    <script type="module" src="./bootstrap.js"></script>
   </body>
 </html>
