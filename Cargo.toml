@@ -1,5 +1,5 @@
 [workspace]
-members  = []
+members  = ["packages/client"]
 resolver = "3"
 
 [workspace.package]
@@ -9,6 +9,14 @@ license    = "MPL-2.0"
 readme     = "README.md"
 repository = "https://github.com/BSteffaniak/pool-with-friends"
 version    = "0.1.0"
+
+[workspace.dependencies]
+bevy = { version = "0.19.1", default-features = false, features = [
+    "2d",
+    "ui",
+    "web",
+    "webgl2",
+] }
 
 [profile.release]
 codegen-units = 1

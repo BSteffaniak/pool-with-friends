@@ -36,7 +36,6 @@
             cargo-nextest
             llvmPackages.bintools
             pkg-config
-            wasm-bindgen-cli
           ];
 
           shellHook = ''

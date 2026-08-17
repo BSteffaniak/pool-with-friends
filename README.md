@@ -20,7 +20,7 @@ Read `INVARIANTS.md` for durable architecture and `AGENTS.md` for contributor re
 
 ## Development
 
-The workspace currently contains no speculative package crates. As implementation packages are introduced, use:
+The workspace contains the concrete `pwmtf_client` feasibility package and no speculative domain, protocol, or server packages. As implementation packages are introduced, use:
 
 ```sh
 cargo fmt --check

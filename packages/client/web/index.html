@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no" />
+    <meta name="theme-color" content="#08130f" />
+    <title>Pool with More Than Friends</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main id="game-shell" aria-label="Pool with More Than Friends">
+      <canvas id="pwmtf-canvas"></canvas>
+      <section id="rotate-device" role="status" aria-live="polite">
+        <strong>Rotate your device</strong>
+        <span>Pool with More Than Friends plays in landscape.</span>
+      </section>
+      <section id="loading" role="status" aria-live="polite">Loading the table…</section>
+    </main>
+    <script type="module">
+      import init from "./pwmtf_client.js";
+      init().then(() => document.querySelector("#loading")?.remove());
+    </script>
+  </body>
+</html>

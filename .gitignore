@@ -3,6 +3,10 @@ debug/
 dist/
 node_modules/
 .direnv/
+
+# local tooling built outside Cargo's target directory
+.tools/
+
 .env
 .env.*
 !.env.example

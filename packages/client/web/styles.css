@@ -1,0 +1,71 @@
+:root {
+  color-scheme: dark;
+  background: #08130f;
+  font-family: system-ui, sans-serif;
+  overscroll-behavior: none;
+  touch-action: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#game-shell,
+#pwmtf-canvas {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
+  background: radial-gradient(circle at top, #173a2d, #08130f 70%);
+}
+
+#game-shell {
+  position: relative;
+  overflow: hidden;
+}
+
+#pwmtf-canvas {
+  display: block;
+  outline: none;
+  touch-action: none;
+}
+
+#loading,
+#rotate-device {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 0.5rem;
+  padding: 2rem;
+  text-align: center;
+  background: #08130f;
+}
+
+#rotate-device {
+  z-index: 2;
+  display: none;
+}
+
+#rotate-device strong {
+  font-size: clamp(1.5rem, 7vw, 3rem);
+}
+
+#rotate-device span {
+  color: #b8c9c0;
+}
+
+@media (orientation: portrait) {
+  #rotate-device {
+    display: grid;
+  }
+}

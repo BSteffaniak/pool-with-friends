@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+
+cargo build --package pwmtf_client --target wasm32-unknown-unknown --release
+mkdir -p dist
+cp packages/client/web/index.html packages/client/web/styles.css dist/
+wasm_schema=$(grep -m1 'name = "wasm-bindgen"' -A2 Cargo.lock | grep 'version = ' | cut -d'"' -f2)
+cli_schema=$(wasm-bindgen --version | awk '{print $2}')
+if [ "$wasm_schema" != "$cli_schema" ]; then
+    printf '%s\n' "wasm-bindgen CLI $cli_schema does not match locked crate $wasm_schema" >&2
+    printf '%s\n' "install wasm-bindgen-cli $wasm_schema, then rerun this script" >&2
+    exit 1
+fi
+wasm-bindgen \
+    --target web \
+    --out-dir dist \
+    --out-name pwmtf_client \
+    target/wasm32-unknown-unknown/release/pwmtf-client.wasm
+
+printf '%s\n' "PWMTF web client built in $root/dist"

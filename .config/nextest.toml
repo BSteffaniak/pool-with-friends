@@ -1,2 +1,9 @@
 [profile.default]
 fail-fast = false
+
+[[profile.default.overrides]]
+filter     = 'package(pwmtf_client)'
+test-group = 'client'
+
+[test-groups]
+client = { max-threads = 1 }

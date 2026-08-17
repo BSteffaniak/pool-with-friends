@@ -1,0 +1,22 @@
+[package]
+authors     = { workspace = true }
+categories  = ["games", "wasm"]
+description = "Bevy browser client for Pool with More Than Friends"
+edition     = { workspace = true }
+keywords    = ["bevy", "billiards", "game", "pool", "wasm"]
+license     = { workspace = true }
+name        = "pwmtf_client"
+readme      = "README.md"
+repository  = { workspace = true }
+version     = { workspace = true }
+
+[[bin]]
+name = "pwmtf-client"
+path = "src/main.rs"
+
+[dependencies]
+bevy = { workspace = true }
+
+[features]
+default          = []
+fail-on-warnings = []

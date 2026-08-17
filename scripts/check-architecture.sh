@@ -26,8 +26,14 @@ check_pattern() {
 
 if [ -d packages ]; then
     manifests=$(find packages -type f -name Cargo.toml -print)
-    if [ -n "$manifests" ] && grep -n -E '^name[[:space:]]*=[[:space:]]*"' $manifests | grep -v -E '"pwmtf_[a-z0-9_]+"'; then
-        report_violation "package name without the pwmtf_ prefix"
+    if [ -n "$manifests" ]; then
+        for manifest in $manifests; do
+            package_name=$(awk '/^\[package\]/{in_package=1; next} /^\[/{in_package=0} in_package && /^name[[:space:]]*=/{print; exit}' "$manifest")
+            if [ -n "$package_name" ] && ! printf '%s\n' "$package_name" | grep -q -E '"pwmtf_[a-z0-9_]+"'; then
+                printf '%s:%s\n' "$manifest" "$package_name"
+                report_violation "package name without the pwmtf_ prefix"
+            fi
+        done
     fi
 
     if find packages -mindepth 1 -maxdepth 1 -type d \( -name core -o -name common -o -name shared -o -name utils \) -print | grep .; then

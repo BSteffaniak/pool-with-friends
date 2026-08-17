@@ -1,8 +1,14 @@
 # cargo-deny configuration for PWMTF.
 
 [advisories]
+ignore = [
+    # Bevy 0.19.1 -> winit 0.30.13 -> sctk-adwaita -> ab_glyph.
+    # No safe upgrade exists as of 2026-08-16; this is unmaintained metadata,
+    # not a vulnerability. Remove when the Bevy/winit chain migrates.
+    "RUSTSEC-2026-0192",
+]
 version = 2
-yanked  = "deny"
+yanked = "deny"
 
 [licenses]
 allow = [
@@ -10,8 +16,10 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "CC0-1.0",
     "ISC",
     "MIT",
+    "MIT-0",
     "MPL-2.0",
     "Unicode-3.0",
     "Zlib",
