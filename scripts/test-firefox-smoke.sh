@@ -174,4 +174,15 @@ if [ "$controls_present" != true ]; then
     exit 1
 fi
 
-printf '%s\n' "Firefox smoke test passed: Firefox $firefox_version (normal and feasibility entry points)"
+check_entry_point "${base_url}?feasibility&tier=reduced" "reduced feasibility"
+active_tier=$(curl --fail --silent --show-error \
+    --header 'Content-Type: application/json' \
+    --data '{"script":"return document.querySelector(\"#presentation-tier\")?.value ?? \"missing\";","args":[]}' \
+    "http://127.0.0.1:$driver_port/session/$session_id/execute/sync" \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin).get("value", "error"))')
+if [ "$active_tier" != reduced ]; then
+    printf '%s\n' "Firefox reduced feasibility client did not report the selected tier" >&2
+    exit 1
+fi
+
+printf '%s\n' "Firefox smoke test passed: Firefox $firefox_version (normal, default feasibility, and reduced feasibility entry points)"

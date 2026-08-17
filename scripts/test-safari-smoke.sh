@@ -81,32 +81,63 @@ if [ -z "$session_id" ]; then
     exit 1
 fi
 
-curl --fail --silent --show-error --output /dev/null \
-    --header 'Content-Type: application/json' \
-    --data "{\"url\":\"http://127.0.0.1:$server_port/\"}" \
-    "http://127.0.0.1:$driver_port/session/$session_id/url"
-
-attempt=0
-while :; do
-    state=$(curl --fail --silent --show-error \
+execute_script() {
+    script=$1
+    python3 - "$script" <<'PY' | curl --fail --silent --show-error \
         --header 'Content-Type: application/json' \
-        --data '{"script":"return document.querySelector(\"#game-shell\")?.dataset.clientState ?? \"missing\";","args":[]}' \
+        --data-binary @- \
         "http://127.0.0.1:$driver_port/session/$session_id/execute/sync" \
-        | python3 -c 'import json, sys; print(json.load(sys.stdin).get("value", "error"))')
-    if [ "$state" = ready ]; then
-        break
-    fi
-    if [ "$state" = failed ]; then
-        printf '%s\n' "Safari client displayed its startup failure state" >&2
-        exit 1
-    fi
-    attempt=$((attempt + 1))
-    if [ "$attempt" -ge 150 ]; then
-        printf '%s\n' "Safari client did not reach ready state; last state: $state" >&2
-        exit 1
-    fi
-    sleep 0.1
-done
+        | python3 -c 'import json, sys; print(json.load(sys.stdin).get("value", "error"))'
+import json
+import sys
+
+print(json.dumps({"script": sys.argv[1], "args": []}))
+PY
+}
+
+check_entry_point() {
+    url=$1
+    label=$2
+    curl --fail --silent --show-error --output /dev/null \
+        --header 'Content-Type: application/json' \
+        --data "{\"url\":\"$url\"}" \
+        "http://127.0.0.1:$driver_port/session/$session_id/url"
+
+    attempt=0
+    while :; do
+        state=$(execute_script 'return document.querySelector("#game-shell")?.dataset.clientState ?? "missing";')
+        if [ "$state" = ready ]; then
+            break
+        fi
+        if [ "$state" = failed ]; then
+            printf '%s\n' "Safari $label client displayed its startup failure state" >&2
+            exit 1
+        fi
+        attempt=$((attempt + 1))
+        if [ "$attempt" -ge 150 ]; then
+            printf '%s\n' "Safari $label client did not reach ready state; last state: $state" >&2
+            exit 1
+        fi
+        sleep 0.1
+    done
+}
+
+base_url="http://127.0.0.1:$server_port/"
+check_entry_point "$base_url" normal
+check_entry_point "${base_url}?feasibility" feasibility
+
+controls_present=$(execute_script 'return ["test-platform","presentation-tier","physical-checks","capture-toggle","audio-probe","download-report"].every((id) => document.getElementById(id));')
+if [ "$controls_present" != true ]; then
+    printf '%s\n' "Safari feasibility capture controls were incomplete" >&2
+    exit 1
+fi
+
+check_entry_point "${base_url}?feasibility&tier=reduced" "reduced feasibility"
+active_tier=$(execute_script 'return document.querySelector("#presentation-tier")?.value ?? "missing";')
+if [ "$active_tier" != reduced ]; then
+    printf '%s\n' "Safari reduced feasibility client did not report the selected tier" >&2
+    exit 1
+fi
 
 safari_version=$($safaridriver --version | tr -s '[:space:]' ' ' | sed 's/[[:space:]]$//')
-printf '%s\n' "Safari smoke test passed: $safari_version at the default desktop viewport"
+printf '%s\n' "Safari smoke test passed: $safari_version (normal, default feasibility, and reduced feasibility entry points)"

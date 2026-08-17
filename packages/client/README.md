@@ -33,7 +33,7 @@ On macOS, Safari compatibility has a matching WebDriver smoke entry point. First
 ./scripts/test-safari-smoke.sh
 ```
 
-Firefox has an equivalent headless WebDriver check for normal and feasibility entry points:
+Firefox has an equivalent headless WebDriver check for normal, default-feasibility, and reduced-feasibility entry points. It also verifies required capture controls and reduced-tier reporting:
 
 ```sh
 FIREFOX_BIN=/path/to/firefox \
@@ -41,7 +41,7 @@ GECKODRIVER_BIN=/path/to/geckodriver \
 ./scripts/test-firefox-smoke.sh
 ```
 
-Neither desktop smoke substitutes for the physical mobile matrix.
+Safari exercises the same three entry points and feasibility assertions. Neither desktop smoke substitutes for the physical mobile matrix.
 
 ## Physical-device HTTPS serving
 
