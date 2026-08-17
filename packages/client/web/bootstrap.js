@@ -7,6 +7,7 @@ const tools = document.querySelector("#feasibility-tools");
 const platformInput = document.querySelector("#test-platform");
 const hardwareModelInput = document.querySelector("#hardware-model");
 const osVersionInput = document.querySelector("#os-version");
+const browserFamilyInput = document.querySelector("#browser-family");
 const browserVersionInput = document.querySelector("#browser-version");
 const cacheStateInput = document.querySelector("#cache-state");
 const minimumVersionInput = document.querySelector("#minimum-version-run");
@@ -28,6 +29,8 @@ const downloadButton = document.querySelector("#download-report");
 const query = new URLSearchParams(window.location.search);
 const feasibilityEnabled = query.has("feasibility");
 const activePresentationTier = query.get("tier") === "reduced" ? "reduced" : "default";
+const candidateBuildId = "__PWMTF_BUILD_ID__";
+const candidateSourceHash = "__PWMTF_SOURCE_HASH__";
 const navigationStartedAt = performance.now();
 const PHYSICAL_CHECKS = [
   ["first_load", "First/warm load reaches the table"],
@@ -62,6 +65,9 @@ const telemetry = {
   peakJsHeapBytes: null,
   visibilityChanges: 0,
   orientationChanges: 0,
+  pageHideCount: 0,
+  pageShowCount: 0,
+  restoredFromPageCache: false,
   events: [],
   audio: {
     supported: Boolean(window.AudioContext || window.webkitAudioContext),
@@ -118,6 +124,7 @@ function refreshMetrics() {
 
   const duration = captureDuration();
   metricsOutput.textContent = [
+    `build: ${candidateBuildId}`,
     `tier: ${activePresentationTier}`,
     `client ready: ${formatDuration(telemetry.clientReadyMs)}`,
     `first canvas contact: ${formatDuration(telemetry.firstCanvasContactMs)}`,
@@ -128,6 +135,8 @@ function refreshMetrics() {
     `JS heap: ${formatBytes(telemetry.currentJsHeapBytes)} (peak ${formatBytes(telemetry.peakJsHeapBytes)})`,
     `canvas contacts/events: ${telemetry.pointerContacts}/${telemetry.events.length}`,
     `visibility/orientation changes: ${telemetry.visibilityChanges}/${telemetry.orientationChanges}`,
+    `page hide/show: ${telemetry.pageHideCount}/${telemetry.pageShowCount}`,
+    `restored from page cache: ${telemetry.restoredFromPageCache ? "yes" : "no"}`,
     `audio: ${telemetry.audio.state}${telemetry.audio.muted ? " (muted)" : ""}`,
     `viewport: ${window.innerWidth}×${window.innerHeight} @ ${window.devicePixelRatio.toFixed(2)}x`,
   ].join("\n");
@@ -229,6 +238,7 @@ function testMetadata() {
     platform: platformInput.value,
     hardware_model: hardwareModelInput.value.trim(),
     os_version: osVersionInput.value.trim(),
+    browser_family: browserFamilyInput.value,
     browser_version: browserVersionInput.value.trim(),
     cache_state: cacheStateInput.value,
     minimum_version_run: minimumVersionInput.value,
@@ -242,6 +252,7 @@ function requireTestMetadata() {
     platformInput,
     hardwareModelInput,
     osVersionInput,
+    browserFamilyInput,
     browserVersionInput,
     cacheStateInput,
     minimumVersionInput,
@@ -386,6 +397,8 @@ function report() {
     schema_version: telemetry.schemaVersion,
     captured_at: new Date().toISOString(),
     candidate: {
+      build_id: candidateBuildId,
+      source_hash: candidateSourceHash,
       bevy: "0.19.1",
       renderer: "WebGL2",
     },
@@ -428,6 +441,9 @@ function report() {
       canvas_contacts: telemetry.pointerContacts,
       visibility_changes: telemetry.visibilityChanges,
       orientation_changes: telemetry.orientationChanges,
+      page_hide_count: telemetry.pageHideCount,
+      page_show_count: telemetry.pageShowCount,
+      restored_from_page_cache: telemetry.restoredFromPageCache,
       marked_events: telemetry.events,
     },
     audio: telemetry.audio,
@@ -444,8 +460,10 @@ function downloadReport() {
   link.href = url;
   const test = testMetadata();
   const platform = test.platform || "unknown-device";
+  const browser = test.browser_family || "unknown-browser";
+  const build = candidateBuildId.slice(0, 20);
   const run = test.run_number === null ? "unknown-run" : `run-${test.run_number}`;
-  link.download = `pwmtf-feasibility-${platform}-${test.cache_state || "unknown-cache"}-${test.minimum_version_run === "yes" ? "minimum" : "current"}-${test.presentation_tier || "unknown-tier"}-${run}-${new Date().toISOString().replaceAll(":", "-")}.json`;
+  link.download = `pwmtf-feasibility-${build}-${platform}-${browser}-${test.cache_state || "unknown-cache"}-${test.minimum_version_run === "yes" ? "minimum" : "current"}-${test.presentation_tier || "unknown-tier"}-${run}-${new Date().toISOString().replaceAll(":", "-")}.json`;
   link.click();
   URL.revokeObjectURL(url);
 }
@@ -463,6 +481,23 @@ canvas.addEventListener("pointerdown", () => {
 });
 window.addEventListener("orientationchange", () => {
   telemetry.orientationChanges += 1;
+  refreshMetrics();
+});
+window.addEventListener("pagehide", () => {
+  telemetry.pageHideCount += 1;
+  refreshMetrics();
+});
+window.addEventListener("pageshow", (event) => {
+  telemetry.pageShowCount += 1;
+  if (event.persisted) {
+    telemetry.restoredFromPageCache = true;
+    telemetry.events.push({
+      elapsed_ms: captureDuration(),
+      label: "restored from page cache",
+      visibility: document.visibilityState,
+      orientation: window.screen.orientation?.type ?? null,
+    });
+  }
   refreshMetrics();
 });
 window.addEventListener("resize", refreshMetrics);

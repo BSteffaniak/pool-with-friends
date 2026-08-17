@@ -14,7 +14,22 @@ from typing import Any
 REQUIRED_RUNS = 3
 REQUIRED_PLATFORMS = {"iphone", "ipad", "android-phone", "android-tablet"}
 ALLOWED_PLATFORMS = REQUIRED_PLATFORMS | {"desktop"}
+ALLOWED_BROWSER_FAMILIES = {
+    "safari",
+    "chrome",
+    "firefox",
+    "samsung-internet",
+    "edge",
+    "chromium",
+}
+REQUIRED_BROWSER_MATRIX = {
+    "iphone": {"safari"},
+    "ipad": {"safari"},
+    "android-phone": {"chrome", "firefox", "samsung-internet"},
+    "android-tablet": {"chrome"},
+}
 REQUIRED_CACHE_STATES = {"cold", "warm", "lifecycle"}
+REQUIRED_VERSION_STATUSES = {"yes", "no"}
 REQUIRED_PHYSICAL_CHECKS = {
     "first_load",
     "aiming",
@@ -39,11 +54,18 @@ REQUIRED_TEST_FIELDS = (
     "platform",
     "hardware_model",
     "os_version",
+    "browser_family",
     "browser_version",
     "cache_state",
     "minimum_version_run",
     "presentation_tier",
     "run_number",
+)
+REQUIRED_CANDIDATE_FIELDS = (
+    "build_id",
+    "source_hash",
+    "bevy",
+    "renderer",
 )
 
 
@@ -69,6 +91,29 @@ def load_report(path: Path) -> dict[str, Any]:
     if report.get("schema_version") != 1:
         raise ValueError(f"{path}: unsupported schema_version")
 
+    candidate = report.get("candidate")
+    if not isinstance(candidate, dict):
+        raise ValueError(f"{path}: candidate metadata must be an object")
+    if set(candidate) != set(REQUIRED_CANDIDATE_FIELDS):
+        raise ValueError(f"{path}: candidate metadata keys are invalid")
+    for field in REQUIRED_CANDIDATE_FIELDS:
+        value = candidate.get(field)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{path}: missing candidate.{field}")
+    if not 1 <= len(candidate["build_id"]) <= 128 or not all(
+        character.isascii() and (character.isalnum() or character in "._-")
+        for character in candidate["build_id"]
+    ):
+        raise ValueError(f"{path}: invalid candidate.build_id")
+    if len(candidate["source_hash"]) != 64 or any(
+        character not in "0123456789abcdef" for character in candidate["source_hash"]
+    ):
+        raise ValueError(f"{path}: invalid candidate.source_hash")
+    if candidate["bevy"] != "0.19.1":
+        raise ValueError(f"{path}: unexpected candidate.bevy")
+    if candidate["renderer"] != "WebGL2":
+        raise ValueError(f"{path}: unexpected candidate.renderer")
+
     test = report.get("test")
     if not isinstance(test, dict):
         raise ValueError(f"{path}: test metadata must be an object")
@@ -78,6 +123,8 @@ def load_report(path: Path) -> dict[str, Any]:
             raise ValueError(f"{path}: missing test.{field}")
     if test["platform"] not in ALLOWED_PLATFORMS:
         raise ValueError(f"{path}: invalid test.platform")
+    if test["browser_family"] not in ALLOWED_BROWSER_FAMILIES:
+        raise ValueError(f"{path}: invalid test.browser_family")
     if test["cache_state"] not in REQUIRED_CACHE_STATES:
         raise ValueError(f"{path}: invalid test.cache_state")
     if test["minimum_version_run"] not in ("yes", "no"):
@@ -132,16 +179,26 @@ def load_report(path: Path) -> dict[str, Any]:
     if observations["peak_memory_mib"] < observations["steady_memory_mib"]:
         raise ValueError(f"{path}: peak memory cannot be lower than steady memory")
 
+    captured_at = report.get("captured_at")
+    if not isinstance(captured_at, str) or not captured_at:
+        raise ValueError(f"{path}: captured_at must be a non-empty string")
+
     return report
 
 
 def group_key(report: dict[str, Any]) -> tuple[str, ...]:
     """Return the fields that identify comparable repeated runs."""
     test = report["test"]
+    candidate = report["candidate"]
     return (
+        str(candidate["build_id"]),
+        str(candidate["source_hash"]),
+        str(candidate["bevy"]),
+        str(candidate["renderer"]),
         str(test["platform"]),
         str(test["hardware_model"]),
         str(test["os_version"]),
+        str(test["browser_family"]),
         str(test["browser_version"]),
         str(test["cache_state"]),
         str(test["minimum_version_run"]),
@@ -169,7 +226,20 @@ def markdown_table(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> str:
         "| --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for key in sorted(groups):
-        platform, hardware, os_version, browser_version, cache_state, minimum_version, presentation_tier = key
+        (
+            build_id,
+            source_hash,
+            bevy,
+            renderer,
+            platform,
+            hardware,
+            os_version,
+            browser_family,
+            browser_version,
+            cache_state,
+            minimum_version,
+            presentation_tier,
+        ) = key
         reports = groups[key]
         visible = [number(report["external_observations"]["first_visible_table_ms"]) for report in reports]
         accepted_input = [number(report["external_observations"]["first_accepted_input_ms"]) for report in reports]
@@ -195,8 +265,8 @@ def markdown_table(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> str:
             "| "
             + " | ".join(
                 (
-                    f"{platform} / {hardware}",
-                    f"{os_version} / {browser_version}",
+                    f"{platform} / {hardware} / {build_id[:12]} / Bevy {bevy} {renderer}",
+                    f"{os_version} / {browser_family} {browser_version}",
                     f"{cache_state} / {'minimum' if minimum_version == 'yes' else 'current'} / {presentation_tier}",
                     str(len(reports)),
                     checks_summary,
@@ -217,8 +287,8 @@ def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> li
     """Return objective budget and lifecycle failures in final-gate reports."""
     errors: list[str] = []
     for key, reports in groups.items():
-        cache_state = key[4]
-        presentation_tier = key[6]
+        cache_state = key[9]
+        presentation_tier = key[11]
         for report in reports:
             run = report["test"]["run_number"]
             observations = report["external_observations"]
@@ -315,18 +385,28 @@ def main() -> int:
     if args.require_mobile_matrix:
         if args.allow_incomplete:
             errors.append("--allow-incomplete cannot be combined with --require-mobile-matrix")
-        present = {(key[0], key[4]) for key in groups}
-        minimum_platforms = {key[0] for key in groups if key[5] == "yes"}
+        present = {(key[4], key[7], key[9], key[10]) for key in groups}
         missing = sorted(
-            (platform, cache_state)
-            for platform in REQUIRED_PLATFORMS
+            (platform, browser_family, cache_state, version_status)
+            for platform, browser_families in REQUIRED_BROWSER_MATRIX.items()
+            for browser_family in browser_families
             for cache_state in REQUIRED_CACHE_STATES
-            if (platform, cache_state) not in present
+            for version_status in REQUIRED_VERSION_STATUSES
+            if (platform, browser_family, cache_state, version_status) not in present
         )
-        for platform, cache_state in missing:
-            errors.append(f"mobile matrix missing {platform} / {cache_state}")
-        for platform in sorted(REQUIRED_PLATFORMS - minimum_platforms):
-            errors.append(f"mobile matrix missing proposed minimum-version evidence for {platform}")
+        for platform, browser_family, cache_state, version_status in missing:
+            version_label = "minimum" if version_status == "yes" else "current"
+            errors.append(
+                f"mobile matrix missing {platform} / {browser_family} / {cache_state} / {version_label}"
+            )
+        required_browsers = {
+            (platform, browser_family)
+            for platform, browser_families in REQUIRED_BROWSER_MATRIX.items()
+            for browser_family in browser_families
+        }
+        present_browsers = {(key[4], key[7]) for key in groups}
+        for platform, browser_family in sorted(required_browsers - present_browsers):
+            errors.append(f"mobile matrix missing browser evidence for {platform} / {browser_family}")
         errors.extend(acceptance_errors(groups))
 
     if errors:

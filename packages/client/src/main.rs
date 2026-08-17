@@ -6,7 +6,7 @@ use bevy::{
     camera::{OrthographicProjection, Projection, ScalingMode},
     color::palettes::css::{BLACK, WHITE},
     prelude::*,
-    window::{PresentMode, WindowResolution},
+    window::{PresentMode, WindowFocused, WindowResolution},
 };
 
 const DESIGN_SIZE: Vec2 = Vec2::new(1280.0, 720.0);
@@ -18,6 +18,7 @@ const POWER_BAR_HEIGHT: f32 = 300.0;
 const POWER_ZONE_START: f32 = 0.82;
 const MIN_POWER: f32 = 0.05;
 const DEFAULT_POWER: f32 = 0.55;
+const MINIMUM_VIEWPORT_WIDTH: f32 = 1.0;
 
 #[derive(Component)]
 struct Cue;
@@ -39,6 +40,18 @@ struct PrototypeInput {
     aim_angle: f32,
     power: f32,
     active_touch: Option<u64>,
+    touch_rearm_blocked: bool,
+}
+
+impl PrototypeInput {
+    const fn release_active_touch(&mut self, another_touch_is_pressed: bool) {
+        self.active_touch = None;
+        self.touch_rearm_blocked = another_touch_is_pressed;
+    }
+
+    const fn rearm_touch_input(&mut self) {
+        self.touch_rearm_blocked = false;
+    }
 }
 
 impl Default for PrototypeInput {
@@ -47,6 +60,7 @@ impl Default for PrototypeInput {
             aim_angle: 0.25,
             power: DEFAULT_POWER,
             active_touch: None,
+            touch_rearm_blocked: false,
         }
     }
 }
@@ -90,7 +104,17 @@ fn main() {
             ..default()
         }))
         .add_systems(Startup, setup)
-        .add_systems(Update, (update_input, update_aim, update_orientation))
+        .add_systems(
+            Update,
+            (
+                cancel_input_on_focus_loss,
+                update_orientation,
+                rearm_input_after_valid_landscape,
+                update_input,
+                update_aim,
+            )
+                .chain(),
+        )
         .run();
 }
 
@@ -263,12 +287,21 @@ fn spawn_rack(commands: &mut Commands) {
     }
 }
 
-fn input_position(window: &Window, touches: &Touches, input: &mut PrototypeInput) -> Option<Vec2> {
+fn input_position(
+    window: &Window,
+    mouse_is_pressed: bool,
+    touches: &Touches,
+    input: &mut PrototypeInput,
+) -> Option<Vec2> {
     if let Some(id) = input.active_touch {
         if let Some(touch) = touches.get_pressed(id) {
             return Some(touch.position());
         }
-        input.active_touch = None;
+        input.release_active_touch(touches.iter().next().is_some() || mouse_is_pressed);
+    }
+
+    if input.touch_rearm_blocked {
+        return None;
     }
 
     if let Some(touch) = touches.iter().next() {
@@ -276,7 +309,7 @@ fn input_position(window: &Window, touches: &Touches, input: &mut PrototypeInput
         return Some(touch.position());
     }
 
-    window.cursor_position()
+    mouse_is_pressed.then(|| window.cursor_position()).flatten()
 }
 
 fn update_from_pointer(input: &mut PrototypeInput, cursor: Vec2, window_size: Vec2) {
@@ -295,18 +328,29 @@ fn update_from_pointer(input: &mut PrototypeInput, cursor: Vec2, window_size: Ve
 }
 
 #[allow(clippy::needless_pass_by_value)]
+fn cancel_input_on_focus_loss(
+    mut focus_events: MessageReader<WindowFocused>,
+    mut input: ResMut<PrototypeInput>,
+) {
+    if focus_events.read().any(|event| !event.focused) {
+        input.release_active_touch(true);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
 fn update_input(
     window: Single<&Window>,
     mouse: Res<ButtonInput<MouseButton>>,
     touches: Res<Touches>,
     mut input: ResMut<PrototypeInput>,
 ) {
-    if !mouse.pressed(MouseButton::Left) && touches.iter().next().is_none() {
+    let mouse_is_pressed = mouse.pressed(MouseButton::Left);
+    if !mouse_is_pressed && touches.iter().next().is_none() {
         input.active_touch = None;
         return;
     }
 
-    let Some(cursor) = input_position(&window, &touches, &mut input) else {
+    let Some(cursor) = input_position(&window, mouse_is_pressed, &touches, &mut input) else {
         return;
     };
     update_from_pointer(
@@ -339,12 +383,47 @@ fn update_aim(
 fn update_orientation(
     window: Single<&Window>,
     mut notice: Single<&mut Node, With<OrientationNotice>>,
+    mut input: ResMut<PrototypeInput>,
 ) {
-    notice.display = if window.width() < window.height() {
+    let is_portrait = window.width() < window.height();
+    notice.display = if is_portrait {
         Display::Flex
     } else {
         Display::None
     };
+    if is_portrait || window.width() < MINIMUM_VIEWPORT_WIDTH {
+        input.release_active_touch(true);
+    }
+}
+
+fn should_rearm_input(
+    window_size: Vec2,
+    window_is_focused: bool,
+    mouse_is_pressed: bool,
+    touch_is_pressed: bool,
+) -> bool {
+    window_is_focused
+        && window_size.x >= window_size.y
+        && window_size.x >= MINIMUM_VIEWPORT_WIDTH
+        && !mouse_is_pressed
+        && !touch_is_pressed
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn rearm_input_after_valid_landscape(
+    window: Single<&Window>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    touches: Res<Touches>,
+    mut input: ResMut<PrototypeInput>,
+) {
+    if should_rearm_input(
+        Vec2::new(window.width(), window.height()),
+        window.focused,
+        mouse.pressed(MouseButton::Left),
+        touches.iter().next().is_some(),
+    ) {
+        input.rearm_touch_input();
+    }
 }
 
 #[cfg(test)]
@@ -360,6 +439,79 @@ mod tests {
         assert!((pockets[2].x - pockets[5].x).abs() < f32::EPSILON);
         assert!(pockets[..3].iter().all(|pocket| pocket.y < 0.0));
         assert!(pockets[3..].iter().all(|pocket| pocket.y > 0.0));
+    }
+
+    #[test]
+    fn released_touch_requires_all_contacts_to_lift_before_rearming() {
+        let mut input = PrototypeInput {
+            active_touch: Some(7),
+            ..PrototypeInput::default()
+        };
+
+        input.release_active_touch(true);
+        assert!(input.active_touch.is_none());
+        assert!(input.touch_rearm_blocked);
+
+        input.rearm_touch_input();
+        assert!(!input.touch_rearm_blocked);
+    }
+
+    #[test]
+    fn portrait_cancellation_stays_blocked_until_landscape_rearm() {
+        assert!(!should_rearm_input(
+            Vec2::new(500.0, 900.0),
+            true,
+            false,
+            false
+        ));
+        assert!(!should_rearm_input(
+            Vec2::new(900.0, 500.0),
+            false,
+            false,
+            false
+        ));
+        assert!(!should_rearm_input(
+            Vec2::new(900.0, 500.0),
+            true,
+            true,
+            false
+        ));
+        assert!(!should_rearm_input(
+            Vec2::new(900.0, 500.0),
+            true,
+            false,
+            true
+        ));
+        assert!(should_rearm_input(
+            Vec2::new(900.0, 500.0),
+            true,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn rearm_block_does_not_clear_without_explicit_release() {
+        let mut input = PrototypeInput {
+            touch_rearm_blocked: true,
+            ..PrototypeInput::default()
+        };
+
+        assert!(input.touch_rearm_blocked);
+        input.rearm_touch_input();
+        assert!(!input.touch_rearm_blocked);
+    }
+
+    #[test]
+    fn mouse_cannot_take_over_until_touch_release_barrier_clears() {
+        let mut input = PrototypeInput {
+            active_touch: Some(7),
+            ..PrototypeInput::default()
+        };
+
+        input.release_active_touch(true);
+        assert!(input.active_touch.is_none());
+        assert!(input.touch_rearm_blocked);
     }
 
     #[test]

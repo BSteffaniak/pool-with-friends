@@ -11,7 +11,12 @@ import sys
 from pathlib import Path
 
 output = Path(sys.argv[1])
-platforms = ("iphone", "ipad", "android-phone", "android-tablet")
+platforms = {
+    "iphone": ("safari",),
+    "ipad": ("safari",),
+    "android-phone": ("chrome", "firefox", "samsung-internet"),
+    "android-tablet": ("chrome",),
+}
 cache_states = ("cold", "warm", "lifecycle")
 checks = {
     "first_load": "pass",
@@ -28,63 +33,78 @@ checks = {
     "thermal": "pass",
 }
 
-for platform in platforms:
-    for cache_state in cache_states:
-        for run_number in range(1, 4):
-            lifecycle = cache_state == "lifecycle"
-            report = {
-                "schema_version": 1,
-                "candidate": {"bevy": "0.19.1", "renderer": "WebGL2"},
-                "test": {
-                    "platform": platform,
-                    "hardware_model": f"fixture-{platform}",
-                    "os_version": "fixture-os",
-                    "browser_version": "fixture-browser",
-                    "cache_state": cache_state,
-                    "minimum_version_run": "yes" if cache_state == "lifecycle" else "no",
-                    "presentation_tier": "default",
-                    "run_number": run_number,
-                },
-                "physical_checks": checks,
-                "external_observations": {
-                    "first_visible_table_ms": 4_000 if cache_state == "cold" else 1_500,
-                    "first_accepted_input_ms": 4_200 if cache_state == "cold" else 1_700,
-                    "steady_memory_mib": 120,
-                    "peak_memory_mib": 180,
-                    "thermal_result": "no-warning",
-                    "reload_or_eviction_observed": "no",
-                },
-                "browser": {},
-                "display": {},
-                "timing_ms": {
-                    "client_ready": 1_000,
-                    "first_canvas_contact": 1_200,
-                    "capture_duration": 610_000 if lifecycle else 65_000,
-                },
-                "performance": {
-                    "minimum_one_second_fps": 58,
-                    "p95_frame_time_ms": 18,
-                },
-                "interaction": {
-                    "visibility_changes": 4 if lifecycle else 0,
-                    "orientation_changes": 2 if lifecycle else 0,
-                },
-                "audio": {
-                    "state": "running",
-                    "muted": False,
-                    "gestureStarts": 2,
-                    "backgroundSuspensions": 1 if lifecycle else 0,
-                    "explicitResumes": 1 if lifecycle else 0,
-                },
-            }
-            path = output / f"{platform}-{cache_state}-{run_number}.json"
-            path.write_text(json.dumps(report), encoding="utf-8")
+for platform, browser_families in platforms.items():
+    for browser_family in browser_families:
+        for cache_state in cache_states:
+            for minimum_version_run in ("no", "yes"):
+                for run_number in range(1, 4):
+                    lifecycle = cache_state == "lifecycle"
+                    report = {
+                        "schema_version": 1,
+                        "captured_at": "2026-08-17T00:00:00Z",
+                        "candidate": {
+                            "build_id": "fixture-build",
+                            "source_hash": "0" * 64,
+                            "bevy": "0.19.1",
+                            "renderer": "WebGL2",
+                        },
+                        "test": {
+                            "platform": platform,
+                            "hardware_model": f"fixture-{platform}",
+                            "os_version": "fixture-os",
+                            "browser_family": browser_family,
+                            "browser_version": "fixture-browser",
+                            "cache_state": cache_state,
+                            "minimum_version_run": minimum_version_run,
+                            "presentation_tier": "default",
+                            "run_number": run_number,
+                        },
+                        "physical_checks": checks,
+                        "external_observations": {
+                            "first_visible_table_ms": 4_000 if cache_state == "cold" else 1_500,
+                            "first_accepted_input_ms": 4_200 if cache_state == "cold" else 1_700,
+                            "steady_memory_mib": 120,
+                            "peak_memory_mib": 180,
+                            "thermal_result": "no-warning",
+                            "reload_or_eviction_observed": "no",
+                        },
+                        "browser": {},
+                        "display": {},
+                        "timing_ms": {
+                            "client_ready": 1_000,
+                            "first_canvas_contact": 1_200,
+                            "capture_duration": 610_000 if lifecycle else 65_000,
+                        },
+                        "performance": {
+                            "minimum_one_second_fps": 58,
+                            "p95_frame_time_ms": 18,
+                        },
+                        "interaction": {
+                            "visibility_changes": 4 if lifecycle else 0,
+                            "orientation_changes": 2 if lifecycle else 0,
+                            "page_hide_count": 2 if lifecycle else 0,
+                            "page_show_count": 2 if lifecycle else 1,
+                            "restored_from_page_cache": False,
+                        },
+                        "audio": {
+                            "state": "running",
+                            "muted": False,
+                            "gestureStarts": 2,
+                            "backgroundSuspensions": 1 if lifecycle else 0,
+                            "explicitResumes": 1 if lifecycle else 0,
+                        },
+                    }
+                    version_label = "minimum" if minimum_version_run == "yes" else "current"
+                    path = output / (
+                        f"{platform}-{browser_family}-{cache_state}-{version_label}-{run_number}.json"
+                    )
+                    path.write_text(json.dumps(report), encoding="utf-8")
 PY
 
 reports="$tmp"/*.json
 "$root/scripts/summarize-feasibility.py" --require-mobile-matrix $reports >"$tmp/summary.md"
-grep -q '| iphone / fixture-iphone |' "$tmp/summary.md"
-grep -q '| android-tablet / fixture-android-tablet |' "$tmp/summary.md"
+grep -q '| iphone / fixture-iphone / fixture-buil / Bevy 0.19.1 WebGL2 |' "$tmp/summary.md"
+grep -q '| android-tablet / fixture-android-tablet / fixture-buil / Bevy 0.19.1 WebGL2 |' "$tmp/summary.md"
 
 expect_rejected() {
     label=$1
@@ -103,7 +123,7 @@ if "$root/scripts/summarize-feasibility.py" --allow-incomplete --require-mobile-
 fi
 grep -q 'cannot be combined' "$tmp/rejected.err"
 
-python3 - "$tmp/iphone-cold-1.json" <<'PY'
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -116,7 +136,21 @@ PY
 expect_rejected "a missing required physical check" $reports
 grep -q 'missing audio' "$tmp/rejected.err"
 
-python3 - "$tmp/iphone-cold-1.json" "$tmp/iphone-lifecycle-1.json" "$tmp/iphone-lifecycle-2.json" "$tmp/iphone-lifecycle-3.json" <<'PY'
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["physical_checks"]["audio"] = "pass"
+report["candidate"]["source_hash"] = "not-a-hash"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "an invalid candidate source hash" $reports
+grep -q 'invalid candidate.source_hash' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" "$tmp/iphone-safari-lifecycle-minimum-1.json" "$tmp/iphone-safari-lifecycle-minimum-2.json" "$tmp/iphone-safari-lifecycle-minimum-3.json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -124,6 +158,7 @@ from pathlib import Path
 check_path = Path(sys.argv[1])
 check_report = json.loads(check_path.read_text(encoding="utf-8"))
 check_report["physical_checks"]["audio"] = "pass"
+check_report["candidate"]["source_hash"] = "0" * 64
 check_path.write_text(json.dumps(check_report), encoding="utf-8")
 
 for value in sys.argv[2:]:
@@ -133,9 +168,9 @@ for value in sys.argv[2:]:
     path.write_text(json.dumps(report), encoding="utf-8")
 PY
 expect_rejected "missing minimum-version evidence" $reports
-grep -q 'missing proposed minimum-version evidence for iphone' "$tmp/rejected.err"
+grep -q 'mobile matrix missing iphone / safari / lifecycle / minimum' "$tmp/rejected.err"
 
-python3 - "$tmp/iphone-lifecycle-1.json" "$tmp/iphone-lifecycle-2.json" "$tmp/iphone-lifecycle-3.json" <<'PY'
+python3 - "$tmp/iphone-safari-lifecycle-minimum-1.json" "$tmp/iphone-safari-lifecycle-minimum-2.json" "$tmp/iphone-safari-lifecycle-minimum-3.json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -147,7 +182,7 @@ for value in sys.argv[1:]:
     path.write_text(json.dumps(report), encoding="utf-8")
 PY
 
-python3 - "$tmp/android-tablet-cold-1.json" <<'PY'
+python3 - "$tmp/android-tablet-chrome-cold-current-1.json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -161,7 +196,7 @@ expect_rejected "sub-floor frame rate" $reports
 grep -q 'below 30' "$tmp/rejected.err"
 
 # Restore the passing fixture before testing independent rejection paths.
-python3 - "$tmp/android-tablet-cold-1.json" <<'PY'
+python3 - "$tmp/android-tablet-chrome-cold-current-1.json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -172,7 +207,7 @@ report["performance"]["minimum_one_second_fps"] = 58
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
 
-python3 - "$tmp/iphone-warm-1.json" <<'PY'
+python3 - "$tmp/iphone-safari-warm-current-1.json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -185,7 +220,7 @@ PY
 expect_rejected "warm startup over budget" $reports
 grep -q 'exceeds 3000ms' "$tmp/rejected.err"
 
-python3 - "$tmp/iphone-warm-1.json" "$tmp/ipad-lifecycle-1.json" <<'PY'
+python3 - "$tmp/iphone-safari-warm-current-1.json" "$tmp/ipad-safari-lifecycle-current-1.json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -203,7 +238,7 @@ PY
 expect_rejected "short lifecycle capture" $reports
 grep -q 'shorter than 10 minutes' "$tmp/rejected.err"
 
-python3 - "$tmp/ipad-lifecycle-1.json" "$tmp/android-phone-lifecycle-1.json" <<'PY'
+python3 - "$tmp/ipad-safari-lifecycle-current-1.json" "$tmp/android-phone-chrome-lifecycle-current-1.json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -221,7 +256,7 @@ PY
 expect_rejected "missing explicit audio resume" $reports
 grep -q 'explicit audio resume was not observed' "$tmp/rejected.err"
 
-python3 - "$tmp/android-phone-lifecycle-1.json" "$tmp/android-tablet-warm-1.json" <<'PY'
+python3 - "$tmp/android-phone-chrome-lifecycle-current-1.json" "$tmp/android-tablet-chrome-warm-current-1.json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -239,7 +274,7 @@ PY
 expect_rejected "incomplete pre/post-mute playback" $reports
 grep -q 'pre/post-mute playback' "$tmp/rejected.err"
 
-python3 - "$tmp/android-tablet-warm-1.json" "$tmp/iphone-cold-1.json" <<'PY'
+python3 - "$tmp/android-tablet-chrome-warm-current-1.json" "$tmp/iphone-safari-cold-current-1.json" <<'PY'
 import json
 import sys
 from pathlib import Path
