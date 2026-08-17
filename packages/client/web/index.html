@@ -9,16 +9,37 @@
   </head>
   <body>
     <main id="game-shell" aria-label="Pool with More Than Friends">
-      <canvas id="pwmtf-canvas"></canvas>
+      <canvas id="pwmtf-canvas" tabindex="0"></canvas>
       <section id="rotate-device" role="status" aria-live="polite">
         <strong>Rotate your device</strong>
         <span>Pool with More Than Friends plays in landscape.</span>
       </section>
       <section id="loading" role="status" aria-live="polite">Loading the table…</section>
+      <section id="load-error" role="alert" hidden>
+        <strong>The table could not load</strong>
+        <span>Reload this page. If the problem continues, update your browser or enable WebGL 2.</span>
+        <button type="button">Reload</button>
+      </section>
     </main>
     <script type="module">
-      import init from "./pwmtf_client.js";
-      init().then(() => document.querySelector("#loading")?.remove());
+      const loading = document.querySelector("#loading");
+      const loadError = document.querySelector("#load-error");
+      const reload = loadError.querySelector("button");
+      reload.addEventListener("click", () => window.location.reload());
+
+      try {
+        if (!document.createElement("canvas").getContext("webgl2")) {
+          throw new Error("WebGL 2 is unavailable");
+        }
+        const { default: init } = await import("./pwmtf_client.js");
+        await init();
+        loading.remove();
+        document.querySelector("#pwmtf-canvas").focus({ preventScroll: true });
+      } catch (error) {
+        console.error("PWMTF client startup failed", error);
+        loading.remove();
+        loadError.hidden = false;
+      }
     </script>
   </body>
 </html>

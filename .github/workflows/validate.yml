@@ -23,13 +23,14 @@ jobs:
       - name: Install validation tools
         uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60
         with:
-          tool: cargo-deny,cargo-nextest@0.9.114,cargo-machete@0.8.0
+          tool: cargo-deny,cargo-nextest@0.9.114,cargo-machete@0.8.0,wasm-bindgen-cli@0.2.127
       - run: cargo fmt --check
       - run: cargo check --workspace --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo nextest run --workspace --no-fail-fast
       - run: cargo machete --with-metadata
       - run: cargo deny check
+      - run: ./scripts/build-wasm.sh
       - run: ./scripts/check-architecture.sh
       - run: ./scripts/test-architecture-checks.sh
 

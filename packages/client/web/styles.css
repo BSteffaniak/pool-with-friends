@@ -23,13 +23,17 @@ body {
   position: fixed;
   inset: 0;
   overflow: hidden;
-  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
-    env(safe-area-inset-left);
   background: radial-gradient(circle at top, #173a2d, #08130f 70%);
 }
 
 #game-shell {
-  position: relative;
+  position: absolute;
+  inset: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
+  width: auto;
+  height: auto;
+  min-width: 0;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -40,32 +44,55 @@ body {
 }
 
 #loading,
+#load-error,
 #rotate-device {
   position: absolute;
   inset: 0;
   display: grid;
   place-content: center;
-  gap: 0.5rem;
+  justify-items: center;
+  gap: 0.75rem;
   padding: 2rem;
   text-align: center;
   background: #08130f;
 }
 
+#loading,
+#load-error {
+  z-index: 3;
+}
+
+#load-error[hidden],
 #rotate-device {
-  z-index: 2;
   display: none;
 }
 
+#load-error strong,
 #rotate-device strong {
   font-size: clamp(1.5rem, 7vw, 3rem);
 }
 
+#load-error span,
 #rotate-device span {
+  max-width: 34rem;
   color: #b8c9c0;
+}
+
+#load-error button {
+  min-width: 8rem;
+  min-height: 3rem;
+  margin-top: 0.5rem;
+  border: 0;
+  border-radius: 0.5rem;
+  color: #08130f;
+  background: #e5c676;
+  font: inherit;
+  font-weight: 700;
 }
 
 @media (orientation: portrait) {
   #rotate-device {
+    z-index: 2;
     display: grid;
   }
 }

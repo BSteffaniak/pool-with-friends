@@ -25,6 +25,41 @@
           overlays = [ (import rust-overlay) ];
         };
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        wasmBindgenTarget =
+          {
+            "aarch64-darwin" = {
+              archive = "aarch64-apple-darwin";
+              hash = "sha256-zZPmketZU6zl2P/OUqILAkB3o9rD4iFbgiQTaw77dYU=";
+            };
+            "aarch64-linux" = {
+              archive = "aarch64-unknown-linux-musl";
+              hash = "sha256-aZ3btyTs4W+RK3Opi1NBp19LjHiGzhUtQNvgn2lORsc=";
+            };
+            "x86_64-darwin" = {
+              archive = "x86_64-apple-darwin";
+              hash = "sha256-gQScefTig+FyXmWCoFKK8TAacK0jrdHfHE0ELsglJj0=";
+            };
+            "x86_64-linux" = {
+              archive = "x86_64-unknown-linux-musl";
+              hash = "sha256-YdSn3IWs+g0jVMzAuDYZKMflKnRtF/KOuqeV7T3BYUo=";
+            };
+          }
+          .${system};
+        wasmBindgenCli = pkgs.stdenvNoCC.mkDerivation {
+          pname = "wasm-bindgen-cli";
+          version = "0.2.127";
+          src = pkgs.fetchurl {
+            url = "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.127/wasm-bindgen-0.2.127-${wasmBindgenTarget.archive}.tar.gz";
+            inherit (wasmBindgenTarget) hash;
+          };
+          sourceRoot = ".";
+          installPhase = ''
+            runHook preInstall
+            mkdir -p "$out/bin"
+            cp wasm-bindgen-0.2.127-${wasmBindgenTarget.archive}/{wasm-bindgen,wasm-bindgen-test-runner,wasm2es6js} "$out/bin/"
+            runHook postInstall
+          '';
+        };
       in
       {
         devShells.default = pkgs.mkShell {
@@ -36,6 +71,7 @@
             cargo-nextest
             llvmPackages.bintools
             pkg-config
+            wasmBindgenCli
           ];
 
           shellHook = ''
@@ -45,6 +81,7 @@
             echo "  $(cargo nextest --version)"
             echo "  $(cargo machete --version)"
             echo "  $(cargo deny --version)"
+            echo "  $(wasm-bindgen --version)"
 
             if [ -z "$IN_NIX_SHELL_FISH" ] && [ -z "$BASH_EXECUTION_STRING" ]; then
               case "$-" in

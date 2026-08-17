@@ -29,10 +29,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace --no-fail-fast
 cargo machete --with-metadata
 cargo deny check
-- `./scripts/check-native.sh`
-- `./scripts/check-wasm.sh`
-- `./scripts/check-architecture.sh`
-- `./scripts/test-architecture-checks.sh`
+./scripts/check-native.sh
+./scripts/check-wasm.sh
+./scripts/build-wasm.sh
+./scripts/test-browser-smoke.sh
+./scripts/check-architecture.sh
+./scripts/test-architecture-checks.sh
 ```
 
 With Nix:

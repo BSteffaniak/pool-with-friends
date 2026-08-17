@@ -3,15 +3,21 @@
 #![allow(clippy::multiple_crate_versions)]
 
 use bevy::{
+    camera::{OrthographicProjection, Projection, ScalingMode},
     color::palettes::css::{BLACK, WHITE},
     prelude::*,
     window::{PresentMode, WindowResolution},
 };
 
+const DESIGN_SIZE: Vec2 = Vec2::new(1280.0, 720.0);
+const TABLE_CENTER_X: f32 = -55.0;
 const TABLE_SIZE: Vec2 = Vec2::new(960.0, 480.0);
 const CUSHION: f32 = 34.0;
 const BALL_RADIUS: f32 = 13.0;
 const POWER_BAR_HEIGHT: f32 = 300.0;
+const POWER_ZONE_START: f32 = 0.82;
+const MIN_POWER: f32 = 0.05;
+const DEFAULT_POWER: f32 = 0.55;
 
 #[derive(Component)]
 struct Cue;
@@ -29,15 +35,15 @@ struct OrientationNotice;
 struct PrototypeInput {
     aim_angle: f32,
     power: f32,
-    dragging: bool,
+    active_touch: Option<u64>,
 }
 
 impl Default for PrototypeInput {
     fn default() -> Self {
         Self {
             aim_angle: 0.25,
-            power: 0.55,
-            dragging: false,
+            power: DEFAULT_POWER,
+            active_touch: None,
         }
     }
 }
@@ -65,7 +71,16 @@ fn main() {
 }
 
 fn setup(mut commands: Commands) {
-    commands.spawn(Camera2d);
+    commands.spawn((
+        Camera2d,
+        Projection::Orthographic(OrthographicProjection {
+            scaling_mode: ScalingMode::AutoMin {
+                min_width: DESIGN_SIZE.x,
+                min_height: DESIGN_SIZE.y,
+            },
+            ..OrthographicProjection::default_2d()
+        }),
+    ));
 
     spawn_rectangle(
         &mut commands,
@@ -74,13 +89,13 @@ fn setup(mut commands: Commands) {
             CUSHION.mul_add(2.0, TABLE_SIZE.y),
         ),
         Color::srgb(0.20, 0.075, 0.025),
-        Vec3::new(-55.0, 0.0, 0.0),
+        Vec3::new(TABLE_CENTER_X, 0.0, 0.0),
     );
     spawn_rectangle(
         &mut commands,
         TABLE_SIZE,
         Color::srgb(0.025, 0.38, 0.21),
-        Vec3::new(-55.0, 0.0, 1.0),
+        Vec3::new(TABLE_CENTER_X, 0.0, 1.0),
     );
 
     for pocket in pocket_positions() {
@@ -116,9 +131,9 @@ fn setup(mut commands: Commands) {
     commands.spawn((
         Sprite::from_color(
             Color::srgb(0.94, 0.58, 0.10),
-            Vec2::new(30.0, POWER_BAR_HEIGHT * 0.55),
+            Vec2::new(30.0, POWER_BAR_HEIGHT * DEFAULT_POWER),
         ),
-        Transform::from_xyz(565.0, -POWER_BAR_HEIGHT * 0.225, 6.0),
+        Transform::from_xyz(565.0, POWER_BAR_HEIGHT * (DEFAULT_POWER - 1.0) / 2.0, 6.0),
         PowerFill,
     ));
 
@@ -134,7 +149,7 @@ fn setup(mut commands: Commands) {
         },
     ));
     commands.spawn((
-        Text::new("Drag or move the pointer to aim · drag vertically at the right edge for power"),
+        Text::new("Aim by dragging · drag vertically at the right edge for power"),
         TextFont::from_font_size(17.0),
         TextColor(Color::srgb(0.76, 0.82, 0.78)),
         Node {
@@ -173,12 +188,12 @@ fn spawn_rectangle(commands: &mut Commands, size: Vec2, color: Color, translatio
 fn pocket_positions() -> [Vec2; 6] {
     let half = TABLE_SIZE / 2.0;
     [
-        Vec2::new(-half.x - 55.0, -half.y),
-        Vec2::new(-55.0, -half.y),
-        Vec2::new(half.x - 55.0, -half.y),
-        Vec2::new(-half.x - 55.0, half.y),
-        Vec2::new(-55.0, half.y),
-        Vec2::new(half.x - 55.0, half.y),
+        Vec2::new(TABLE_CENTER_X - half.x, -half.y),
+        Vec2::new(TABLE_CENTER_X, -half.y),
+        Vec2::new(TABLE_CENTER_X + half.x, -half.y),
+        Vec2::new(TABLE_CENTER_X - half.x, half.y),
+        Vec2::new(TABLE_CENTER_X, half.y),
+        Vec2::new(TABLE_CENTER_X + half.x, half.y),
     ]
 }
 
@@ -217,6 +232,37 @@ fn spawn_rack(commands: &mut Commands) {
     }
 }
 
+fn input_position(window: &Window, touches: &Touches, input: &mut PrototypeInput) -> Option<Vec2> {
+    if let Some(id) = input.active_touch {
+        if let Some(touch) = touches.get_pressed(id) {
+            return Some(touch.position());
+        }
+        input.active_touch = None;
+    }
+
+    if let Some(touch) = touches.iter().next() {
+        input.active_touch = Some(touch.id());
+        return Some(touch.position());
+    }
+
+    window.cursor_position()
+}
+
+fn update_from_pointer(input: &mut PrototypeInput, cursor: Vec2, window_size: Vec2) {
+    if window_size.min_element() <= 0.0 {
+        return;
+    }
+
+    if cursor.x > window_size.x * POWER_ZONE_START {
+        input.power = (1.0 - cursor.y / window_size.y).clamp(MIN_POWER, 1.0);
+    } else {
+        let centered = cursor - window_size / 2.0;
+        if centered.length_squared() > 16.0 {
+            input.aim_angle = (-centered.y).atan2(centered.x);
+        }
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn update_input(
     window: Single<&Window>,
@@ -224,19 +270,19 @@ fn update_input(
     touches: Res<Touches>,
     mut input: ResMut<PrototypeInput>,
 ) {
-    input.dragging = mouse.pressed(MouseButton::Left) || touches.iter().next().is_some();
-    let pointer = touches
-        .first_pressed_position()
-        .or_else(|| window.cursor_position());
-    let Some(cursor) = pointer else {
+    if !mouse.pressed(MouseButton::Left) && touches.iter().next().is_none() {
+        input.active_touch = None;
+        return;
+    }
+
+    let Some(cursor) = input_position(&window, &touches, &mut input) else {
         return;
     };
-    let centered = cursor - Vec2::new(window.width(), window.height()) / 2.0;
-    if cursor.x > window.width() * 0.82 {
-        input.power = (1.0 - cursor.y / window.height()).clamp(0.05, 1.0);
-    } else if centered.length_squared() > 16.0 {
-        input.aim_angle = (-centered.y).atan2(centered.x);
-    }
+    update_from_pointer(
+        &mut input,
+        cursor,
+        Vec2::new(window.width(), window.height()),
+    );
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -283,5 +329,29 @@ mod tests {
         assert!((pockets[2].x - pockets[5].x).abs() < f32::EPSILON);
         assert!(pockets[..3].iter().all(|pocket| pocket.y < 0.0));
         assert!(pockets[3..].iter().all(|pocket| pocket.y > 0.0));
+    }
+
+    #[test]
+    fn power_pointer_is_clamped_to_supported_range() {
+        let mut input = PrototypeInput::default();
+        let size = Vec2::new(1_000.0, 500.0);
+
+        update_from_pointer(&mut input, Vec2::new(900.0, -100.0), size);
+        assert!((input.power - 1.0).abs() < f32::EPSILON);
+
+        update_from_pointer(&mut input, Vec2::new(900.0, 1_000.0), size);
+        assert!((input.power - MIN_POWER).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn aim_pointer_maps_window_coordinates_to_world_angle() {
+        let mut input = PrototypeInput::default();
+        let size = Vec2::new(1_000.0, 500.0);
+
+        update_from_pointer(&mut input, Vec2::new(750.0, 250.0), size);
+        assert!(input.aim_angle.abs() < f32::EPSILON);
+
+        update_from_pointer(&mut input, Vec2::new(500.0, 125.0), size);
+        assert!((input.aim_angle - std::f32::consts::FRAC_PI_2).abs() < f32::EPSILON);
     }
 }

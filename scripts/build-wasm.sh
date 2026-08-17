@@ -20,4 +20,19 @@ wasm-bindgen \
     --out-name pwmtf_client \
     target/wasm32-unknown-unknown/release/pwmtf-client.wasm
 
+if command -v wasm-opt >/dev/null 2>&1; then
+    optimized="$root/dist/pwmtf_client_bg.optimized.wasm"
+    wasm-opt \
+        -Oz \
+        --enable-bulk-memory \
+        --enable-multivalue \
+        --enable-mutable-globals \
+        --enable-nontrapping-float-to-int \
+        --enable-reference-types \
+        --enable-sign-ext \
+        "$root/dist/pwmtf_client_bg.wasm" \
+        -o "$optimized"
+    mv "$optimized" "$root/dist/pwmtf_client_bg.wasm"
+fi
+
 printf '%s\n' "PWMTF web client built in $root/dist"
