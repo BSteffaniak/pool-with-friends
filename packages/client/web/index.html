@@ -22,11 +22,97 @@
       </section>
       <aside id="feasibility-tools" hidden>
         <strong>Feasibility capture</strong>
+        <fieldset>
+          <legend>Test device</legend>
+          <label>
+            Platform
+            <select id="test-platform" required>
+              <option value="">Select…</option>
+              <option value="iphone">iPhone</option>
+              <option value="ipad">iPad</option>
+              <option value="android-phone">Android phone</option>
+              <option value="android-tablet">Android tablet</option>
+              <option value="desktop">Desktop compatibility</option>
+            </select>
+          </label>
+          <label>
+            Hardware model
+            <input id="hardware-model" type="text" maxlength="80" autocomplete="off" placeholder="e.g. iPhone 15" required />
+          </label>
+          <label>
+            OS version
+            <input id="os-version" type="text" maxlength="40" autocomplete="off" placeholder="e.g. iOS 19.0" required />
+          </label>
+          <label>
+            Browser version
+            <input id="browser-version" type="text" maxlength="60" autocomplete="off" placeholder="e.g. Safari 19.0" required />
+          </label>
+          <label>
+            Cache state
+            <select id="cache-state" required>
+              <option value="">Select…</option>
+              <option value="cold">Cold</option>
+              <option value="warm">Warm</option>
+              <option value="lifecycle">Lifecycle/soak</option>
+            </select>
+          </label>
+          <label>
+            Presentation tier
+            <select id="presentation-tier" required>
+              <option value="">Select…</option>
+              <option value="default">Default</option>
+              <option value="reduced">Reduced fallback</option>
+            </select>
+          </label>
+          <label>
+            Run number
+            <input id="run-number" type="number" min="1" max="99" inputmode="numeric" required />
+          </label>
+        </fieldset>
+        <fieldset id="physical-checks">
+          <legend>Physical checks (record Pass or Fail before export)</legend>
+        </fieldset>
+        <fieldset>
+          <legend>External observations</legend>
+          <label>
+            First visible table (ms)
+            <input id="first-visible-ms" type="number" min="0" step="0.1" inputmode="decimal" required />
+          </label>
+          <label>
+            First accepted input (ms)
+            <input id="first-input-ms" type="number" min="0" step="0.1" inputmode="decimal" required />
+          </label>
+          <label>
+            Steady memory after 60 s (MiB)
+            <input id="steady-memory-mib" type="number" min="0" step="0.1" inputmode="decimal" required />
+          </label>
+          <label>
+            Peak memory during load (MiB)
+            <input id="peak-memory-mib" type="number" min="0" step="0.1" inputmode="decimal" required />
+          </label>
+          <label>
+            Thermal result
+            <select id="thermal-result" required>
+              <option value="">Select…</option>
+              <option value="no-warning">No warning or severe throttling</option>
+              <option value="warning">Warning or severe throttling</option>
+            </select>
+          </label>
+          <label>
+            Reload/eviction observed
+            <select id="reload-observed" required>
+              <option value="">Select…</option>
+              <option value="no">No</option>
+              <option value="yes">Yes</option>
+            </select>
+          </label>
+        </fieldset>
         <output id="feasibility-metrics">Waiting for the client…</output>
         <div>
           <button id="capture-toggle" type="button">Start capture</button>
           <button id="audio-probe" type="button">Play audio probe</button>
           <button id="audio-mute" type="button" disabled>Mute</button>
+          <button id="mark-event" type="button">Mark event</button>
           <button id="download-report" type="button">Download report</button>
         </div>
       </aside>

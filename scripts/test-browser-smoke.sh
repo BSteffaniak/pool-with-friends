@@ -95,4 +95,37 @@ if ! grep -q 'id="pwmtf-canvas"' "$browser_log"; then
     exit 1
 fi
 
-printf '%s\n' "browser smoke test passed: $browser_name at 1280x720"
+"$chrome" \
+    --headless=new \
+    --disable-gpu-sandbox \
+    --enable-webgl \
+    --enable-unsafe-swiftshader \
+    --ignore-gpu-blocklist \
+    --no-first-run \
+    --no-default-browser-check \
+    --run-all-compositor-stages-before-draw \
+    --use-angle=swiftshader \
+    --virtual-time-budget=15000 \
+    --window-size=1280,720 \
+    --dump-dom \
+    "http://127.0.0.1:$port/?feasibility" >"$browser_log" 2>&1
+
+if ! grep -q 'data-client-state="ready"' "$browser_log"; then
+    cat "$browser_log" >&2
+    printf '%s\n' "feasibility client did not report its ready state" >&2
+    exit 1
+fi
+if grep -q 'id="feasibility-tools"[^>]*hidden' "$browser_log"; then
+    cat "$browser_log" >&2
+    printf '%s\n' "feasibility capture panel remained hidden" >&2
+    exit 1
+fi
+for control in test-platform hardware-model os-version browser-version cache-state presentation-tier run-number physical-checks first-visible-ms first-input-ms steady-memory-mib peak-memory-mib thermal-result reload-observed capture-toggle audio-probe mark-event download-report; do
+    if ! grep -q "id=\"$control\"" "$browser_log"; then
+        cat "$browser_log" >&2
+        printf '%s\n' "feasibility capture control missing: $control" >&2
+        exit 1
+    fi
+done
+
+printf '%s\n' "browser smoke test passed: $browser_name at 1280x720 (normal and feasibility entry points)"

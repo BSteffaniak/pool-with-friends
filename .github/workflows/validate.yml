@@ -31,6 +31,7 @@ jobs:
       - run: cargo machete --with-metadata
       - run: cargo deny check
       - run: ./scripts/build-wasm.sh
+      - run: ./scripts/test-feasibility-tools.sh
       - run: ./scripts/check-architecture.sh
       - run: ./scripts/test-architecture-checks.sh
 

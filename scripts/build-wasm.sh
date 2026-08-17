@@ -6,6 +6,7 @@ cd "$root"
 
 cargo build --package pwmtf_client --target wasm32-unknown-unknown --release
 mkdir -p dist
+find dist -mindepth 1 -maxdepth 1 -type f -delete
 cp packages/client/web/index.html packages/client/web/styles.css packages/client/web/bootstrap.js dist/
 wasm_schema=$(grep -m1 'name = "wasm-bindgen"' -A2 Cargo.lock | grep 'version = ' | cut -d'"' -f2)
 cli_schema=$(wasm-bindgen --version | awk '{print $2}')

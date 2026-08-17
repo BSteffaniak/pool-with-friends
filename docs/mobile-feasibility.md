@@ -10,7 +10,7 @@ This record defines the evidence required before PWMTF accepts Bevy as its produ
 - Release profile: optimized, symbols stripped; Binaryen `wasm-opt -Oz` when available
 - Browser shell: viewport safe areas, portrait overlay, startup progress, explicit WebGL2/load failure state, and an opt-in feasibility capture panel
 
-Open the built client with `?feasibility` to expose the capture panel. The normal product URL does not show it. The panel records browser/display metadata, startup and first-contact timings, one-second frame-rate windows, the largest frame gap, interaction/lifecycle counters, and JavaScript heap data where the browser exposes `performance.memory`. It exports a versioned JSON report for attachment to this record.
+Open the built client with `?feasibility` to expose the capture panel. The normal product URL does not show it. Before capture, the tester must identify the platform, hardware model, exact OS/browser versions, cache state, presentation tier, and run number; these fields are embedded in the report and its filename. Before export, every required observable physical check must be recorded as Pass or Fail, and platform-tool measurements for first-visible table, first accepted input, steady/peak memory, thermal status, and reload/eviction must be entered. This prevents missing evidence from appearing successful. The panel also records browser/display metadata, startup and first-contact approximations, one-second frame-rate windows, median/95th/99th-percentile/worst animation-frame intervals, interaction/lifecycle counters, operator-marked events, and JavaScript heap data where the browser exposes `performance.memory`. It exports a versioned JSON report for attachment to this record. Use **Mark event** for short non-sensitive annotations such as orientation changes, background/foreground boundaries, audio checks, visible throttling, or thermal warnings; never enter identity, credentials, tokens, or unrelated browser data.
 
 The panel also provides a generated Web Audio probe. It creates the audio context only from the probe button's user gesture, supports mute/unmute, deliberately suspends a running probe when the document becomes hidden, and requires a subsequent explicit button gesture to resume. The generated tone is measurement instrumentation, not shipped game audio.
 
@@ -26,11 +26,13 @@ Record the exact OS, browser version, hardware model, date, and result for each 
 | iPad | Safari | Pending | Pending |
 | Android phone | Chrome | Pending | Pending |
 | Android tablet | Chrome | Pending | Pending |
-| Desktop smoke | Chrome or Chromium | Google Chrome 151.0.7922.138; macOS 26.6.1; MacBook Air (M4); 2026-08-16 | Pass — automated WebGL2/SwiftShader shell load at 1280×720 reached the ready canvas |
+| Desktop smoke | Chrome or Chromium | Google Chrome 151.0.7922.138; macOS 26.6.1; MacBook Air (M4); 2026-08-16 | Pass — automated WebGL2/SwiftShader loads at 1280×720 reached the ready canvas on normal and `?feasibility` entry points; required capture controls were present |
 | Desktop compatibility | Safari | Pending | Pending |
 | Desktop compatibility | Firefox | Pending | Pending |
 
 Do not declare minimum browser versions until the physical rows pass and are recorded here.
+
+The desktop environment currently has no connected iOS or Android hardware and no Firefox installation, so those rows cannot be honestly completed from automation here. Safari 26.6 and its WebDriver are installed, but Safari rejects WebDriver sessions until the user enables **Allow remote automation** in Safari's Developer settings. After enabling it, run `./scripts/test-safari-smoke.sh` to exercise the same ready-state boundary in desktop Safari. The row remains pending until that succeeds; enabling a browser security setting automatically is intentionally not part of the script, and a driver session alone would not substitute for the required physical interaction and visual checks.
 
 ## Interaction and lifecycle checks
 
@@ -55,21 +57,22 @@ The current prototype has no shipped audio content. Its opt-in generated-tone pr
 
 Use an uncached production build served over HTTPS or a representative throttled local connection. Capture at least three runs per device and report the median plus the worst observed run.
 
-1. Build with `./scripts/build-wasm.sh` and record raw and gzip/Brotli transfer sizes for all generated assets.
-2. Serve `dist/` over HTTPS, open `/?feasibility`, and start a fresh capture after the table is visible.
+1. Run `./scripts/report-wasm-size.sh` and copy the raw and gzip totals into this record. The script also reports Brotli sizes when the `brotli` executable is available.
+2. Build and serve `dist/` over HTTPS, then open `/?feasibility`, enter the exact device/browser metadata, presentation tier, and run number, and start a fresh capture after the table is visible. `./scripts/serve-feasibility.sh` provides a local-network HTTPS server when given a device-trusted certificate; its exact environment variables are documented in `packages/client/README.md`. A self-signed certificate that the device does not trust is not representative evidence.
 3. Record navigation start to first visible table and navigation start to first accepted input. The exported report supplies client-ready and first-contact approximations; use browser tooling for the final visible-paint measurement.
 4. Record steady-state memory after 60 seconds and peak memory during load using platform tooling. Treat the JSON JavaScript heap figures as supporting evidence only because Safari and Firefox may not expose them and they exclude WASM/graphics memory.
-5. Capture one minute of repeated aim and power interaction and report median, 95th-percentile, and worst frame time. The panel's one-second FPS windows and largest gap are supporting evidence, not a replacement for browser/platform traces.
+5. Capture one minute of repeated aim and power interaction and report median, 95th-percentile, 99th-percentile, and worst frame time. The panel exports those animation-frame interval summaries plus one-second FPS windows as supporting evidence, not a replacement for browser/platform traces.
 6. Keep the app active for 10 minutes, including repeated orientation changes and at least two 30-second background/foreground cycles.
 7. Exercise the audio probe before and after mute, background the page while its context is running, then explicitly resume from the button after foregrounding.
-8. Download the JSON report, record battery and thermal observations available from the OS/device tooling, and note any browser reload, graphics reset, audio failure, or input loss.
-9. Repeat on the quality fallback if the default tier cannot hold the target frame rate.
-10. Save screenshots or traces with this record's date/device labels; do not store user credentials or unrelated browser data.
+8. Record every physical check in the panel as Pass or Fail. Enter first-visible/accepted-input timings and steady/peak memory from browser/platform tooling, plus thermal and reload/eviction results. Use **Mark event** at lifecycle and observable thermal boundaries, then download the JSON report and note any graphics reset, audio failure, or input loss. Keep labels short and free of identity or secret data.
+9. After at least three runs for each comparable device/browser/cache-state group, validate and summarize the downloaded files with `./scripts/summarize-feasibility.py path/to/*.json`. It rejects malformed reports, duplicate run numbers, and groups with fewer than three runs, then prints a Markdown median/worst table for this record. For final mobile-gate evidence, add `--require-mobile-matrix`; it also rejects missing platform/cache groups, failed physical checks, budget failures, FPS below 30, an unproven 30–55 FPS fallback, thermal/reload failures, lifecycle captures under 10 minutes, missing background/orientation cycles, and incomplete audio lifecycle evidence. `./scripts/test-feasibility-tools.sh` self-tests a complete synthetic matrix and representative matrix, FPS, startup-budget, lifecycle-duration, and audio-lifecycle rejection paths. Use `--allow-incomplete` only for interim troubleshooting, never acceptance.
+10. Repeat on the quality fallback if the default tier cannot hold the target frame rate.
+11. Save screenshots or traces with this record's date/device labels; do not store user credentials or unrelated browser data. Downloaded `pwmtf-feasibility-*.json`, `*.trace`, and `*.har` evidence is ignored by Git by default and should remain local unless deliberately sanitized and approved for publication.
 
 | Metric | Budget / acceptance rule | Measured result |
 | --- | --- | --- |
 | WASM compressed transfer | Record first; optimize or reject if it prevents reliable startup | 26,973,574 bytes raw / 8,108,520 bytes gzip (`wasm-opt -Oz`, 2026-08-16 local release build) |
-| Complete generated bundle | Record all generated assets | 27,105,745 bytes raw / 8,129,868 bytes gzip (2026-08-16 local release build; gzip members summed) |
+| Complete generated bundle | Record all generated assets | 27,116,773 bytes raw / 8,132,636 bytes gzip (2026-08-16 local release build; gzip members summed) |
 | Cold first-visible table | <= 8 s on representative mobile broadband | Pending |
 | Warm first-visible table | <= 3 s | Pending |
 | Steady aiming frame rate | 60 FPS target; >= 30 FPS fallback floor | Pending |
@@ -85,6 +88,6 @@ If a supported device cannot sustain 55 FPS during the one-minute interaction ca
 
 **Status: pending physical-device evidence.**
 
-The 2026-08-16 local release build produced a 26,973,574-byte optimized WASM file (8,108,520 bytes with gzip). The complete generated bundle is 27,105,745 bytes raw and 8,129,868 bytes when each asset is gzip-compressed. The automated Google Chrome 151.0.7922.138 smoke test on macOS 26.6.1 (MacBook Air, Apple M4) loads that build at 1280×720 and reaches the ready canvas, but it is not mobile compatibility or performance evidence.
+The 2026-08-16 local release build produced a 26,973,574-byte optimized WASM file (8,108,520 bytes with gzip). The complete generated bundle is 27,116,773 bytes raw and 8,132,636 bytes when each asset is gzip-compressed. The automated Google Chrome 151.0.7922.138 smoke test on macOS 26.6.1 (MacBook Air, Apple M4) loads both normal and `?feasibility` entry points at 1280×720, reaches the ready canvas, and finds all required capture controls, but it is not mobile compatibility or performance evidence.
 
 Bevy is accepted only after every required mobile row passes the interaction/lifecycle checks, measured results meet the budget or the defined quality fallback, exact minimum browser versions are recorded, and audio lifecycle is proven. Otherwise record the failing evidence and reject or revise the client direction before introducing dependent client architecture.

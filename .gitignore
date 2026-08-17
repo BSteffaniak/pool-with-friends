@@ -19,3 +19,7 @@ node_modules/
 *.sqlite
 *.sqlite3
 *.bak
+pwmtf-feasibility-*.json
+*.trace
+*.har
+__pycache__/

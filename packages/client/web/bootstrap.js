@@ -4,13 +4,42 @@ const loading = document.querySelector("#loading");
 const loadError = document.querySelector("#load-error");
 const reload = loadError.querySelector("button");
 const tools = document.querySelector("#feasibility-tools");
+const platformInput = document.querySelector("#test-platform");
+const hardwareModelInput = document.querySelector("#hardware-model");
+const osVersionInput = document.querySelector("#os-version");
+const browserVersionInput = document.querySelector("#browser-version");
+const cacheStateInput = document.querySelector("#cache-state");
+const presentationTierInput = document.querySelector("#presentation-tier");
+const runNumberInput = document.querySelector("#run-number");
+const physicalChecks = document.querySelector("#physical-checks");
+const firstVisibleInput = document.querySelector("#first-visible-ms");
+const firstInputInput = document.querySelector("#first-input-ms");
+const steadyMemoryInput = document.querySelector("#steady-memory-mib");
+const peakMemoryInput = document.querySelector("#peak-memory-mib");
+const thermalResultInput = document.querySelector("#thermal-result");
+const reloadObservedInput = document.querySelector("#reload-observed");
 const metricsOutput = document.querySelector("#feasibility-metrics");
 const captureButton = document.querySelector("#capture-toggle");
 const audioButton = document.querySelector("#audio-probe");
 const muteButton = document.querySelector("#audio-mute");
+const markEventButton = document.querySelector("#mark-event");
 const downloadButton = document.querySelector("#download-report");
 const feasibilityEnabled = new URLSearchParams(window.location.search).has("feasibility");
 const navigationStartedAt = performance.now();
+const PHYSICAL_CHECKS = [
+  ["first_load", "First/warm load reaches the table"],
+  ["aiming", "Held-contact aiming is continuous"],
+  ["power", "Power drag is bounded"],
+  ["touch_reset", "New touch has no stale state"],
+  ["resize", "Landscape resize preserves the table"],
+  ["safe_area", "Chrome and safe areas do not hide controls"],
+  ["orientation", "Portrait notice and landscape restore work"],
+  ["background", "Background/foreground restores render and input"],
+  ["audio", "Gesture, mute, suspend, and explicit resume work"],
+  ["input_response", "No visible delayed aiming"],
+  ["memory", "No reload/eviction; memory reaches a plateau"],
+  ["thermal", "No severe throttling or thermal warning"],
+];
 
 const telemetry = {
   schemaVersion: 1,
@@ -21,12 +50,16 @@ const telemetry = {
   captureStoppedAt: null,
   frameCount: 0,
   minimumFps: null,
+  maximumFps: null,
+  fpsSamples: [],
+  frameGapSamplesMs: [],
   maximumFrameGapMs: 0,
   currentFps: null,
   currentJsHeapBytes: null,
   peakJsHeapBytes: null,
   visibilityChanges: 0,
   orientationChanges: 0,
+  events: [],
   audio: {
     supported: Boolean(window.AudioContext || window.webkitAudioContext),
     state: "not started",
@@ -59,6 +92,15 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
 }
 
+function percentile(samples, percentage) {
+  if (samples.length === 0) {
+    return null;
+  }
+  const sorted = [...samples].sort((left, right) => left - right);
+  const index = Math.ceil((percentage / 100) * sorted.length) - 1;
+  return sorted[Math.max(0, index)];
+}
+
 function captureDuration() {
   if (telemetry.captureStartedAt === null) {
     return null;
@@ -77,10 +119,10 @@ function refreshMetrics() {
     `first canvas contact: ${formatDuration(telemetry.firstCanvasContactMs)}`,
     `capture: ${captureActive ? "running" : "stopped"} (${formatDuration(duration)})`,
     `frame rate: ${telemetry.currentFps === null ? "pending" : `${telemetry.currentFps.toFixed(1)} FPS`}`,
-    `minimum 1 s frame rate: ${telemetry.minimumFps === null ? "pending" : `${telemetry.minimumFps.toFixed(1)} FPS`}`,
-    `largest frame gap: ${telemetry.maximumFrameGapMs.toFixed(1)} ms`,
+    `minimum/median FPS: ${telemetry.minimumFps === null ? "pending" : `${telemetry.minimumFps.toFixed(1)} / ${percentile(telemetry.fpsSamples, 50).toFixed(1)}`}`,
+    `p95/worst frame time: ${telemetry.frameGapSamplesMs.length === 0 ? "pending" : `${percentile(telemetry.frameGapSamplesMs, 95).toFixed(1)} / ${telemetry.maximumFrameGapMs.toFixed(1)} ms`}`,
     `JS heap: ${formatBytes(telemetry.currentJsHeapBytes)} (peak ${formatBytes(telemetry.peakJsHeapBytes)})`,
-    `canvas contacts: ${telemetry.pointerContacts}`,
+    `canvas contacts/events: ${telemetry.pointerContacts}/${telemetry.events.length}`,
     `visibility/orientation changes: ${telemetry.visibilityChanges}/${telemetry.orientationChanges}`,
     `audio: ${telemetry.audio.state}${telemetry.audio.muted ? " (muted)" : ""}`,
     `viewport: ${window.innerWidth}×${window.innerHeight} @ ${window.devicePixelRatio.toFixed(2)}x`,
@@ -102,7 +144,9 @@ function frame(timestamp) {
     frameWindowCount += 1;
 
     if (lastFrameAt !== null) {
-      telemetry.maximumFrameGapMs = Math.max(telemetry.maximumFrameGapMs, timestamp - lastFrameAt);
+      const frameGap = timestamp - lastFrameAt;
+      telemetry.frameGapSamplesMs.push(frameGap);
+      telemetry.maximumFrameGapMs = Math.max(telemetry.maximumFrameGapMs, frameGap);
     }
     lastFrameAt = timestamp;
     frameWindowStartedAt ??= timestamp;
@@ -111,7 +155,9 @@ function frame(timestamp) {
     if (windowDuration >= 1000) {
       const fps = (frameWindowCount * 1000) / windowDuration;
       telemetry.currentFps = fps;
+      telemetry.fpsSamples.push(fps);
       telemetry.minimumFps = Math.min(telemetry.minimumFps ?? fps, fps);
+      telemetry.maximumFps = Math.max(telemetry.maximumFps ?? fps, fps);
       frameWindowStartedAt = timestamp;
       frameWindowCount = 0;
       sampleMemory();
@@ -122,11 +168,99 @@ function frame(timestamp) {
   window.requestAnimationFrame(frame);
 }
 
+function externalObservations() {
+  const numericValue = (input) => {
+    const value = Number.parseFloat(input.value);
+    return Number.isFinite(value) ? value : null;
+  };
+  return {
+    first_visible_table_ms: numericValue(firstVisibleInput),
+    first_accepted_input_ms: numericValue(firstInputInput),
+    steady_memory_mib: numericValue(steadyMemoryInput),
+    peak_memory_mib: numericValue(peakMemoryInput),
+    thermal_result: thermalResultInput.value || null,
+    reload_or_eviction_observed: reloadObservedInput.value || null,
+  };
+}
+
+function requireExternalObservations() {
+  const inputs = [
+    firstVisibleInput,
+    firstInputInput,
+    steadyMemoryInput,
+    peakMemoryInput,
+    thermalResultInput,
+    reloadObservedInput,
+  ];
+  for (const input of inputs) {
+    if (!input.reportValidity()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function physicalCheckResults() {
+  return Object.fromEntries(
+    PHYSICAL_CHECKS.map(([id]) => [
+      id,
+      document.querySelector(`input[name="check-${id}"]:checked`)?.value ?? null,
+    ]),
+  );
+}
+
+function requirePhysicalChecks() {
+  const results = physicalCheckResults();
+  const missing = PHYSICAL_CHECKS.find(([id]) => results[id] === null);
+  if (missing === undefined) {
+    return true;
+  }
+  window.alert(`Record Pass or Fail for: ${missing[1]}`);
+  document.querySelector(`input[name="check-${missing[0]}"]`)?.focus();
+  return false;
+}
+
+function testMetadata() {
+  return {
+    platform: platformInput.value,
+    hardware_model: hardwareModelInput.value.trim(),
+    os_version: osVersionInput.value.trim(),
+    browser_version: browserVersionInput.value.trim(),
+    cache_state: cacheStateInput.value,
+    presentation_tier: presentationTierInput.value,
+    run_number: Number.parseInt(runNumberInput.value, 10) || null,
+  };
+}
+
+function requireTestMetadata() {
+  const inputs = [
+    platformInput,
+    hardwareModelInput,
+    osVersionInput,
+    browserVersionInput,
+    cacheStateInput,
+    presentationTierInput,
+    runNumberInput,
+  ];
+  for (const input of inputs) {
+    if (!input.reportValidity()) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function startCapture() {
+  if (!requireTestMetadata()) {
+    return;
+  }
   telemetry.captureStartedAt = performance.now();
   telemetry.captureStoppedAt = null;
   telemetry.frameCount = 0;
   telemetry.minimumFps = null;
+  telemetry.maximumFps = null;
+  telemetry.fpsSamples = [];
+  telemetry.frameGapSamplesMs = [];
   telemetry.maximumFrameGapMs = 0;
   telemetry.currentFps = null;
   telemetry.currentJsHeapBytes = null;
@@ -134,6 +268,7 @@ function startCapture() {
   telemetry.pointerContacts = 0;
   telemetry.visibilityChanges = 0;
   telemetry.orientationChanges = 0;
+  telemetry.events = [];
   lastFrameAt = null;
   frameWindowStartedAt = null;
   frameWindowCount = 0;
@@ -217,6 +352,28 @@ function toggleMute() {
   updateAudioControls();
 }
 
+function markEvent() {
+  if (telemetry.captureStartedAt === null) {
+    startCapture();
+    if (telemetry.captureStartedAt === null) {
+      return;
+    }
+  }
+  const label = window.prompt(
+    "Short event label (for example: rotate portrait, background, audio resume, thermal warning)",
+  );
+  if (label === null || label.trim() === "") {
+    return;
+  }
+  telemetry.events.push({
+    elapsed_ms: captureDuration(),
+    label: label.trim().slice(0, 120),
+    visibility: document.visibilityState,
+    orientation: window.screen.orientation?.type ?? null,
+  });
+  refreshMetrics();
+}
+
 function report() {
   sampleMemory();
   return {
@@ -226,6 +383,9 @@ function report() {
       bevy: "0.19.1",
       renderer: "WebGL2",
     },
+    test: testMetadata(),
+    physical_checks: physicalCheckResults(),
+    external_observations: externalObservations(),
     browser: {
       user_agent: navigator.userAgent,
       language: navigator.language,
@@ -249,6 +409,11 @@ function report() {
       frame_count: telemetry.frameCount,
       current_fps: telemetry.currentFps,
       minimum_one_second_fps: telemetry.minimumFps,
+      median_one_second_fps: percentile(telemetry.fpsSamples, 50),
+      maximum_one_second_fps: telemetry.maximumFps,
+      median_frame_time_ms: percentile(telemetry.frameGapSamplesMs, 50),
+      p95_frame_time_ms: percentile(telemetry.frameGapSamplesMs, 95),
+      p99_frame_time_ms: percentile(telemetry.frameGapSamplesMs, 99),
       maximum_frame_gap_ms: telemetry.maximumFrameGapMs,
       current_js_heap_bytes: telemetry.currentJsHeapBytes,
       peak_js_heap_bytes: telemetry.peakJsHeapBytes,
@@ -257,17 +422,24 @@ function report() {
       canvas_contacts: telemetry.pointerContacts,
       visibility_changes: telemetry.visibilityChanges,
       orientation_changes: telemetry.orientationChanges,
+      marked_events: telemetry.events,
     },
     audio: telemetry.audio,
   };
 }
 
 function downloadReport() {
+  if (!requireTestMetadata() || !requirePhysicalChecks() || !requireExternalObservations()) {
+    return;
+  }
   const contents = JSON.stringify(report(), null, 2);
   const url = URL.createObjectURL(new Blob([contents], { type: "application/json" }));
   const link = document.createElement("a");
   link.href = url;
-  link.download = `pwmtf-feasibility-${new Date().toISOString().replaceAll(":", "-")}.json`;
+  const test = testMetadata();
+  const platform = test.platform || "unknown-device";
+  const run = test.run_number === null ? "unknown-run" : `run-${test.run_number}`;
+  link.download = `pwmtf-feasibility-${platform}-${test.cache_state || "unknown-cache"}-${test.presentation_tier || "unknown-tier"}-${run}-${new Date().toISOString().replaceAll(":", "-")}.json`;
   link.click();
   URL.revokeObjectURL(url);
 }
@@ -276,6 +448,7 @@ reload.addEventListener("click", () => window.location.reload());
 captureButton.addEventListener("click", () => (captureActive ? stopCapture() : startCapture()));
 audioButton.addEventListener("click", () => void playAudioProbe());
 muteButton.addEventListener("click", toggleMute);
+markEventButton.addEventListener("click", markEvent);
 downloadButton.addEventListener("click", downloadReport);
 canvas.addEventListener("pointerdown", () => {
   telemetry.pointerContacts += 1;
@@ -300,6 +473,23 @@ document.addEventListener("visibilitychange", () => {
 });
 
 if (feasibilityEnabled) {
+  for (const [id, label] of PHYSICAL_CHECKS) {
+    const row = document.createElement("div");
+    row.className = "physical-check";
+    const description = document.createElement("span");
+    description.textContent = label;
+    row.append(description);
+    for (const value of ["pass", "fail"]) {
+      const option = document.createElement("label");
+      const input = document.createElement("input");
+      input.type = "radio";
+      input.name = `check-${id}`;
+      input.value = value;
+      option.append(input, value === "pass" ? "Pass" : "Fail");
+      row.append(option);
+    }
+    physicalChecks.append(row);
+  }
   tools.hidden = false;
   window.requestAnimationFrame(frame);
   updateAudioControls();
