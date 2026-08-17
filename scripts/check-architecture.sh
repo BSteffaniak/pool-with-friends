@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+
+fail=0
+
+report_violation() {
+    printf '%s\n' "architecture violation: $1" >&2
+    fail=1
+}
+
+check_pattern() {
+    label=$1
+    pattern=$2
+    shift 2
+
+    existing=
+    for path in "$@"; do
+        if [ -e "$path" ]; then
+            existing="$existing $path"
+        fi
+    done
+    if [ -n "$existing" ] && grep -R -n -E "$pattern" $existing --include='*.rs' --include='*.toml' --exclude-dir=target 2>/dev/null; then
+        report_violation "$label"
+    fi
+}
+
+if [ -d packages ]; then
+    manifests=$(find packages -type f -name Cargo.toml -print)
+    if [ -n "$manifests" ] && grep -n -E '^name[[:space:]]*=[[:space:]]*"' $manifests | grep -v -E '"pwmtf_[a-z0-9_]+"'; then
+        report_violation "package name without the pwmtf_ prefix"
+    fi
+
+    if find packages -mindepth 1 -maxdepth 1 -type d \( -name core -o -name common -o -name shared -o -name utils \) -print | grep .; then
+        report_violation "forbidden generic package directory"
+    fi
+fi
+
+check_pattern "application-owned raw SQL" '(SELECT[[:space:]]|INSERT[[:space:]]+INTO|UPDATE[[:space:]]+[[:alnum:]_]+[[:space:]]+SET|DELETE[[:space:]]+FROM|CREATE[[:space:]]+TABLE|ALTER[[:space:]]+TABLE|DROP[[:space:]]+TABLE)' packages
+check_pattern "game-domain infrastructure dependency" '(^|[^[:alnum:]_])(bevy|lightyear|switchy[_-][[:alnum:]_]*|actix[-_][[:alnum:]_]*|axum|database|http|websocket|tokio)([^[:alnum:]_]|$)' packages/game_domain
+check_pattern "game-domain client authority vocabulary" '(ClientAuthoritative|client_authoritative|ReportedBallState|reported_ball_state)' packages/game_domain
+check_pattern "timeout forfeiture behavior" '(timeout|Timeout).*(forfeit|Forfeit|automatic_loss|AutomaticLoss)' packages
+check_pattern "unversioned canonical payload marker" 'Canonical(Payload|Snapshot|Command)[[:space:]]*\{' packages
+check_pattern "plaintext secret persistence field" '(session_token|invitation_token)[[:space:]]*:' packages/server
+
+if [ "$fail" -ne 0 ]; then
+    exit 1
+fi
+
+printf '%s\n' "architecture checks passed"

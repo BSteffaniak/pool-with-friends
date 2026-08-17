@@ -1,0 +1,29 @@
+[workspace]
+members  = []
+resolver = "3"
+
+[workspace.package]
+authors    = ["Braden Steffaniak"]
+edition    = "2024"
+license    = "MPL-2.0"
+readme     = "README.md"
+repository = "https://github.com/BSteffaniak/pool-with-friends"
+version    = "0.1.0"
+
+[profile.release]
+codegen-units = 1
+lto           = false
+opt-level     = 3
+strip         = "symbols"
+
+[profile.release-lto]
+inherits = "release"
+lto      = "fat"
+
+[profile.release-lto-no-panic]
+inherits = "release-lto"
+panic    = "abort"
+
+[profile.small]
+inherits  = "release-lto-no-panic"
+opt-level = "z"

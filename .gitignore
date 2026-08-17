@@ -1,0 +1,17 @@
+target/
+debug/
+dist/
+node_modules/
+.direnv/
+.env
+.env.*
+!.env.example
+.DS_Store
+*.swp
+*.swo
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.bak
