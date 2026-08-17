@@ -13,11 +13,27 @@ from typing import Any
 
 REQUIRED_RUNS = 3
 REQUIRED_PLATFORMS = {"iphone", "ipad", "android-phone", "android-tablet"}
+ALLOWED_PLATFORMS = REQUIRED_PLATFORMS | {"desktop"}
 REQUIRED_CACHE_STATES = {"cold", "warm", "lifecycle"}
+REQUIRED_PHYSICAL_CHECKS = {
+    "first_load",
+    "aiming",
+    "power",
+    "touch_reset",
+    "resize",
+    "safe_area",
+    "orientation",
+    "background",
+    "audio",
+    "input_response",
+    "memory",
+    "thermal",
+}
 COLD_VISIBLE_BUDGET_MS = 8_000
 WARM_VISIBLE_BUDGET_MS = 3_000
 MINIMUM_FPS_FLOOR = 30
 FULL_QUALITY_FPS_THRESHOLD = 55
+MINIMUM_AIM_CAPTURE_MS = 60 * 1_000
 LIFECYCLE_DURATION_MS = 10 * 60 * 1_000
 REQUIRED_TEST_FIELDS = (
     "platform",
@@ -25,6 +41,7 @@ REQUIRED_TEST_FIELDS = (
     "os_version",
     "browser_version",
     "cache_state",
+    "minimum_version_run",
     "presentation_tier",
     "run_number",
 )
@@ -59,10 +76,18 @@ def load_report(path: Path) -> dict[str, Any]:
         value = test.get(field)
         if value is None or value == "":
             raise ValueError(f"{path}: missing test.{field}")
+    if test["platform"] not in ALLOWED_PLATFORMS:
+        raise ValueError(f"{path}: invalid test.platform")
+    if test["cache_state"] not in REQUIRED_CACHE_STATES:
+        raise ValueError(f"{path}: invalid test.cache_state")
+    if test["minimum_version_run"] not in ("yes", "no"):
+        raise ValueError(f"{path}: invalid test.minimum_version_run")
     if test["presentation_tier"] not in ("default", "reduced"):
         raise ValueError(f"{path}: invalid test.presentation_tier")
     if not isinstance(test["run_number"], int) or isinstance(test["run_number"], bool):
         raise ValueError(f"{path}: test.run_number must be an integer")
+    if not 1 <= test["run_number"] <= 99:
+        raise ValueError(f"{path}: test.run_number must be between 1 and 99")
 
     for section in (
         "browser",
@@ -78,8 +103,15 @@ def load_report(path: Path) -> dict[str, Any]:
             raise ValueError(f"{path}: {section} must be an object")
 
     checks = report["physical_checks"]
-    if not checks:
-        raise ValueError(f"{path}: physical_checks must not be empty")
+    if set(checks) != REQUIRED_PHYSICAL_CHECKS:
+        missing = sorted(REQUIRED_PHYSICAL_CHECKS - set(checks))
+        unknown = sorted(set(checks) - REQUIRED_PHYSICAL_CHECKS)
+        details = []
+        if missing:
+            details.append(f"missing {', '.join(missing)}")
+        if unknown:
+            details.append(f"unknown {', '.join(unknown)}")
+        raise ValueError(f"{path}: physical_checks keys invalid: {'; '.join(details)}")
     invalid_checks = [name for name, result in checks.items() if result not in ("pass", "fail")]
     if invalid_checks:
         raise ValueError(f"{path}: invalid physical check results: {', '.join(sorted(invalid_checks))}")
@@ -97,6 +129,8 @@ def load_report(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path}: invalid external_observations.thermal_result")
     if observations.get("reload_or_eviction_observed") not in ("yes", "no"):
         raise ValueError(f"{path}: invalid external_observations.reload_or_eviction_observed")
+    if observations["peak_memory_mib"] < observations["steady_memory_mib"]:
+        raise ValueError(f"{path}: peak memory cannot be lower than steady memory")
 
     return report
 
@@ -110,6 +144,7 @@ def group_key(report: dict[str, Any]) -> tuple[str, ...]:
         str(test["os_version"]),
         str(test["browser_version"]),
         str(test["cache_state"]),
+        str(test["minimum_version_run"]),
         str(test["presentation_tier"]),
     )
 
@@ -130,11 +165,11 @@ def summarize(values: list[float], *, lower_is_better: bool) -> str:
 def markdown_table(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> str:
     """Build a Markdown summary for validated report groups."""
     lines = [
-        "| Platform/device | OS / browser | Cache / tier | Runs | Physical checks | Visible table ms median/worst | Accepted input ms median/worst | Min FPS median/worst | p95 frame ms median/worst | Steady memory MiB median/worst | Thermal/reload |",
+        "| Platform/device | OS / browser | Cache / version / tier | Runs | Physical checks | Visible table ms median/worst | Accepted input ms median/worst | Min FPS median/worst | p95 frame ms median/worst | Steady memory MiB median/worst | Thermal/reload |",
         "| --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for key in sorted(groups):
-        platform, hardware, os_version, browser_version, cache_state, presentation_tier = key
+        platform, hardware, os_version, browser_version, cache_state, minimum_version, presentation_tier = key
         reports = groups[key]
         visible = [number(report["external_observations"]["first_visible_table_ms"]) for report in reports]
         accepted_input = [number(report["external_observations"]["first_accepted_input_ms"]) for report in reports]
@@ -162,7 +197,7 @@ def markdown_table(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> str:
                 (
                     f"{platform} / {hardware}",
                     f"{os_version} / {browser_version}",
-                    f"{cache_state} / {presentation_tier}",
+                    f"{cache_state} / {'minimum' if minimum_version == 'yes' else 'current'} / {presentation_tier}",
                     str(len(reports)),
                     checks_summary,
                     summarize([value for value in visible if value is not None], lower_is_better=True),
@@ -183,7 +218,7 @@ def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> li
     errors: list[str] = []
     for key, reports in groups.items():
         cache_state = key[4]
-        presentation_tier = key[5]
+        presentation_tier = key[6]
         for report in reports:
             run = report["test"]["run_number"]
             observations = report["external_observations"]
@@ -202,6 +237,12 @@ def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> li
             if cache_state in ("cold", "warm") and visible is not None and visible > visible_budget:
                 errors.append(f"{key} run {run}: first-visible {visible:.2f}ms exceeds {visible_budget}ms")
 
+            duration = metric(report, "timing_ms", "capture_duration")
+            if duration is None:
+                errors.append(f"{key} run {run}: capture duration is unavailable")
+            elif cache_state != "lifecycle" and duration < MINIMUM_AIM_CAPTURE_MS:
+                errors.append(f"{key} run {run}: interaction capture {duration:.2f}ms is shorter than 1 minute")
+
             minimum_fps = metric(report, "performance", "minimum_one_second_fps")
             if minimum_fps is None:
                 errors.append(f"{key} run {run}: minimum FPS is unavailable")
@@ -212,15 +253,22 @@ def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> li
                     f"{key} run {run}: minimum FPS {minimum_fps:.2f} requires a measured quality fallback"
                 )
 
+            p95_frame = metric(report, "performance", "p95_frame_time_ms")
+            if p95_frame is None:
+                errors.append(f"{key} run {run}: p95 frame time is unavailable")
+
             if cache_state == "lifecycle":
-                duration = metric(report, "timing_ms", "capture_duration")
                 if duration is None or duration < LIFECYCLE_DURATION_MS:
                     actual = "unavailable" if duration is None else f"{duration:.2f}ms"
                     errors.append(f"{key} run {run}: lifecycle capture {actual} is shorter than 10 minutes")
 
             audio = report["audio"]
-            if audio.get("gestureStarts", 0) < 1:
-                errors.append(f"{key} run {run}: audio gesture probe was not started")
+            if audio.get("state") != "running":
+                errors.append(f"{key} run {run}: audio context was not running when exported")
+            if audio.get("muted") is not False:
+                errors.append(f"{key} run {run}: audio remained muted when exported")
+            if audio.get("gestureStarts", 0) < 2:
+                errors.append(f"{key} run {run}: audio probe did not cover pre/post-mute playback")
             if cache_state == "lifecycle":
                 if audio.get("backgroundSuspensions", 0) < 1:
                     errors.append(f"{key} run {run}: audio background suspension was not observed")
@@ -265,7 +313,10 @@ def main() -> int:
             errors.append(f"{key}: requires {REQUIRED_RUNS} distinct runs, found {len(set(run_numbers))}")
 
     if args.require_mobile_matrix:
+        if args.allow_incomplete:
+            errors.append("--allow-incomplete cannot be combined with --require-mobile-matrix")
         present = {(key[0], key[4]) for key in groups}
+        minimum_platforms = {key[0] for key in groups if key[5] == "yes"}
         missing = sorted(
             (platform, cache_state)
             for platform in REQUIRED_PLATFORMS
@@ -274,6 +325,8 @@ def main() -> int:
         )
         for platform, cache_state in missing:
             errors.append(f"mobile matrix missing {platform} / {cache_state}")
+        for platform in sorted(REQUIRED_PLATFORMS - minimum_platforms):
+            errors.append(f"mobile matrix missing proposed minimum-version evidence for {platform}")
         errors.extend(acceptance_errors(groups))
 
     if errors:

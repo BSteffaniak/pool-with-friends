@@ -15,9 +15,9 @@ cargo run -p pwmtf_client
 python3 -m http.server --directory dist 8080
 ```
 
-Open `http://localhost:8080`. The release bundle uses Bevy's WebGL2 renderer for broad modern-mobile-browser compatibility. Each build removes stale top-level files from `dist/` before generating the complete bundle, so size reports and served assets describe only the current build. When Binaryen is available, the build script applies size-oriented WebAssembly optimization.
+Open `http://localhost:8080`. The release bundle uses Bevy's WebGL2 renderer for broad modern-mobile-browser compatibility. Each build removes stale top-level files from `dist/` before generating the complete bundle, so size reports and served assets describe only the current build. When Binaryen is available, the build script applies size-oriented WebAssembly optimization. Desktop smoke scripts set `PWMTF_SKIP_WASM_OPT=1` to avoid repeating the slow Binaryen pass; physical measurements, bundle reports, and acceptance builds must not set it.
 
-Append `?feasibility` to expose the opt-in measurement panel and generated audio-lifecycle probe. The panel requires exact device/browser, cache-state, presentation-tier, and run metadata plus Pass/Fail results and platform-tool timing/memory/thermal/reload observations before export. It captures frame-rate windows, median/95th/99th-percentile/worst frame intervals, lifecycle counters, non-sensitive operator-marked events, available JavaScript heap data, and a versioned JSON report with a device/run-specific filename. After collecting at least three comparable runs, `./scripts/summarize-feasibility.py path/to/*.json` validates run uniqueness/completeness and prints a Markdown median/worst table including aggregate physical-check status. Add `--require-mobile-matrix` for final mobile-gate evidence; it fails closed on missing platform/cache groups, physical/budget/FPS/lifecycle/audio failures, or an unproven quality fallback. Run `./scripts/test-feasibility-tools.sh` to self-test a complete passing synthetic matrix plus matrix, FPS, startup-budget, lifecycle-duration, and audio-lifecycle rejection paths. Downloaded feasibility JSON, trace, and HAR evidence is ignored by Git by default; keep it local unless deliberately sanitized and approved. These are measurement support only; final acceptance still requires the physical-device and platform-tooling evidence in `docs/mobile-feasibility.md`.
+The selected presentation tier is URL-bound rather than self-reported: use `?feasibility` for default quality or `?feasibility&tier=reduced` for the reduced fallback, and the client displays/exports the active tier. The panel requires exact device/browser, proposed-minimum-version, cache-state, presentation-tier, and run metadata plus Pass/Fail results and platform-tool timing/memory/thermal/reload observations before export. It captures frame-rate windows, median/95th/99th-percentile/worst frame intervals, lifecycle counters, non-sensitive operator-marked events, available JavaScript heap data, and a versioned JSON report with a device/run-specific filename. After collecting at least three comparable runs, `./scripts/summarize-feasibility.py path/to/*.json` validates required check keys and run uniqueness/completeness and prints a Markdown median/worst table including aggregate physical-check status. Add `--require-mobile-matrix` for final mobile-gate evidence; it fails closed on missing platform/cache groups, physical/budget/FPS/frame-time/duration/lifecycle/audio failures (including pre/post-mute playback), or an unproven quality fallback. Run `./scripts/test-feasibility-tools.sh` to self-test a complete passing synthetic matrix plus matrix/minimum-version, FPS, startup-budget, interaction/lifecycle-duration, and audio-lifecycle rejection paths. Downloaded feasibility JSON, trace, and HAR evidence is ignored by Git by default; keep it local unless deliberately sanitized and approved. These are measurement support only; final acceptance still requires the physical-device and platform-tooling evidence in `docs/mobile-feasibility.md`.
 
 ## Feasibility validation
 
@@ -31,6 +31,14 @@ On macOS, Safari compatibility has a matching WebDriver smoke entry point. First
 
 ```sh
 ./scripts/test-safari-smoke.sh
+```
+
+Firefox has an equivalent headless WebDriver check for normal and feasibility entry points:
+
+```sh
+FIREFOX_BIN=/path/to/firefox \
+GECKODRIVER_BIN=/path/to/geckodriver \
+./scripts/test-firefox-smoke.sh
 ```
 
 Neither desktop smoke substitutes for the physical mobile matrix.

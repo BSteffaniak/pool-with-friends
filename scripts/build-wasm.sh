@@ -23,17 +23,21 @@ wasm-bindgen \
 
 if command -v wasm-opt >/dev/null 2>&1; then
     optimized="$root/dist/pwmtf_client_bg.optimized.wasm"
-    wasm-opt \
-        -Oz \
-        --enable-bulk-memory \
-        --enable-multivalue \
-        --enable-mutable-globals \
-        --enable-nontrapping-float-to-int \
-        --enable-reference-types \
-        --enable-sign-ext \
-        "$root/dist/pwmtf_client_bg.wasm" \
-        -o "$optimized"
-    mv "$optimized" "$root/dist/pwmtf_client_bg.wasm"
+    if [ "${PWMTF_SKIP_WASM_OPT:-0}" = 1 ]; then
+        printf '%s\n' "PWMTF_SKIP_WASM_OPT=1: leaving release WASM unoptimized by Binaryen" >&2
+    else
+        wasm-opt \
+            -Oz \
+            --enable-bulk-memory \
+            --enable-multivalue \
+            --enable-mutable-globals \
+            --enable-nontrapping-float-to-int \
+            --enable-reference-types \
+            --enable-sign-ext \
+            "$root/dist/pwmtf_client_bg.wasm" \
+            -o "$optimized"
+        mv "$optimized" "$root/dist/pwmtf_client_bg.wasm"
+    fi
 fi
 
 printf '%s\n' "PWMTF web client built in $root/dist"

@@ -9,6 +9,7 @@ const hardwareModelInput = document.querySelector("#hardware-model");
 const osVersionInput = document.querySelector("#os-version");
 const browserVersionInput = document.querySelector("#browser-version");
 const cacheStateInput = document.querySelector("#cache-state");
+const minimumVersionInput = document.querySelector("#minimum-version-run");
 const presentationTierInput = document.querySelector("#presentation-tier");
 const runNumberInput = document.querySelector("#run-number");
 const physicalChecks = document.querySelector("#physical-checks");
@@ -24,7 +25,9 @@ const audioButton = document.querySelector("#audio-probe");
 const muteButton = document.querySelector("#audio-mute");
 const markEventButton = document.querySelector("#mark-event");
 const downloadButton = document.querySelector("#download-report");
-const feasibilityEnabled = new URLSearchParams(window.location.search).has("feasibility");
+const query = new URLSearchParams(window.location.search);
+const feasibilityEnabled = query.has("feasibility");
+const activePresentationTier = query.get("tier") === "reduced" ? "reduced" : "default";
 const navigationStartedAt = performance.now();
 const PHYSICAL_CHECKS = [
   ["first_load", "First/warm load reaches the table"],
@@ -115,6 +118,7 @@ function refreshMetrics() {
 
   const duration = captureDuration();
   metricsOutput.textContent = [
+    `tier: ${activePresentationTier}`,
     `client ready: ${formatDuration(telemetry.clientReadyMs)}`,
     `first canvas contact: ${formatDuration(telemetry.firstCanvasContactMs)}`,
     `capture: ${captureActive ? "running" : "stopped"} (${formatDuration(duration)})`,
@@ -227,6 +231,7 @@ function testMetadata() {
     os_version: osVersionInput.value.trim(),
     browser_version: browserVersionInput.value.trim(),
     cache_state: cacheStateInput.value,
+    minimum_version_run: minimumVersionInput.value,
     presentation_tier: presentationTierInput.value,
     run_number: Number.parseInt(runNumberInput.value, 10) || null,
   };
@@ -239,6 +244,7 @@ function requireTestMetadata() {
     osVersionInput,
     browserVersionInput,
     cacheStateInput,
+    minimumVersionInput,
     presentationTierInput,
     runNumberInput,
   ];
@@ -439,7 +445,7 @@ function downloadReport() {
   const test = testMetadata();
   const platform = test.platform || "unknown-device";
   const run = test.run_number === null ? "unknown-run" : `run-${test.run_number}`;
-  link.download = `pwmtf-feasibility-${platform}-${test.cache_state || "unknown-cache"}-${test.presentation_tier || "unknown-tier"}-${run}-${new Date().toISOString().replaceAll(":", "-")}.json`;
+  link.download = `pwmtf-feasibility-${platform}-${test.cache_state || "unknown-cache"}-${test.minimum_version_run === "yes" ? "minimum" : "current"}-${test.presentation_tier || "unknown-tier"}-${run}-${new Date().toISOString().replaceAll(":", "-")}.json`;
   link.click();
   URL.revokeObjectURL(url);
 }
@@ -473,6 +479,8 @@ document.addEventListener("visibilitychange", () => {
 });
 
 if (feasibilityEnabled) {
+  presentationTierInput.value = activePresentationTier;
+  presentationTierInput.disabled = true;
   for (const [id, label] of PHYSICAL_CHECKS) {
     const row = document.createElement("div");
     row.className = "physical-check";

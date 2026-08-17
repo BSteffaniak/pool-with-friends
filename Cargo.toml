@@ -17,6 +17,10 @@ bevy = { version = "0.19.1", default-features = false, features = [
     "web",
     "webgl2",
 ] }
+web-sys = { version = "0.3.104", default-features = false, features = [
+    "Location",
+    "Window",
+] }
 
 [profile.release]
 codegen-units = 1

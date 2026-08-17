@@ -4,7 +4,7 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
-./scripts/build-wasm.sh
+PWMTF_SKIP_WASM_OPT=1 ./scripts/build-wasm.sh
 
 safaridriver=${SAFARIDRIVER_BIN:-/usr/bin/safaridriver}
 if [ ! -x "$safaridriver" ]; then

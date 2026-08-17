@@ -37,6 +37,7 @@ cargo deny check
 ./scripts/summarize-feasibility.py --require-mobile-matrix path/to/reports/*.json
 ./scripts/test-feasibility-tools.sh
 ./scripts/test-browser-smoke.sh
+./scripts/test-firefox-smoke.sh
 ./scripts/test-safari-smoke.sh
 ./scripts/check-architecture.sh
 ./scripts/test-architecture-checks.sh

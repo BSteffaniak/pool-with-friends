@@ -32,6 +32,9 @@ struct PowerFill;
 struct OrientationNotice;
 
 #[derive(Resource)]
+struct PresentationTier(&'static str);
+
+#[derive(Resource)]
 struct PrototypeInput {
     aim_angle: f32,
     power: f32,
@@ -48,13 +51,34 @@ impl Default for PrototypeInput {
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), allow(clippy::missing_const_for_fn))]
+fn presentation_tier() -> &'static str {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let search = web_sys::window()
+            .and_then(|window| window.location().search().ok())
+            .unwrap_or_default();
+        if search
+            .trim_start_matches('?')
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .any(|(key, value)| key == "tier" && value == "reduced")
+        {
+            return "reduced";
+        }
+    }
+    "default"
+}
+
 fn main() {
+    let presentation_tier = presentation_tier();
     App::new()
         .insert_resource(ClearColor(Color::srgb(0.025, 0.075, 0.055)))
+        .insert_resource(PresentationTier(presentation_tier))
         .init_resource::<PrototypeInput>()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Pool with More Than Friends".into(),
+                title: format!("Pool with More Than Friends · {presentation_tier} tier"),
                 name: Some("pwmtf.client".into()),
                 canvas: Some("#pwmtf-canvas".into()),
                 resolution: WindowResolution::new(1280, 720),
@@ -70,7 +94,8 @@ fn main() {
         .run();
 }
 
-fn setup(mut commands: Commands) {
+#[allow(clippy::needless_pass_by_value)]
+fn setup(mut commands: Commands, presentation_tier: Res<PresentationTier>) {
     commands.spawn((
         Camera2d,
         Projection::Orthographic(OrthographicProjection {
@@ -137,8 +162,14 @@ fn setup(mut commands: Commands) {
         PowerFill,
     ));
 
+    spawn_overlay(&mut commands, presentation_tier.0);
+}
+
+fn spawn_overlay(commands: &mut Commands, presentation_tier: &str) {
     commands.spawn((
-        Text::new("PWMTF · browser feasibility table"),
+        Text::new(format!(
+            "PWMTF · browser feasibility table · {presentation_tier} tier"
+        )),
         TextFont::from_font_size(24.0),
         TextColor(Color::srgb(0.92, 0.85, 0.65)),
         Node {

@@ -4,7 +4,7 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
-./scripts/build-wasm.sh
+PWMTF_SKIP_WASM_OPT=1 ./scripts/build-wasm.sh
 
 chrome=${CHROME_BIN:-}
 if [ -z "$chrome" ]; then
@@ -55,20 +55,52 @@ while ! curl --fail --silent --output /dev/null "http://127.0.0.1:$port/"; do
     sleep 0.1
 done
 
-"$chrome" \
-    --headless=new \
-    --disable-gpu-sandbox \
-    --enable-webgl \
-    --enable-unsafe-swiftshader \
-    --ignore-gpu-blocklist \
-    --no-first-run \
-    --no-default-browser-check \
-    --run-all-compositor-stages-before-draw \
-    --use-angle=swiftshader \
-    --virtual-time-budget=15000 \
-    --window-size=1280,720 \
-    --dump-dom \
-    "http://127.0.0.1:$port/" >"$browser_log" 2>&1
+dump_dom() {
+    url=$1
+    python3 - "$browser_log" "$chrome" "$url" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+log_path, chrome, url = sys.argv[1:]
+command = [
+    chrome,
+    "--headless=new",
+    "--disable-gpu-sandbox",
+    "--enable-webgl",
+    "--enable-unsafe-swiftshader",
+    "--ignore-gpu-blocklist",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--run-all-compositor-stages-before-draw",
+    "--use-angle=swiftshader",
+    "--virtual-time-budget=15000",
+    "--window-size=1280,720",
+    "--dump-dom",
+    url,
+]
+with open(log_path, "w", encoding="utf-8") as browser_log:
+    process = subprocess.Popen(
+        command,
+        stdout=browser_log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        text=True,
+    )
+    try:
+        return_code = process.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+        print(f"Chrome smoke navigation timed out: {url}", file=sys.stderr)
+        raise SystemExit(1)
+if return_code != 0:
+    raise SystemExit(return_code)
+PY
+}
+
+dump_dom "http://127.0.0.1:$port/"
 
 if grep -q 'id="loading"' "$browser_log"; then
     cat "$browser_log" >&2
@@ -95,20 +127,7 @@ if ! grep -q 'id="pwmtf-canvas"' "$browser_log"; then
     exit 1
 fi
 
-"$chrome" \
-    --headless=new \
-    --disable-gpu-sandbox \
-    --enable-webgl \
-    --enable-unsafe-swiftshader \
-    --ignore-gpu-blocklist \
-    --no-first-run \
-    --no-default-browser-check \
-    --run-all-compositor-stages-before-draw \
-    --use-angle=swiftshader \
-    --virtual-time-budget=15000 \
-    --window-size=1280,720 \
-    --dump-dom \
-    "http://127.0.0.1:$port/?feasibility" >"$browser_log" 2>&1
+dump_dom "http://127.0.0.1:$port/?feasibility"
 
 if ! grep -q 'data-client-state="ready"' "$browser_log"; then
     cat "$browser_log" >&2
@@ -120,7 +139,7 @@ if grep -q 'id="feasibility-tools"[^>]*hidden' "$browser_log"; then
     printf '%s\n' "feasibility capture panel remained hidden" >&2
     exit 1
 fi
-for control in test-platform hardware-model os-version browser-version cache-state presentation-tier run-number physical-checks first-visible-ms first-input-ms steady-memory-mib peak-memory-mib thermal-result reload-observed capture-toggle audio-probe mark-event download-report; do
+for control in test-platform hardware-model os-version browser-version cache-state minimum-version-run presentation-tier run-number physical-checks first-visible-ms first-input-ms steady-memory-mib peak-memory-mib thermal-result reload-observed capture-toggle audio-probe mark-event download-report; do
     if ! grep -q "id=\"$control\"" "$browser_log"; then
         cat "$browser_log" >&2
         printf '%s\n' "feasibility capture control missing: $control" >&2
@@ -128,4 +147,16 @@ for control in test-platform hardware-model os-version browser-version cache-sta
     fi
 done
 
-printf '%s\n' "browser smoke test passed: $browser_name at 1280x720 (normal and feasibility entry points)"
+dump_dom "http://127.0.0.1:$port/?feasibility&tier=reduced"
+if ! grep -q 'data-client-state="ready"' "$browser_log"; then
+    cat "$browser_log" >&2
+    printf '%s\n' "reduced feasibility client did not report its ready state" >&2
+    exit 1
+fi
+if ! grep -q 'tier: reduced' "$browser_log"; then
+    cat "$browser_log" >&2
+    printf '%s\n' "reduced feasibility client did not report the selected tier" >&2
+    exit 1
+fi
+
+printf '%s\n' "browser smoke test passed: $browser_name at 1280x720 (normal, default feasibility, and reduced feasibility entry points)"
