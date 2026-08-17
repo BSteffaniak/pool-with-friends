@@ -24,13 +24,7 @@
           inherit system;
           overlays = [ (import rust-overlay) ];
         };
-        rustToolchain = pkgs.rust-bin.stable."1.97.1".minimal.override {
-          extensions = [
-            "clippy"
-            "rustfmt"
-          ];
-          targets = [ "wasm32-unknown-unknown" ];
-        };
+        rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
       in
       {
         devShells.default = pkgs.mkShell {
