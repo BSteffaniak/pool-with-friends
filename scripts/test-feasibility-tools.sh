@@ -16,6 +16,7 @@ platforms = {
     "ipad": ("safari",),
     "android-phone": ("chrome", "firefox", "samsung-internet"),
     "android-tablet": ("chrome",),
+    "desktop": ("safari", "chrome", "firefox", "edge"),
 }
 cache_states = ("cold", "warm", "lifecycle")
 checks = {
@@ -41,7 +42,10 @@ for platform, browser_families in platforms.items():
                     lifecycle = cache_state == "lifecycle"
                     report = {
                         "schema_version": 1,
-                        "captured_at": "2026-08-17T00:00:00Z",
+                        "captured_at": (
+                            f"2026-08-{run_number + (10 if minimum_version_run == 'yes' else 0):02d}"
+                            f"T00:00:00Z"
+                        ),
                         "candidate": {
                             "build_id": "fixture-build",
                             "source_hash": "0" * 64,
@@ -72,16 +76,35 @@ for platform, browser_families in platforms.items():
                             "declared_family": browser_family,
                             "detected_family": browser_family,
                             "user_agent": "fixture-user-agent",
+                            "language": "en-US",
+                            "hardware_concurrency": 8,
+                            "device_memory_gib": 8,
                         },
-                        "display": {},
+                        "display": {
+                            "screen_width": 1280,
+                            "screen_height": 720,
+                            "viewport_width": 1280,
+                            "viewport_height": 720,
+                            "device_pixel_ratio": 2,
+                            "orientation": "landscape-primary",
+                        },
                         "timing_ms": {
                             "client_ready": 1_000,
                             "first_canvas_contact": 1_200,
                             "capture_duration": 610_000 if lifecycle else 65_000,
                         },
                         "performance": {
+                            "frame_count": 3_600,
+                            "current_fps": 60,
                             "minimum_one_second_fps": 58,
+                            "median_one_second_fps": 60,
+                            "maximum_one_second_fps": 61,
+                            "median_frame_time_ms": 16.7,
                             "p95_frame_time_ms": 18,
+                            "p99_frame_time_ms": 20,
+                            "maximum_frame_gap_ms": 24,
+                            "current_js_heap_bytes": None,
+                            "peak_js_heap_bytes": None,
                         },
                         "interaction": {
                             "visibility_changes": 4 if lifecycle else 0,
@@ -109,6 +132,7 @@ reports="$tmp"/*.json
 "$root/scripts/summarize-feasibility.py" --require-mobile-matrix $reports >"$tmp/summary.md"
 grep -q '| iphone / fixture-iphone / fixture-buil / Bevy 0.19.1 WebGL2 |' "$tmp/summary.md"
 grep -q '| android-tablet / fixture-android-tablet / fixture-buil / Bevy 0.19.1 WebGL2 |' "$tmp/summary.md"
+grep -q '| desktop / fixture-desktop / fixture-buil / Bevy 0.19.1 WebGL2 |' "$tmp/summary.md"
 
 expect_rejected() {
     label=$1
@@ -126,6 +150,30 @@ if "$root/scripts/summarize-feasibility.py" --allow-incomplete --require-mobile-
     exit 1
 fi
 grep -q 'cannot be combined' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-2.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["captured_at"] = "2026-08-01T00:00:00Z"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "duplicate capture timestamps" $reports
+grep -q 'duplicate capture timestamps' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-2.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["captured_at"] = "2026-08-02T00:00:00Z"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
 
 python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
 import json
@@ -162,11 +210,137 @@ from pathlib import Path
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
 report["candidate"]["source_hash"] = "0" * 64
+report["timing_ms"]["capture_duration"] = 0
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "a zero-duration capture" $reports
+grep -q 'capture_duration must be greater than zero' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["timing_ms"]["capture_duration"] = 65_000
+report["timing_ms"]["first_canvas_contact"] = 999
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "canvas contact before client readiness" $reports
+grep -q 'first canvas contact cannot precede client readiness' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["timing_ms"]["capture_duration"] = 65_000
+report["timing_ms"]["first_canvas_contact"] = 1_200
+report["test"]["hardware_model"] = "bad\nmodel"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "control characters in test metadata" $reports
+grep -q 'hardware_model contains control characters' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["test"]["hardware_model"] = "fixture-iphone"
+report["external_observations"]["first_accepted_input_ms"] = 3_999
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "input timing before visible table" $reports
+grep -q 'first accepted input cannot precede' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["test"]["hardware_model"] = "fixture-iphone"
+report["external_observations"]["first_accepted_input_ms"] = 4_200
+report["test"]["browser_family"] = "chrome"
+report["browser"]["declared_family"] = "chrome"
+report["browser"]["detected_family"] = "chrome"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "an impossible platform/browser pairing" $reports
+grep -q 'browser family is invalid for test.platform' "$tmp/rejected.err"
+
+python3 - "$tmp/desktop-edge-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["test"]["presentation_tier"] = "reduced"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "a reduced desktop compatibility row" $reports
+grep -q 'desktop compatibility reports must use the default' "$tmp/rejected.err"
+
+python3 - "$tmp/desktop-edge-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["test"]["presentation_tier"] = "default"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["candidate"]["source_hash"] = "0" * 64
+report["timing_ms"]["capture_duration"] = 65_000
+report["test"]["hardware_model"] = "fixture-iphone"
+report["test"]["browser_family"] = "safari"
+report["browser"]["declared_family"] = "safari"
 report["browser"]["detected_family"] = "chrome"
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
 expect_rejected "a mismatched detected browser family" $reports
 grep -q 'detected browser family does not match' "$tmp/rejected.err"
+
+python3 - "$tmp/desktop-edge-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["candidate"]["build_id"] = "different-build"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "a mixed-candidate final matrix" $reports
+grep -q 'final browser matrix must use exactly one' "$tmp/rejected.err"
+
+python3 - "$tmp/desktop-edge-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["candidate"]["build_id"] = "fixture-build"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
 
 python3 - "$tmp/iphone-safari-cold-current-1.json" "$tmp/iphone-safari-lifecycle-minimum-1.json" "$tmp/iphone-safari-lifecycle-minimum-2.json" "$tmp/iphone-safari-lifecycle-minimum-3.json" <<'PY'
 import json
@@ -234,6 +408,7 @@ from pathlib import Path
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
 report["external_observations"]["first_visible_table_ms"] = 3_001
+report["external_observations"]["first_accepted_input_ms"] = 3_200
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
 expect_rejected "warm startup over budget" $reports
@@ -247,6 +422,7 @@ from pathlib import Path
 warm = Path(sys.argv[1])
 warm_report = json.loads(warm.read_text(encoding="utf-8"))
 warm_report["external_observations"]["first_visible_table_ms"] = 1_500
+warm_report["external_observations"]["first_accepted_input_ms"] = 1_700
 warm.write_text(json.dumps(warm_report), encoding="utf-8")
 
 lifecycle = Path(sys.argv[2])

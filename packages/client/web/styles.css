@@ -110,13 +110,19 @@ body {
   display: none;
 }
 
-#feasibility-tools output {
+#feasibility-tools output,
+#feasibility-status {
   display: block;
   margin-top: 0.5rem;
   white-space: pre-wrap;
   color: #b8c9c0;
   font-family: ui-monospace, monospace;
   line-height: 1.35;
+}
+
+#feasibility-status {
+  min-height: 1.35em;
+  color: #e5c676;
 }
 
 #feasibility-tools fieldset {

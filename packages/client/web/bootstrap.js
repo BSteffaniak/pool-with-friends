@@ -26,6 +26,7 @@ const audioButton = document.querySelector("#audio-probe");
 const muteButton = document.querySelector("#audio-mute");
 const markEventButton = document.querySelector("#mark-event");
 const downloadButton = document.querySelector("#download-report");
+const statusOutput = document.querySelector("#feasibility-status");
 const query = new URLSearchParams(window.location.search);
 const feasibilityEnabled = query.has("feasibility");
 const activePresentationTier = query.get("tier") === "reduced" ? "reduced" : "default";
@@ -226,8 +227,20 @@ function requireExternalObservations() {
   ];
   for (const input of inputs) {
     if (!input.reportValidity()) {
+      showStatus(`Complete the required observation: ${input.labels?.[0]?.textContent.trim() ?? input.id}`);
       return false;
     }
+  }
+  const observations = externalObservations();
+  if (observations.first_accepted_input_ms < observations.first_visible_table_ms) {
+    showStatus("First accepted input cannot precede the first visible table.");
+    firstInputInput.focus();
+    return false;
+  }
+  if (observations.peak_memory_mib < observations.steady_memory_mib) {
+    showStatus("Peak memory cannot be lower than steady memory.");
+    peakMemoryInput.focus();
+    return false;
   }
   return true;
 }
@@ -241,13 +254,17 @@ function physicalCheckResults() {
   );
 }
 
+function showStatus(message) {
+  statusOutput.textContent = message;
+}
+
 function requirePhysicalChecks() {
   const results = physicalCheckResults();
   const missing = PHYSICAL_CHECKS.find(([id]) => results[id] === null);
   if (missing === undefined) {
     return true;
   }
-  window.alert(`Record Pass or Fail for: ${missing[1]}`);
+  showStatus(`Missing physical check: ${missing[1]}`);
   document.querySelector(`input[name="check-${missing[0]}"]`)?.focus();
   return false;
 }
@@ -280,13 +297,19 @@ function requireTestMetadata() {
   ];
   for (const input of inputs) {
     if (!input.reportValidity()) {
+      showStatus(`Complete the required test metadata: ${input.labels?.[0]?.textContent.trim() ?? input.id}`);
       return false;
     }
+  }
+  if (platformInput.value === "desktop" && presentationTierInput.value !== "default") {
+    showStatus("Desktop compatibility captures must use the default presentation tier.");
+    return false;
   }
   return true;
 }
 
 function startCapture() {
+  showStatus("");
   if (!requireTestMetadata()) {
     return;
   }
@@ -310,6 +333,7 @@ function startCapture() {
   frameWindowCount = 0;
   captureActive = true;
   captureButton.textContent = "Stop capture";
+  showStatus("Capture started.");
   refreshMetrics();
 }
 
@@ -317,6 +341,7 @@ function stopCapture() {
   telemetry.captureStoppedAt = performance.now();
   captureActive = false;
   captureButton.textContent = "Restart capture";
+  showStatus("Capture stopped and ready for validation.");
   sampleMemory();
   refreshMetrics();
 }
@@ -471,8 +496,23 @@ function report() {
   };
 }
 
+function requireStoppedCapture() {
+  if (telemetry.captureStartedAt !== null && telemetry.captureStoppedAt !== null && !captureActive) {
+    return true;
+  }
+  showStatus("Start and stop the capture before downloading its report.");
+  captureButton.focus();
+  return false;
+}
+
 function downloadReport() {
-  if (!requireTestMetadata() || !requirePhysicalChecks() || !requireExternalObservations()) {
+  showStatus("");
+  if (
+    !requireTestMetadata() ||
+    !requirePhysicalChecks() ||
+    !requireExternalObservations() ||
+    !requireStoppedCapture()
+  ) {
     return;
   }
   const contents = JSON.stringify(report(), null, 2);
@@ -487,6 +527,7 @@ function downloadReport() {
   link.download = `pwmtf-feasibility-${build}-${platform}-${browser}-${test.cache_state || "unknown-cache"}-${test.minimum_version_run === "yes" ? "minimum" : "current"}-${test.presentation_tier || "unknown-tier"}-${run}-${new Date().toISOString().replaceAll(":", "-")}.json`;
   link.click();
   URL.revokeObjectURL(url);
+  showStatus(`Downloaded ${link.download}`);
 }
 
 reload.addEventListener("click", () => window.location.reload());

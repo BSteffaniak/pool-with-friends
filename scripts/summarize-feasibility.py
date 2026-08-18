@@ -8,6 +8,7 @@ import json
 import statistics
 import sys
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ REQUIRED_BROWSER_MATRIX = {
     "ipad": {"safari"},
     "android-phone": {"chrome", "firefox", "samsung-internet"},
     "android-tablet": {"chrome"},
+    "desktop": {"safari", "chrome", "firefox", "edge"},
 }
 REQUIRED_CACHE_STATES = {"cold", "warm", "lifecycle"}
 REQUIRED_VERSION_STATUSES = {"yes", "no"}
@@ -61,6 +63,11 @@ REQUIRED_TEST_FIELDS = (
     "presentation_tier",
     "run_number",
 )
+TEXT_FIELD_LIMITS = {
+    "hardware_model": 80,
+    "os_version": 40,
+    "browser_version": 60,
+}
 REQUIRED_CANDIDATE_FIELDS = (
     "build_id",
     "source_hash",
@@ -121,14 +128,25 @@ def load_report(path: Path) -> dict[str, Any]:
         value = test.get(field)
         if value is None or value == "":
             raise ValueError(f"{path}: missing test.{field}")
+    for field, maximum_length in TEXT_FIELD_LIMITS.items():
+        value = test[field]
+        if not isinstance(value, str) or not value.strip() or len(value) > maximum_length:
+            raise ValueError(f"{path}: invalid test.{field}")
+        if any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError(f"{path}: test.{field} contains control characters")
     if test["platform"] not in ALLOWED_PLATFORMS:
         raise ValueError(f"{path}: invalid test.platform")
     if test["browser_family"] not in ALLOWED_BROWSER_FAMILIES:
         raise ValueError(f"{path}: invalid test.browser_family")
+    allowed_platform_browsers = REQUIRED_BROWSER_MATRIX.get(test["platform"])
+    if allowed_platform_browsers is not None and test["browser_family"] not in allowed_platform_browsers:
+        raise ValueError(f"{path}: browser family is invalid for test.platform")
     if test["cache_state"] not in REQUIRED_CACHE_STATES:
         raise ValueError(f"{path}: invalid test.cache_state")
     if test["minimum_version_run"] not in ("yes", "no"):
         raise ValueError(f"{path}: invalid test.minimum_version_run")
+    if test["platform"] == "desktop" and test["presentation_tier"] == "reduced":
+        raise ValueError(f"{path}: desktop compatibility reports must use the default presentation tier")
     if test["presentation_tier"] not in ("default", "reduced"):
         raise ValueError(f"{path}: invalid test.presentation_tier")
     if not isinstance(test["run_number"], int) or isinstance(test["run_number"], bool):
@@ -150,6 +168,16 @@ def load_report(path: Path) -> dict[str, Any]:
             raise ValueError(f"{path}: {section} must be an object")
 
     browser = report["browser"]
+    expected_browser_keys = {
+        "declared_family",
+        "detected_family",
+        "user_agent",
+        "language",
+        "hardware_concurrency",
+        "device_memory_gib",
+    }
+    if set(browser) != expected_browser_keys:
+        raise ValueError(f"{path}: browser metadata keys are invalid")
     if browser.get("declared_family") != test["browser_family"]:
         raise ValueError(f"{path}: browser.declared_family does not match test.browser_family")
     detected_family = browser.get("detected_family")
@@ -159,6 +187,67 @@ def load_report(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path}: detected browser family does not match test.browser_family")
     if not isinstance(browser.get("user_agent"), str) or not browser["user_agent"]:
         raise ValueError(f"{path}: browser.user_agent must be a non-empty string")
+
+    display = report["display"]
+    expected_display_keys = {
+        "screen_width",
+        "screen_height",
+        "viewport_width",
+        "viewport_height",
+        "device_pixel_ratio",
+        "orientation",
+    }
+    if set(display) != expected_display_keys:
+        raise ValueError(f"{path}: display metadata keys are invalid")
+    for name in ("screen_width", "screen_height", "viewport_width", "viewport_height", "device_pixel_ratio"):
+        value = number(display.get(name))
+        if value is None or value <= 0:
+            raise ValueError(f"{path}: display.{name} must be positive and finite")
+
+    timing = report["timing_ms"]
+    expected_timing_keys = {"client_ready", "first_canvas_contact", "capture_duration"}
+    if set(timing) != expected_timing_keys:
+        raise ValueError(f"{path}: timing_ms keys are invalid")
+    for name in expected_timing_keys:
+        value = number(timing.get(name))
+        if value is None or value < 0:
+            raise ValueError(f"{path}: timing_ms.{name} must be a non-negative finite number")
+    if timing["first_canvas_contact"] < timing["client_ready"]:
+        raise ValueError(f"{path}: first canvas contact cannot precede client readiness")
+    if timing["capture_duration"] == 0:
+        raise ValueError(f"{path}: timing_ms.capture_duration must be greater than zero")
+
+    performance = report["performance"]
+    expected_performance_keys = {
+        "frame_count",
+        "current_fps",
+        "minimum_one_second_fps",
+        "median_one_second_fps",
+        "maximum_one_second_fps",
+        "median_frame_time_ms",
+        "p95_frame_time_ms",
+        "p99_frame_time_ms",
+        "maximum_frame_gap_ms",
+        "current_js_heap_bytes",
+        "peak_js_heap_bytes",
+    }
+    if set(performance) != expected_performance_keys:
+        raise ValueError(f"{path}: performance keys are invalid")
+    for name in (
+        "frame_count",
+        "minimum_one_second_fps",
+        "median_one_second_fps",
+        "maximum_one_second_fps",
+        "median_frame_time_ms",
+        "p95_frame_time_ms",
+        "p99_frame_time_ms",
+        "maximum_frame_gap_ms",
+    ):
+        value = number(performance.get(name))
+        if value is None or value < 0:
+            raise ValueError(f"{path}: performance.{name} must be non-negative and finite")
+    if performance["frame_count"] <= 0:
+        raise ValueError(f"{path}: performance.frame_count must be greater than zero")
 
     checks = report["physical_checks"]
     if set(checks) != REQUIRED_PHYSICAL_CHECKS:
@@ -175,14 +264,27 @@ def load_report(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path}: invalid physical check results: {', '.join(sorted(invalid_checks))}")
 
     observations = report["external_observations"]
+    expected_observation_keys = {
+        "first_visible_table_ms",
+        "first_accepted_input_ms",
+        "steady_memory_mib",
+        "peak_memory_mib",
+        "thermal_result",
+        "reload_or_eviction_observed",
+    }
+    if set(observations) != expected_observation_keys:
+        raise ValueError(f"{path}: external_observations keys are invalid")
     for name in (
         "first_visible_table_ms",
         "first_accepted_input_ms",
         "steady_memory_mib",
         "peak_memory_mib",
     ):
-        if number(observations.get(name)) is None:
-            raise ValueError(f"{path}: external_observations.{name} must be finite")
+        value = number(observations.get(name))
+        if value is None or value < 0:
+            raise ValueError(f"{path}: external_observations.{name} must be non-negative and finite")
+    if observations["first_accepted_input_ms"] < observations["first_visible_table_ms"]:
+        raise ValueError(f"{path}: first accepted input cannot precede the visible table")
     if observations.get("thermal_result") not in ("no-warning", "warning"):
         raise ValueError(f"{path}: invalid external_observations.thermal_result")
     if observations.get("reload_or_eviction_observed") not in ("yes", "no"):
@@ -193,6 +295,12 @@ def load_report(path: Path) -> dict[str, Any]:
     captured_at = report.get("captured_at")
     if not isinstance(captured_at, str) or not captured_at:
         raise ValueError(f"{path}: captured_at must be a non-empty string")
+    try:
+        captured_time = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"{path}: captured_at must be an ISO 8601 timestamp") from error
+    if captured_time.tzinfo is None:
+        raise ValueError(f"{path}: captured_at must include a timezone")
 
     return report
 
@@ -294,11 +402,17 @@ def markdown_table(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> str:
     return "\n".join(lines)
 
 
+def is_mobile_platform(platform: str) -> bool:
+    """Return whether a platform requires mobile performance acceptance budgets."""
+    return platform in REQUIRED_PLATFORMS
+
+
 def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> list[str]:
     """Return objective budget and lifecycle failures in final-gate reports."""
     errors: list[str] = []
     for key, reports in groups.items():
         cache_state = key[9]
+        platform = key[4]
         presentation_tier = key[11]
         for report in reports:
             run = report["test"]["run_number"]
@@ -315,7 +429,12 @@ def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> li
 
             visible = number(observations["first_visible_table_ms"])
             visible_budget = COLD_VISIBLE_BUDGET_MS if cache_state == "cold" else WARM_VISIBLE_BUDGET_MS
-            if cache_state in ("cold", "warm") and visible is not None and visible > visible_budget:
+            if (
+                is_mobile_platform(platform)
+                and cache_state in ("cold", "warm")
+                and visible is not None
+                and visible > visible_budget
+            ):
                 errors.append(f"{key} run {run}: first-visible {visible:.2f}ms exceeds {visible_budget}ms")
 
             duration = metric(report, "timing_ms", "capture_duration")
@@ -327,9 +446,13 @@ def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> li
             minimum_fps = metric(report, "performance", "minimum_one_second_fps")
             if minimum_fps is None:
                 errors.append(f"{key} run {run}: minimum FPS is unavailable")
-            elif minimum_fps < MINIMUM_FPS_FLOOR:
+            elif is_mobile_platform(platform) and minimum_fps < MINIMUM_FPS_FLOOR:
                 errors.append(f"{key} run {run}: minimum FPS {minimum_fps:.2f} is below {MINIMUM_FPS_FLOOR}")
-            elif minimum_fps < FULL_QUALITY_FPS_THRESHOLD and presentation_tier != "reduced":
+            elif (
+                is_mobile_platform(platform)
+                and minimum_fps < FULL_QUALITY_FPS_THRESHOLD
+                and presentation_tier != "reduced"
+            ):
                 errors.append(
                     f"{key} run {run}: minimum FPS {minimum_fps:.2f} requires a measured quality fallback"
                 )
@@ -374,7 +497,7 @@ def main() -> int:
     parser.add_argument(
         "--require-mobile-matrix",
         action="store_true",
-        help="require iPhone, iPad, Android phone/tablet and cold, warm, lifecycle groups",
+        help="require current/minimum cold, warm, and lifecycle groups for the complete mobile and desktop browser matrix",
     )
     args = parser.parse_args()
 
@@ -392,10 +515,18 @@ def main() -> int:
             errors.append(f"{key}: duplicate run numbers")
         if len(set(run_numbers)) < REQUIRED_RUNS and not args.allow_incomplete:
             errors.append(f"{key}: requires {REQUIRED_RUNS} distinct runs, found {len(set(run_numbers))}")
+        captured_at_values = [report["captured_at"] for report in reports]
+        if len(captured_at_values) != len(set(captured_at_values)):
+            errors.append(f"{key}: duplicate capture timestamps")
 
     if args.require_mobile_matrix:
         if args.allow_incomplete:
             errors.append("--allow-incomplete cannot be combined with --require-mobile-matrix")
+        candidate_identities = {key[:4] for key in groups}
+        if len(candidate_identities) != 1:
+            errors.append(
+                "final browser matrix must use exactly one build ID, source hash, Bevy version, and renderer"
+            )
         present = {(key[4], key[7], key[9], key[10]) for key in groups}
         missing = sorted(
             (platform, browser_family, cache_state, version_status)
@@ -418,6 +549,11 @@ def main() -> int:
         present_browsers = {(key[4], key[7]) for key in groups}
         for platform, browser_family in sorted(required_browsers - present_browsers):
             errors.append(f"mobile matrix missing browser evidence for {platform} / {browser_family}")
+        for key in groups:
+            platform = key[4]
+            presentation_tier = key[11]
+            if platform == "desktop" and presentation_tier != "default":
+                errors.append("desktop compatibility matrix contains a non-default presentation tier")
         errors.extend(acceptance_errors(groups))
 
     if errors:
