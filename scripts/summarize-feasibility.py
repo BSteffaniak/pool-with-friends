@@ -187,6 +187,16 @@ def load_report(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path}: detected browser family does not match test.browser_family")
     if not isinstance(browser.get("user_agent"), str) or not browser["user_agent"]:
         raise ValueError(f"{path}: browser.user_agent must be a non-empty string")
+    hardware_concurrency = browser["hardware_concurrency"]
+    if hardware_concurrency is not None and (
+        not isinstance(hardware_concurrency, int)
+        or isinstance(hardware_concurrency, bool)
+        or hardware_concurrency <= 0
+    ):
+        raise ValueError(f"{path}: browser.hardware_concurrency must be null or a positive integer")
+    device_memory = browser["device_memory_gib"]
+    if device_memory is not None and (number(device_memory) is None or device_memory <= 0):
+        raise ValueError(f"{path}: browser.device_memory_gib must be null or positive and finite")
 
     display = report["display"]
     expected_display_keys = {
@@ -258,6 +268,16 @@ def load_report(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path}: p95 frame time cannot exceed p99 frame time")
     if performance["p99_frame_time_ms"] > performance["maximum_frame_gap_ms"]:
         raise ValueError(f"{path}: p99 frame time cannot exceed maximum frame gap")
+    for name in ("current_js_heap_bytes", "peak_js_heap_bytes"):
+        value = performance[name]
+        if value is not None and (number(value) is None or value < 0):
+            raise ValueError(f"{path}: performance.{name} must be null or non-negative and finite")
+    if (
+        performance["current_js_heap_bytes"] is not None
+        and performance["peak_js_heap_bytes"] is not None
+        and performance["peak_js_heap_bytes"] < performance["current_js_heap_bytes"]
+    ):
+        raise ValueError(f"{path}: peak JS heap cannot be lower than current JS heap")
 
     checks = report["physical_checks"]
     if set(checks) != REQUIRED_PHYSICAL_CHECKS:

@@ -139,7 +139,7 @@ if grep -q 'id="feasibility-tools"[^>]*hidden' "$browser_log"; then
     printf '%s\n' "feasibility capture panel remained hidden" >&2
     exit 1
 fi
-for control in test-platform hardware-model os-version browser-family browser-version cache-state minimum-version-run presentation-tier run-number candidate-identity physical-checks first-visible-ms first-input-ms steady-memory-mib peak-memory-mib thermal-result reload-observed event-label capture-toggle audio-probe mark-event download-report feasibility-status; do
+for control in test-platform hardware-model os-version browser-family browser-version cache-state minimum-version-run presentation-tier run-number candidate-identity physical-checks first-visible-ms first-input-ms steady-memory-mib peak-memory-mib thermal-result reload-observed event-label capture-toggle audio-probe mark-event download-report reset-report feasibility-status; do
     if ! grep -q "id=\"$control\"" "$browser_log"; then
         cat "$browser_log" >&2
         printf '%s\n' "feasibility capture control missing: $control" >&2

@@ -29,12 +29,25 @@ fi
 
 if [ "${PWMTF_SKIP_BUILD:-0}" != 1 ]; then
     ./scripts/build-wasm.sh
-elif [ ! -f dist/index.html ]; then
-    printf '%s\n' "PWMTF_SKIP_BUILD=1 requires an existing dist/index.html" >&2
+elif [ ! -f dist/index.html ] || [ ! -f dist/bootstrap.js ]; then
+    printf '%s\n' "PWMTF_SKIP_BUILD=1 requires an existing identified dist bundle" >&2
     exit 1
 fi
 
-printf '%s\n' "Serving the PWMTF feasibility client at https://$public_host:$port/?feasibility"
+candidate_identity=$(python3 - <<'PY'
+import re
+from pathlib import Path
+
+contents = Path("dist/bootstrap.js").read_text(encoding="utf-8")
+build = re.search(r'^const candidateBuildId = "([A-Za-z0-9._-]+)";$', contents, re.MULTILINE)
+source = re.search(r'^const candidateSourceHash = "([0-9a-f]{64})";$', contents, re.MULTILINE)
+if build is None or source is None:
+    raise SystemExit("dist bundle does not contain a valid candidate identity")
+print(f"build {build.group(1)} / source {source.group(1)}")
+PY
+)
+
+printf '%s\n' "Serving PWMTF candidate $candidate_identity"
 printf '%s\n' "Keep this terminal open while testing; press Ctrl-C to stop."
 
 exec python3 - "$bind_address" "$port" "$root/dist" "$certificate" "$private_key" <<'PY'
@@ -53,6 +66,7 @@ class FeasibilityHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Permissions-Policy", "camera=(), geolocation=(), microphone=()")
+        self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
 

@@ -28,6 +28,7 @@ const muteButton = document.querySelector("#audio-mute");
 const markEventButton = document.querySelector("#mark-event");
 const eventLabelInput = document.querySelector("#event-label");
 const downloadButton = document.querySelector("#download-report");
+const resetButton = document.querySelector("#reset-report");
 const statusOutput = document.querySelector("#feasibility-status");
 const query = new URLSearchParams(window.location.search);
 const feasibilityEnabled = query.has("feasibility");
@@ -543,12 +544,45 @@ function downloadReport() {
   showStatus(`Downloaded ${link.download}`);
 }
 
+function resetReportForm() {
+  if (captureActive) {
+    showStatus("Stop the active capture before resetting the form.");
+    captureButton.focus();
+    return;
+  }
+  for (const input of [
+    platformInput,
+    hardwareModelInput,
+    osVersionInput,
+    browserFamilyInput,
+    browserVersionInput,
+    cacheStateInput,
+    minimumVersionInput,
+    runNumberInput,
+    firstVisibleInput,
+    firstInputInput,
+    steadyMemoryInput,
+    peakMemoryInput,
+    thermalResultInput,
+    reloadObservedInput,
+    eventLabelInput,
+  ]) {
+    input.value = "";
+  }
+  for (const input of physicalChecks.querySelectorAll('input[type="radio"]')) {
+    input.checked = false;
+  }
+  showStatus("Report form reset.");
+  platformInput.focus();
+}
+
 reload.addEventListener("click", () => window.location.reload());
 captureButton.addEventListener("click", () => (captureActive ? stopCapture() : startCapture()));
 audioButton.addEventListener("click", () => void playAudioProbe());
 muteButton.addEventListener("click", toggleMute);
 markEventButton.addEventListener("click", markEvent);
 downloadButton.addEventListener("click", downloadReport);
+resetButton.addEventListener("click", resetReportForm);
 canvas.addEventListener("pointerdown", () => {
   telemetry.pointerContacts += 1;
   telemetry.firstCanvasContactMs ??= performance.now() - navigationStartedAt;
