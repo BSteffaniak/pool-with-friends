@@ -134,7 +134,7 @@ def load_report(path: Path) -> dict[str, Any]:
     }
     if set(report) != expected_report_keys:
         raise ValueError(f"{path}: report root keys are invalid")
-    if report.get("schema_version") != 8:
+    if report.get("schema_version") != 9:
         raise ValueError(f"{path}: unsupported schema_version")
 
     candidate = report.get("candidate")
@@ -366,6 +366,7 @@ def load_report(path: Path) -> dict[str, Any]:
         "visibility_changes",
         "orientation_changes",
         "initial_orientation",
+        "final_orientation",
         "orientation_states",
         "page_hide_count",
         "page_show_count",
@@ -388,8 +389,10 @@ def load_report(path: Path) -> dict[str, Any]:
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValueError(f"{path}: interaction.{name} must be a non-negative integer")
     initial_orientation = interaction["initial_orientation"]
-    if initial_orientation is not None and not isinstance(initial_orientation, str):
-        raise ValueError(f"{path}: invalid interaction.initial_orientation")
+    final_orientation = interaction["final_orientation"]
+    for name, value in (("initial_orientation", initial_orientation), ("final_orientation", final_orientation)):
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{path}: invalid interaction.{name}")
     orientation_states = interaction["orientation_states"]
     if not isinstance(orientation_states, list) or len(orientation_states) > 100:
         raise ValueError(f"{path}: interaction.orientation_states must be a bounded list")
@@ -503,6 +506,10 @@ def load_report(path: Path) -> dict[str, Any]:
         value = number(observations.get(name))
         if value is None or value < 0:
             raise ValueError(f"{path}: external_observations.{name} must be non-negative and finite")
+    if observations["first_visible_table_ms"] < timing["client_ready"]:
+        raise ValueError(f"{path}: first visible table cannot precede client readiness")
+    if observations["first_accepted_input_ms"] < timing["first_canvas_contact"]:
+        raise ValueError(f"{path}: first accepted input cannot precede first canvas contact")
     if observations["first_accepted_input_ms"] < observations["first_visible_table_ms"]:
         raise ValueError(f"{path}: first accepted input cannot precede the visible table")
     if observations.get("thermal_result") not in ("no-warning", "warning"):
@@ -715,6 +722,10 @@ def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> li
                     errors.append(f"{key} run {run}: lifecycle capture {actual} is shorter than 10 minutes")
 
             audio = report["audio"]
+            if cache_state != "lifecycle" and audio.get("backgroundSuspensions", 0) > 0:
+                errors.append(f"{key} run {run}: non-lifecycle capture contains audio suspension")
+            if cache_state != "lifecycle" and audio.get("explicitResumes", 0) > 0:
+                errors.append(f"{key} run {run}: non-lifecycle capture contains audio resume")
             if audio.get("state") != "running":
                 errors.append(f"{key} run {run}: audio context was not running when exported")
             if audio.get("muted") is not False:
@@ -753,6 +764,11 @@ def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> li
                     and report["interaction"]["initial_orientation"].startswith("landscape")
                 ):
                     errors.append(f"{key} run {run}: lifecycle capture did not start in landscape")
+                if not (
+                    isinstance(report["interaction"]["final_orientation"], str)
+                    and report["interaction"]["final_orientation"].startswith("landscape")
+                ):
+                    errors.append(f"{key} run {run}: lifecycle capture did not stop in landscape")
                 if len(orientation_states) != 2 or not (
                     isinstance(orientation_states[0], str)
                     and orientation_states[0].startswith("portrait")

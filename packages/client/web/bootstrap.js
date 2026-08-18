@@ -57,7 +57,7 @@ const PHYSICAL_CHECKS = [
 ];
 
 const telemetry = {
-  schemaVersion: 8,
+  schemaVersion: 9,
   clientReadyMs: null,
   firstCanvasContactMs: null,
   pointerContacts: 0,
@@ -79,6 +79,7 @@ const telemetry = {
   orientationChanges: 0,
   orientationStates: [],
   initialOrientation: null,
+  finalOrientation: null,
   pageHideCount: 0,
   pageShowCount: 0,
   restoredFromPageCache: false,
@@ -326,6 +327,16 @@ function requireExternalObservations() {
     }
   }
   const observations = externalObservations();
+  if (observations.first_visible_table_ms < telemetry.clientReadyMs) {
+    showStatus("First visible table cannot precede client readiness.");
+    firstVisibleInput.focus();
+    return false;
+  }
+  if (observations.first_accepted_input_ms < telemetry.firstCanvasContactMs) {
+    showStatus("First accepted input cannot precede the first canvas contact.");
+    firstInputInput.focus();
+    return false;
+  }
   if (observations.first_accepted_input_ms < observations.first_visible_table_ms) {
     showStatus("First accepted input cannot precede the first visible table.");
     firstInputInput.focus();
@@ -490,6 +501,7 @@ function startCapture() {
   telemetry.orientationChanges = 0;
   telemetry.orientationStates = [];
   telemetry.initialOrientation = window.screen.orientation?.type ?? null;
+  telemetry.finalOrientation = null;
   telemetry.pageHideCount = 0;
   telemetry.pageShowCount = 0;
   telemetry.restoredFromPageCache = false;
@@ -521,6 +533,7 @@ function stopCapture() {
     return;
   }
   telemetry.captureStoppedAt = performance.now();
+  telemetry.finalOrientation = window.screen.orientation?.type ?? null;
   if (telemetry.hiddenStartedAt !== null) {
     const hiddenDuration = telemetry.captureStoppedAt - telemetry.hiddenStartedAt;
     telemetry.hiddenDurationMs += hiddenDuration;
@@ -697,6 +710,7 @@ function report() {
       visibility_changes: telemetry.visibilityChanges,
       orientation_changes: telemetry.orientationChanges,
       initial_orientation: telemetry.initialOrientation,
+      final_orientation: telemetry.finalOrientation,
       orientation_states: telemetry.orientationStates,
       page_hide_count: telemetry.pageHideCount,
       page_show_count: telemetry.pageShowCount,
@@ -743,6 +757,14 @@ function requireCaptureEvidence() {
     );
     return false;
   }
+  if (cacheStateInput.value !== "lifecycle" && telemetry.audio.backgroundSuspensions > 0) {
+    showStatus("Interaction captures cannot include audio background suspension; restart this run.");
+    return false;
+  }
+  if (cacheStateInput.value !== "lifecycle" && telemetry.audio.explicitResumes > 0) {
+    showStatus("Interaction captures cannot include audio foreground resume; restart this run.");
+    return false;
+  }
   if (
     cacheStateInput.value !== "lifecycle" &&
     (telemetry.visibilityChanges > 0 || telemetry.pageHideCount > 0 || telemetry.pageShowCount > 0)
@@ -774,6 +796,8 @@ function requireCaptureEvidence() {
     if (
       typeof telemetry.initialOrientation !== "string" ||
       !telemetry.initialOrientation.startsWith("landscape") ||
+      typeof telemetry.finalOrientation !== "string" ||
+      !telemetry.finalOrientation.startsWith("landscape") ||
       telemetry.orientationStates.length !== 2 ||
       !telemetry.orientationStates[0]?.startsWith("portrait") ||
       !telemetry.orientationStates[1]?.startsWith("landscape")

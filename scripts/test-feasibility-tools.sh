@@ -43,7 +43,7 @@ for platform, browser_families in platforms.items():
                     lifecycle = cache_state == "lifecycle"
                     browser_version = "151" if minimum_version_run == "no" else "150"
                     report = {
-                        "schema_version": 8,
+                        "schema_version": 9,
                         "captured_at": (
                             f"2026-08-{run_number + (10 if minimum_version_run == 'yes' else 0):02d}"
                             f"T00:00:00Z"
@@ -119,6 +119,7 @@ for platform, browser_families in platforms.items():
                             "visibility_changes": 4 if lifecycle else 0,
                             "orientation_changes": 2 if lifecycle else 0,
                             "initial_orientation": "landscape-primary",
+                            "final_orientation": "landscape-primary",
                             "orientation_states": ["portrait-primary", "landscape-primary"] if lifecycle else [],
                             "page_hide_count": 2 if lifecycle else 0,
                             "page_show_count": 2 if lifecycle else 0,
@@ -181,7 +182,7 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
-report["schema_version"] = 8
+report["schema_version"] = 9
 report["candidate"]["wasm_optimization"] = "not-applied"
 path.write_text(json.dumps(report), encoding="utf-8")
 PY

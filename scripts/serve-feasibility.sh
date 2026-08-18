@@ -41,9 +41,16 @@ from pathlib import Path
 contents = Path("dist/bootstrap.js").read_text(encoding="utf-8")
 build = re.search(r'^const candidateBuildId = "([A-Za-z0-9._-]+)";$', contents, re.MULTILINE)
 source = re.search(r'^const candidateSourceHash = "([0-9a-f]{64})";$', contents, re.MULTILINE)
-if build is None or source is None:
+optimization = re.search(
+    r'^const candidateWasmOptimization = "(wasm-opt-Oz|not-applied)";$', contents, re.MULTILINE
+)
+if build is None or source is None or optimization is None:
     raise SystemExit("dist bundle does not contain a valid candidate identity")
-print(f"build {build.group(1)} / source {source.group(1)}")
+if source.group(1) not in build.group(1):
+    raise SystemExit("candidate build ID does not include candidate source hash")
+if optimization.group(1) != "wasm-opt-Oz":
+    raise SystemExit("physical feasibility serving requires a wasm-opt-Oz candidate")
+print(f"build {build.group(1)} / source {source.group(1)} / {optimization.group(1)}")
 PY
 )
 

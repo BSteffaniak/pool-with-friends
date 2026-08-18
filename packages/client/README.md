@@ -54,4 +54,4 @@ PWMTF_TLS_KEY=/absolute/path/to/private-key.pem \
 ./scripts/serve-feasibility.sh
 ```
 
-Optional `PWMTF_FEASIBILITY_BIND` and `PWMTF_FEASIBILITY_PORT` values select the listener; the defaults are `0.0.0.0` and `8443`. Set `PWMTF_SKIP_BUILD=1` only to reuse an existing `dist/` build. Open the printed `https://…/?feasibility` URL on each test device. Do not bypass browser certificate warnings or expose the private key.
+Optional `PWMTF_FEASIBILITY_BIND` and `PWMTF_FEASIBILITY_PORT` values select the listener; the defaults are `0.0.0.0` and `8443`. Set `PWMTF_SKIP_BUILD=1` only to reuse an existing `dist/` build. The HTTPS physical-device server independently refuses unoptimized or source-unbound bundles before listening, so `PWMTF_SKIP_BUILD=1` cannot accidentally serve desktop-smoke artifacts as physical evidence. Open the printed `https://…/?feasibility` URL on each test device. Do not bypass browser certificate warnings or expose the private key.
