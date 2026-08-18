@@ -26,6 +26,26 @@ if [ ! -r "$private_key" ]; then
     printf '%s\n' "TLS private key is not readable: $private_key" >&2
     exit 1
 fi
+if [ "$certificate" = "$private_key" ]; then
+    printf '%s\n' "TLS certificate and private key must be separate files" >&2
+    exit 1
+fi
+if ! openssl x509 -in "$certificate" -noout -checkend 86400 >/dev/null 2>&1; then
+    printf '%s\n' "TLS certificate is invalid, expired, or expires within 24 hours" >&2
+    exit 1
+fi
+certificate_public_key=$(openssl x509 -in "$certificate" -pubkey -noout 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | openssl dgst -sha256)
+private_public_key=$(openssl pkey -in "$private_key" -pubout -outform DER 2>/dev/null | openssl dgst -sha256)
+if [ -z "$certificate_public_key" ] || [ "$certificate_public_key" != "$private_public_key" ]; then
+    printf '%s\n' "TLS private key does not match the certificate" >&2
+    exit 1
+fi
+
+if ! openssl x509 -in "$certificate" -noout -checkhost "$public_host" >/dev/null 2>&1 && \
+   ! openssl x509 -in "$certificate" -noout -checkip "$public_host" >/dev/null 2>&1; then
+    printf '%s\n' "TLS certificate does not cover PWMTF_FEASIBILITY_HOST: $public_host" >&2
+    exit 1
+fi
 
 if [ "${PWMTF_SKIP_BUILD:-0}" != 1 ]; then
     ./scripts/build-wasm.sh
