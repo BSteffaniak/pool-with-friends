@@ -110,6 +110,14 @@ body {
   display: none;
 }
 
+#feasibility-tools.collapsed > :not(strong, #candidate-identity, div, #feasibility-status) {
+  display: none;
+}
+
+#feasibility-tools.collapsed {
+  max-width: min(28rem, calc(100% - 1.5rem));
+}
+
 #feasibility-tools output,
 #feasibility-status {
   display: block;

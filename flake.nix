@@ -70,6 +70,7 @@
             cargo-machete
             cargo-nextest
             llvmPackages.bintools
+            nodejs
             pkg-config
             wasmBindgenCli
           ];

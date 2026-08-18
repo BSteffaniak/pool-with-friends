@@ -41,6 +41,7 @@ REQUIRED_PHYSICAL_CHECKS = {
     "safe_area",
     "orientation",
     "background",
+    "browser_chrome",
     "audio",
     "input_response",
     "memory",
@@ -71,6 +72,7 @@ TEXT_FIELD_LIMITS = {
 REQUIRED_CANDIDATE_FIELDS = (
     "build_id",
     "source_hash",
+    "wasm_optimization",
     "bevy",
     "renderer",
 )
@@ -86,6 +88,27 @@ def number(value: Any) -> float | None:
     return result
 
 
+def browser_version(value: Any) -> tuple[int, ...] | None:
+    """Parse and normalize a dotted numeric browser version."""
+    if not isinstance(value, str):
+        return None
+    parts = value.split(".")
+    if not parts or any(not part.isdigit() for part in parts):
+        return None
+    parsed = [int(part) for part in parts]
+    while len(parsed) > 1 and parsed[-1] == 0:
+        parsed.pop()
+    return tuple(parsed)
+
+
+def canonical_browser_version(value: str) -> str:
+    """Return the canonical dotted numeric spelling of a browser version."""
+    parsed = browser_version(value)
+    if parsed is None:
+        raise ValueError("browser version is not dotted numeric")
+    return ".".join(str(part) for part in parsed)
+
+
 def load_report(path: Path) -> dict[str, Any]:
     """Load and structurally validate one feasibility report."""
     try:
@@ -95,7 +118,23 @@ def load_report(path: Path) -> dict[str, Any]:
 
     if not isinstance(report, dict):
         raise ValueError(f"{path}: report root must be an object")
-    if report.get("schema_version") != 1:
+    expected_report_keys = {
+        "schema_version",
+        "captured_at",
+        "candidate",
+        "test",
+        "physical_checks",
+        "external_observations",
+        "browser",
+        "display",
+        "timing_ms",
+        "performance",
+        "interaction",
+        "audio",
+    }
+    if set(report) != expected_report_keys:
+        raise ValueError(f"{path}: report root keys are invalid")
+    if report.get("schema_version") != 8:
         raise ValueError(f"{path}: unsupported schema_version")
 
     candidate = report.get("candidate")
@@ -116,6 +155,10 @@ def load_report(path: Path) -> dict[str, Any]:
         character not in "0123456789abcdef" for character in candidate["source_hash"]
     ):
         raise ValueError(f"{path}: invalid candidate.source_hash")
+    if candidate["source_hash"] not in candidate["build_id"]:
+        raise ValueError(f"{path}: candidate.build_id must include candidate.source_hash")
+    if candidate["wasm_optimization"] not in {"wasm-opt-Oz", "not-applied"}:
+        raise ValueError(f"{path}: invalid candidate.wasm_optimization")
     if candidate["bevy"] != "0.19.1":
         raise ValueError(f"{path}: unexpected candidate.bevy")
     if candidate["renderer"] != "WebGL2":
@@ -124,6 +167,9 @@ def load_report(path: Path) -> dict[str, Any]:
     test = report.get("test")
     if not isinstance(test, dict):
         raise ValueError(f"{path}: test metadata must be an object")
+    expected_test_keys = set(REQUIRED_TEST_FIELDS)
+    if set(test) != expected_test_keys:
+        raise ValueError(f"{path}: test metadata keys are invalid")
     for field in REQUIRED_TEST_FIELDS:
         value = test.get(field)
         if value is None or value == "":
@@ -136,6 +182,11 @@ def load_report(path: Path) -> dict[str, Any]:
             raise ValueError(f"{path}: test.{field} contains control characters")
     if test["platform"] not in ALLOWED_PLATFORMS:
         raise ValueError(f"{path}: invalid test.platform")
+    parsed_test_browser_version = browser_version(test["browser_version"])
+    if parsed_test_browser_version is None:
+        raise ValueError(f"{path}: test.browser_version must be a dotted numeric version")
+    if test["browser_version"] != canonical_browser_version(test["browser_version"]):
+        raise ValueError(f"{path}: test.browser_version must use canonical dotted numeric spelling")
     if test["browser_family"] not in ALLOWED_BROWSER_FAMILIES:
         raise ValueError(f"{path}: invalid test.browser_family")
     allowed_platform_browsers = REQUIRED_BROWSER_MATRIX.get(test["platform"])
@@ -171,6 +222,9 @@ def load_report(path: Path) -> dict[str, Any]:
     expected_browser_keys = {
         "declared_family",
         "detected_family",
+        "detected_platform",
+        "declared_version",
+        "detected_version",
         "user_agent",
         "language",
         "hardware_concurrency",
@@ -180,11 +234,22 @@ def load_report(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path}: browser metadata keys are invalid")
     if browser.get("declared_family") != test["browser_family"]:
         raise ValueError(f"{path}: browser.declared_family does not match test.browser_family")
+    if browser.get("detected_platform") != test["platform"]:
+        raise ValueError(f"{path}: browser.detected_platform does not match test.platform")
+    if browser.get("declared_version") != test["browser_version"]:
+        raise ValueError(f"{path}: browser.declared_version does not match test.browser_version")
     detected_family = browser.get("detected_family")
-    if detected_family not in ALLOWED_BROWSER_FAMILIES | {"unknown"}:
+    if detected_family not in ALLOWED_BROWSER_FAMILIES:
         raise ValueError(f"{path}: invalid browser.detected_family")
-    if detected_family != "unknown" and detected_family != test["browser_family"]:
+    if detected_family != test["browser_family"]:
         raise ValueError(f"{path}: detected browser family does not match test.browser_family")
+    detected_version = browser.get("detected_version")
+    if not isinstance(detected_version, str) or not detected_version:
+        raise ValueError(f"{path}: browser.detected_version must be a non-empty string")
+    declared_version = browser_version(test["browser_version"])
+    parsed_detected_version = browser_version(detected_version)
+    if declared_version is None or parsed_detected_version is None or declared_version != parsed_detected_version:
+        raise ValueError(f"{path}: detected browser version does not match test.browser_version")
     if not isinstance(browser.get("user_agent"), str) or not browser["user_agent"]:
         raise ValueError(f"{path}: browser.user_agent must be a non-empty string")
     hardware_concurrency = browser["hardware_concurrency"]
@@ -215,17 +280,32 @@ def load_report(path: Path) -> dict[str, Any]:
             raise ValueError(f"{path}: display.{name} must be positive and finite")
 
     timing = report["timing_ms"]
-    expected_timing_keys = {"client_ready", "first_canvas_contact", "capture_duration"}
+    expected_timing_keys = {
+        "client_ready",
+        "first_canvas_contact",
+        "capture_duration",
+        "hidden_duration",
+        "hidden_durations",
+    }
     if set(timing) != expected_timing_keys:
         raise ValueError(f"{path}: timing_ms keys are invalid")
-    for name in expected_timing_keys:
+    for name in expected_timing_keys - {"hidden_durations"}:
         value = number(timing.get(name))
         if value is None or value < 0:
             raise ValueError(f"{path}: timing_ms.{name} must be a non-negative finite number")
     if timing["first_canvas_contact"] < timing["client_ready"]:
         raise ValueError(f"{path}: first canvas contact cannot precede client readiness")
+    hidden_durations = timing["hidden_durations"]
+    if not isinstance(hidden_durations, list) or len(hidden_durations) > 100:
+        raise ValueError(f"{path}: timing_ms.hidden_durations must be a bounded list")
+    if any(number(value) is None or value < 0 for value in hidden_durations):
+        raise ValueError(f"{path}: timing_ms.hidden_durations must contain non-negative finite numbers")
+    if abs(sum(hidden_durations) - timing["hidden_duration"]) > 1:
+        raise ValueError(f"{path}: timing_ms.hidden_durations do not sum to hidden_duration")
     if timing["capture_duration"] == 0:
         raise ValueError(f"{path}: timing_ms.capture_duration must be greater than zero")
+    if timing["hidden_duration"] > timing["capture_duration"]:
+        raise ValueError(f"{path}: timing_ms.hidden_duration cannot exceed active capture duration")
 
     performance = report["performance"]
     expected_performance_keys = {
@@ -285,9 +365,13 @@ def load_report(path: Path) -> dict[str, Any]:
         "canvas_contacts",
         "visibility_changes",
         "orientation_changes",
+        "initial_orientation",
+        "orientation_states",
         "page_hide_count",
         "page_show_count",
         "restored_from_page_cache",
+        "capture_started_visible",
+        "capture_stopped_visible",
         "marked_events",
     }
     interaction = report["interaction"]
@@ -303,8 +387,21 @@ def load_report(path: Path) -> dict[str, Any]:
         value = interaction[name]
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValueError(f"{path}: interaction.{name} must be a non-negative integer")
-    if not isinstance(interaction["restored_from_page_cache"], bool):
-        raise ValueError(f"{path}: interaction.restored_from_page_cache must be boolean")
+    initial_orientation = interaction["initial_orientation"]
+    if initial_orientation is not None and not isinstance(initial_orientation, str):
+        raise ValueError(f"{path}: invalid interaction.initial_orientation")
+    orientation_states = interaction["orientation_states"]
+    if not isinstance(orientation_states, list) or len(orientation_states) > 100:
+        raise ValueError(f"{path}: interaction.orientation_states must be a bounded list")
+    if len(orientation_states) != interaction["orientation_changes"]:
+        raise ValueError(f"{path}: orientation states do not match orientation change count")
+    if any(value is not None and not isinstance(value, str) for value in orientation_states):
+        raise ValueError(f"{path}: invalid interaction orientation state")
+    for name in ("restored_from_page_cache", "capture_started_visible", "capture_stopped_visible"):
+        if not isinstance(interaction[name], bool):
+            raise ValueError(f"{path}: interaction.{name} must be boolean")
+    if not interaction["capture_started_visible"] or not interaction["capture_stopped_visible"]:
+        raise ValueError(f"{path}: capture must start and stop while visible")
     events = interaction["marked_events"]
     if not isinstance(events, list) or len(events) > 100:
         raise ValueError(f"{path}: interaction.marked_events must be a bounded list")
@@ -313,8 +410,16 @@ def load_report(path: Path) -> dict[str, Any]:
             raise ValueError(f"{path}: invalid marked event structure")
         if number(event["elapsed_ms"]) is None or event["elapsed_ms"] < 0:
             raise ValueError(f"{path}: marked event elapsed_ms must be non-negative and finite")
+        if event["elapsed_ms"] > timing["capture_duration"]:
+            raise ValueError(f"{path}: marked event cannot occur after capture duration")
         if not isinstance(event["label"], str) or not event["label"] or len(event["label"]) > 120:
             raise ValueError(f"{path}: invalid marked event label")
+        if any(ord(character) < 32 or ord(character) == 127 for character in event["label"]):
+            raise ValueError(f"{path}: marked event label contains control characters")
+        if event["visibility"] not in {"visible", "hidden"}:
+            raise ValueError(f"{path}: invalid marked event visibility")
+        if event["orientation"] is not None and not isinstance(event["orientation"], str):
+            raise ValueError(f"{path}: invalid marked event orientation")
 
     expected_audio_keys = {
         "supported",
@@ -347,6 +452,22 @@ def load_report(path: Path) -> dict[str, Any]:
             raise ValueError(f"{path}: audio.{name} must be a non-negative integer")
     if audio["gestureStarts"] != audio["mutedPlaybackAttempts"] + audio["audiblePlaybackAttempts"]:
         raise ValueError(f"{path}: audio playback counters are inconsistent")
+    if not audio["supported"] and (
+        audio["state"] != "unsupported"
+        or audio["gestureStarts"] != 0
+        or audio["muteChanges"] != 0
+        or audio["backgroundSuspensions"] != 0
+        or audio["explicitResumes"] != 0
+    ):
+        raise ValueError(f"{path}: unsupported audio telemetry is inconsistent")
+    if audio["supported"] and audio["state"] == "unsupported":
+        raise ValueError(f"{path}: supported audio cannot report an unsupported state")
+    if audio["explicitResumes"] > audio["backgroundSuspensions"]:
+        raise ValueError(f"{path}: audio explicit resumes cannot exceed background suspensions")
+    if audio["muted"] and audio["muteChanges"] % 2 == 0:
+        raise ValueError(f"{path}: audio muted state is inconsistent with mute changes")
+    if not audio["muted"] and audio["muteChanges"] % 2 != 0:
+        raise ValueError(f"{path}: audio unmuted state is inconsistent with mute changes")
 
     checks = report["physical_checks"]
     if set(checks) != REQUIRED_PHYSICAL_CHECKS:
@@ -411,6 +532,7 @@ def group_key(report: dict[str, Any]) -> tuple[str, ...]:
     return (
         str(candidate["build_id"]),
         str(candidate["source_hash"]),
+        str(candidate["wasm_optimization"]),
         str(candidate["bevy"]),
         str(candidate["renderer"]),
         str(test["platform"]),
@@ -447,6 +569,7 @@ def markdown_table(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> str:
         (
             build_id,
             source_hash,
+            wasm_optimization,
             bevy,
             renderer,
             platform,
@@ -483,7 +606,7 @@ def markdown_table(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> str:
             "| "
             + " | ".join(
                 (
-                    f"{platform} / {hardware} / {build_id[:12]} / Bevy {bevy} {renderer}",
+                    f"{platform} / {hardware} / {build_id[:12]} / {wasm_optimization} / Bevy {bevy} {renderer}",
                     f"{os_version} / {browser_family} {browser_version}",
                     f"{cache_state} / {'minimum' if minimum_version == 'yes' else 'current'} / {presentation_tier}",
                     str(len(reports)),
@@ -510,9 +633,9 @@ def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> li
     """Return objective budget and lifecycle failures in final-gate reports."""
     errors: list[str] = []
     for key, reports in groups.items():
-        cache_state = key[9]
-        platform = key[4]
-        presentation_tier = key[11]
+        cache_state = key[10]
+        platform = key[5]
+        presentation_tier = key[12]
         for report in reports:
             run = report["test"]["run_number"]
             observations = report["external_observations"]
@@ -526,7 +649,13 @@ def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> li
             if observations["reload_or_eviction_observed"] == "yes":
                 errors.append(f"{key} run {run}: reload or eviction observed")
 
+            if observations["peak_memory_mib"] < observations["steady_memory_mib"]:
+                errors.append(f"{key} run {run}: peak memory is below steady memory")
+            if observations["steady_memory_mib"] <= 0 or observations["peak_memory_mib"] <= 0:
+                errors.append(f"{key} run {run}: memory observations must be greater than zero")
+
             visible = number(observations["first_visible_table_ms"])
+            accepted_input = number(observations["first_accepted_input_ms"])
             visible_budget = COLD_VISIBLE_BUDGET_MS if cache_state == "cold" else WARM_VISIBLE_BUDGET_MS
             if (
                 is_mobile_platform(platform)
@@ -535,6 +664,15 @@ def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> li
                 and visible > visible_budget
             ):
                 errors.append(f"{key} run {run}: first-visible {visible:.2f}ms exceeds {visible_budget}ms")
+            if (
+                is_mobile_platform(platform)
+                and cache_state in ("cold", "warm")
+                and accepted_input is not None
+                and accepted_input > visible_budget
+            ):
+                errors.append(
+                    f"{key} run {run}: first accepted input {accepted_input:.2f}ms exceeds {visible_budget}ms"
+                )
 
             duration = metric(report, "timing_ms", "capture_duration")
             if duration is None:
@@ -560,6 +698,17 @@ def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> li
             if p95_frame is None:
                 errors.append(f"{key} run {run}: p95 frame time is unavailable")
 
+            hidden_durations = report["timing_ms"]["hidden_durations"]
+            if cache_state != "lifecycle" and report["interaction"]["page_hide_count"] > 0:
+                errors.append(f"{key} run {run}: non-lifecycle capture contains page-hide events")
+            if cache_state != "lifecycle" and report["interaction"]["page_show_count"] > 0:
+                errors.append(f"{key} run {run}: non-lifecycle capture contains page-show events")
+            if cache_state != "lifecycle" and report["interaction"]["visibility_changes"] > 0:
+                errors.append(f"{key} run {run}: non-lifecycle capture contains visibility changes")
+            if cache_state != "lifecycle" and report["interaction"]["orientation_changes"] > 0:
+                errors.append(f"{key} run {run}: non-lifecycle capture contains orientation changes")
+            if cache_state != "lifecycle" and hidden_durations:
+                errors.append(f"{key} run {run}: non-lifecycle capture contains background intervals")
             if cache_state == "lifecycle":
                 if duration is None or duration < LIFECYCLE_DURATION_MS:
                     actual = "unavailable" if duration is None else f"{duration:.2f}ms"
@@ -583,10 +732,34 @@ def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> li
                     errors.append(f"{key} run {run}: audio background suspension was not observed")
                 if audio.get("explicitResumes", 0) < 1:
                     errors.append(f"{key} run {run}: explicit audio resume was not observed")
-                if report["interaction"].get("visibility_changes", 0) < 4:
-                    errors.append(f"{key} run {run}: fewer than two background/foreground cycles")
+                if report["interaction"].get("visibility_changes", 0) != 4:
+                    errors.append(f"{key} run {run}: lifecycle capture must contain exactly four visibility changes")
+                if report["interaction"].get("page_hide_count", 0) != 2:
+                    errors.append(f"{key} run {run}: lifecycle capture must contain exactly two page-hide events")
+                if report["interaction"].get("page_show_count", 0) != 2:
+                    errors.append(f"{key} run {run}: lifecycle capture must contain exactly two page-show events")
+                hidden_durations = report["timing_ms"]["hidden_durations"]
+                if len(hidden_durations) < 2 or sum(duration >= 30_000 for duration in hidden_durations) < 2:
+                    errors.append(f"{key} run {run}: fewer than two 30-second background intervals")
+                if audio.get("backgroundSuspensions", 0) > len(hidden_durations):
+                    errors.append(f"{key} run {run}: audio suspensions exceed recorded background intervals")
+                if audio.get("explicitResumes", 0) > audio.get("backgroundSuspensions", 0):
+                    errors.append(f"{key} run {run}: audio resumes exceed background suspensions")
                 if report["interaction"].get("orientation_changes", 0) < 2:
                     errors.append(f"{key} run {run}: fewer than two orientation changes")
+                orientation_states = report["interaction"]["orientation_states"]
+                if not (
+                    isinstance(report["interaction"]["initial_orientation"], str)
+                    and report["interaction"]["initial_orientation"].startswith("landscape")
+                ):
+                    errors.append(f"{key} run {run}: lifecycle capture did not start in landscape")
+                if len(orientation_states) != 2 or not (
+                    isinstance(orientation_states[0], str)
+                    and orientation_states[0].startswith("portrait")
+                    and isinstance(orientation_states[-1], str)
+                    and orientation_states[-1].startswith("landscape")
+                ):
+                    errors.append(f"{key} run {run}: exact portrait-to-landscape transition was not observed")
     return errors
 
 
@@ -627,12 +800,34 @@ def main() -> int:
     if args.require_mobile_matrix:
         if args.allow_incomplete:
             errors.append("--allow-incomplete cannot be combined with --require-mobile-matrix")
-        candidate_identities = {key[:4] for key in groups}
+        candidate_identities = {key[:5] for key in groups}
         if len(candidate_identities) != 1:
             errors.append(
-                "final browser matrix must use exactly one build ID, source hash, Bevy version, and renderer"
+                "final browser matrix must use exactly one build ID, source hash, WASM optimization, Bevy version, and renderer"
             )
-        present = {(key[4], key[7], key[9], key[10]) for key in groups}
+        if candidate_identities and any(identity[2] != "wasm-opt-Oz" for identity in candidate_identities):
+            errors.append("final browser matrix requires the wasm-opt-Oz candidate")
+        mobile_hardware = defaultdict(set)
+        platform_operating_systems = defaultdict(set)
+        platform_browser_hardware = defaultdict(set)
+        for key in groups:
+            platform = key[5]
+            if platform in REQUIRED_PLATFORMS:
+                mobile_hardware[platform].add(key[6])
+            platform_operating_systems[platform].add(key[7])
+            platform_browser_hardware[(platform, key[8])].add(key[6])
+        for platform, hardware_models in sorted(mobile_hardware.items()):
+            if len(hardware_models) != 1:
+                errors.append(f"final browser matrix must use one hardware model for {platform}")
+        for platform, operating_systems in sorted(platform_operating_systems.items()):
+            if len(operating_systems) != 1:
+                errors.append(f"final browser matrix must use one OS version for {platform}")
+        for (platform, browser_family), hardware_models in sorted(platform_browser_hardware.items()):
+            if len(hardware_models) != 1:
+                errors.append(
+                    f"final browser matrix must use one hardware model for {platform} / {browser_family}"
+                )
+        present = {(key[5], key[8], key[10], key[11]) for key in groups}
         missing = sorted(
             (platform, browser_family, cache_state, version_status)
             for platform, browser_families in REQUIRED_BROWSER_MATRIX.items()
@@ -651,12 +846,42 @@ def main() -> int:
             for platform, browser_families in REQUIRED_BROWSER_MATRIX.items()
             for browser_family in browser_families
         }
-        present_browsers = {(key[4], key[7]) for key in groups}
+        present_browsers = {(key[5], key[8]) for key in groups}
         for platform, browser_family in sorted(required_browsers - present_browsers):
             errors.append(f"mobile matrix missing browser evidence for {platform} / {browser_family}")
+        for platform, browser_family in sorted(required_browsers):
+            current_versions = {
+                key[9]
+                for key in groups
+                if key[5] == platform and key[8] == browser_family and key[11] == "no"
+            }
+            minimum_versions = {
+                key[9]
+                for key in groups
+                if key[5] == platform and key[8] == browser_family and key[11] == "yes"
+            }
+            if len(current_versions) != 1:
+                errors.append(
+                    f"final browser matrix must use one current browser version for {platform} / {browser_family}"
+                )
+            if len(minimum_versions) != 1:
+                errors.append(
+                    f"final browser matrix must use one proposed-minimum browser version for {platform} / {browser_family}"
+                )
+            if len(current_versions) == 1 and len(minimum_versions) == 1:
+                current_version = browser_version(next(iter(current_versions)))
+                minimum_version = browser_version(next(iter(minimum_versions)))
+                if current_version is not None and minimum_version is not None and minimum_version >= current_version:
+                    errors.append(
+                        f"proposed-minimum browser version must be older than current for {platform} / {browser_family}"
+                    )
+            if current_versions & minimum_versions:
+                errors.append(
+                    f"current and proposed-minimum browser versions overlap for {platform} / {browser_family}"
+                )
         for key in groups:
-            platform = key[4]
-            presentation_tier = key[11]
+            platform = key[5]
+            presentation_tier = key[12]
             if platform == "desktop" and presentation_tier != "default":
                 errors.append("desktop compatibility matrix contains a non-default presentation tier")
         errors.extend(acceptance_errors(groups))

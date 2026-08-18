@@ -32,6 +32,7 @@ jobs:
       - run: cargo deny check
       - run: ./scripts/build-wasm.sh
       - run: ./scripts/test-feasibility-tools.sh
+      - run: ./scripts/test-browser-telemetry.js
       - run: ./scripts/check-architecture.sh
       - run: ./scripts/test-architecture-checks.sh
 

@@ -41,7 +41,11 @@ cargo build --package pwmtf_client --target wasm32-unknown-unknown --release
 mkdir -p dist
 find dist -mindepth 1 -maxdepth 1 -type f -delete
 cp packages/client/web/index.html packages/client/web/styles.css packages/client/web/bootstrap.js dist/
-BUILD_ID="$build_id" SOURCE_HASH="$source_hash" python3 - <<'PY'
+wasm_optimization=not-applied
+if command -v wasm-opt >/dev/null 2>&1 && [ "${PWMTF_SKIP_WASM_OPT:-0}" != 1 ]; then
+    wasm_optimization=wasm-opt-Oz
+fi
+BUILD_ID="$build_id" SOURCE_HASH="$source_hash" WASM_OPTIMIZATION="$wasm_optimization" python3 - <<'PY'
 import os
 from pathlib import Path
 
@@ -50,6 +54,7 @@ contents = path.read_text(encoding="utf-8")
 replacements = {
     "__PWMTF_BUILD_ID__": os.environ["BUILD_ID"],
     "__PWMTF_SOURCE_HASH__": os.environ["SOURCE_HASH"],
+    "__PWMTF_WASM_OPTIMIZATION__": os.environ["WASM_OPTIMIZATION"],
 }
 for placeholder, value in replacements.items():
     if contents.count(placeholder) != 1:

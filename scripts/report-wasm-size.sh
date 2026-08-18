@@ -33,8 +33,32 @@ if match is None:
 print(match.group(1))
 PY
 )
+wasm_optimization=$(python3 - <<'PY'
+import re
+from pathlib import Path
+
+contents = Path("dist/bootstrap.js").read_text(encoding="utf-8")
+match = re.search(
+    r'^const candidateWasmOptimization = "(wasm-opt-Oz|not-applied)";$',
+    contents,
+    re.MULTILINE,
+)
+if match is None:
+    raise SystemExit("cannot read candidate WASM optimization from dist/bootstrap.js")
+print(match.group(1))
+PY
+)
+if ! printf '%s' "$build_id" | grep -Fq -- "$source_hash"; then
+    printf '%s\n' "candidate build ID does not include candidate source hash" >&2
+    exit 1
+fi
+if [ "$wasm_optimization" != wasm-opt-Oz ] && [ "${PWMTF_ALLOW_UNOPTIMIZED_SIZE_REPORT:-0}" != 1 ]; then
+    printf '%s\n' "size evidence requires a wasm-opt-Oz candidate; set PWMTF_ALLOW_UNOPTIMIZED_SIZE_REPORT=1 only for troubleshooting" >&2
+    exit 1
+fi
 printf '%s\n' "Candidate build: $build_id"
 printf '%s\n' "Candidate source: $source_hash"
+printf '%s\n' "Candidate WASM optimization: $wasm_optimization"
 
 printf '%-36s %12s %12s' 'Asset' 'Raw bytes' 'Gzip bytes'
 if command -v brotli >/dev/null 2>&1; then

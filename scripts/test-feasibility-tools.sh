@@ -28,6 +28,7 @@ checks = {
     "safe_area": "pass",
     "orientation": "pass",
     "background": "pass",
+    "browser_chrome": "pass",
     "audio": "pass",
     "input_response": "pass",
     "memory": "pass",
@@ -40,15 +41,17 @@ for platform, browser_families in platforms.items():
             for minimum_version_run in ("no", "yes"):
                 for run_number in range(1, 4):
                     lifecycle = cache_state == "lifecycle"
+                    browser_version = "151" if minimum_version_run == "no" else "150"
                     report = {
-                        "schema_version": 1,
+                        "schema_version": 8,
                         "captured_at": (
                             f"2026-08-{run_number + (10 if minimum_version_run == 'yes' else 0):02d}"
                             f"T00:00:00Z"
                         ),
                         "candidate": {
-                            "build_id": "fixture-build",
+                            "build_id": f"fixture-build-{'0' * 64}",
                             "source_hash": "0" * 64,
+                            "wasm_optimization": "wasm-opt-Oz",
                             "bevy": "0.19.1",
                             "renderer": "WebGL2",
                         },
@@ -57,7 +60,7 @@ for platform, browser_families in platforms.items():
                             "hardware_model": f"fixture-{platform}",
                             "os_version": "fixture-os",
                             "browser_family": browser_family,
-                            "browser_version": "fixture-browser",
+                            "browser_version": browser_version,
                             "cache_state": cache_state,
                             "minimum_version_run": minimum_version_run,
                             "presentation_tier": "default",
@@ -75,6 +78,9 @@ for platform, browser_families in platforms.items():
                         "browser": {
                             "declared_family": browser_family,
                             "detected_family": browser_family,
+                            "detected_platform": platform,
+                            "declared_version": browser_version,
+                            "detected_version": browser_version,
                             "user_agent": "fixture-user-agent",
                             "language": "en-US",
                             "hardware_concurrency": 8,
@@ -92,6 +98,8 @@ for platform, browser_families in platforms.items():
                             "client_ready": 1_000,
                             "first_canvas_contact": 1_200,
                             "capture_duration": 610_000 if lifecycle else 65_000,
+                            "hidden_duration": 60_000 if lifecycle else 0,
+                            "hidden_durations": [30_000, 30_000] if lifecycle else [],
                         },
                         "performance": {
                             "frame_count": 3_600,
@@ -110,9 +118,13 @@ for platform, browser_families in platforms.items():
                             "canvas_contacts": 8,
                             "visibility_changes": 4 if lifecycle else 0,
                             "orientation_changes": 2 if lifecycle else 0,
+                            "initial_orientation": "landscape-primary",
+                            "orientation_states": ["portrait-primary", "landscape-primary"] if lifecycle else [],
                             "page_hide_count": 2 if lifecycle else 0,
-                            "page_show_count": 2 if lifecycle else 1,
+                            "page_show_count": 2 if lifecycle else 0,
                             "restored_from_page_cache": False,
+                            "capture_started_visible": True,
+                            "capture_stopped_visible": True,
                             "marked_events": [],
                         },
                         "audio": {
@@ -136,9 +148,9 @@ PY
 
 reports="$tmp"/*.json
 "$root/scripts/summarize-feasibility.py" --require-mobile-matrix $reports >"$tmp/summary.md"
-grep -q '| iphone / fixture-iphone / fixture-buil / Bevy 0.19.1 WebGL2 |' "$tmp/summary.md"
-grep -q '| android-tablet / fixture-android-tablet / fixture-buil / Bevy 0.19.1 WebGL2 |' "$tmp/summary.md"
-grep -q '| desktop / fixture-desktop / fixture-buil / Bevy 0.19.1 WebGL2 |' "$tmp/summary.md"
+grep -q '| iphone / fixture-iphone / fixture-buil / wasm-opt-Oz / Bevy 0.19.1 WebGL2 |' "$tmp/summary.md"
+grep -q '| android-tablet / fixture-android-tablet / fixture-buil / wasm-opt-Oz / Bevy 0.19.1 WebGL2 |' "$tmp/summary.md"
+grep -q '| desktop / fixture-desktop / fixture-buil / wasm-opt-Oz / Bevy 0.19.1 WebGL2 |' "$tmp/summary.md"
 
 expect_rejected() {
     label=$1
@@ -148,6 +160,44 @@ expect_rejected() {
         exit 1
     fi
 }
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["schema_version"] = 1
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "the superseded report schema" $reports
+grep -q 'unsupported schema_version' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["schema_version"] = 8
+report["candidate"]["wasm_optimization"] = "not-applied"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "a final matrix without Binaryen optimization" $reports
+grep -q 'requires the wasm-opt-Oz candidate' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["candidate"]["wasm_optimization"] = "wasm-opt-Oz"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
 
 expect_rejected "an incomplete matrix" "$tmp"/iphone-*.json "$tmp"/ipad-*.json "$tmp"/android-phone-*.json
 
@@ -216,6 +266,20 @@ from pathlib import Path
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
 report["candidate"]["source_hash"] = "0" * 64
+report["candidate"]["build_id"] = "unbound-build"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "a build ID not bound to its source hash" $reports
+grep -q 'build_id must include candidate.source_hash' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["candidate"]["build_id"] = "fixture-build-" + report["candidate"]["source_hash"]
 report["timing_ms"]["capture_duration"] = 0
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
@@ -274,6 +338,21 @@ from pathlib import Path
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
 report["test"]["hardware_model"] = "fixture-iphone"
+report["external_observations"]["steady_memory_mib"] = 0
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "zero memory evidence" $reports
+grep -q 'memory observations must be greater than zero' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["test"]["hardware_model"] = "fixture-iphone"
+report["external_observations"]["steady_memory_mib"] = 120
 report["external_observations"]["first_accepted_input_ms"] = 3_999
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
@@ -339,6 +418,44 @@ PY
 expect_rejected "a mismatched detected browser family" $reports
 grep -q 'detected browser family does not match' "$tmp/rejected.err"
 
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["browser"]["detected_family"] = "unknown"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "an unknown detected browser family" $reports
+grep -q 'invalid browser.detected_family' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["browser"]["detected_family"] = "safari"
+report["browser"]["detected_version"] = "150"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "a mismatched detected browser version" $reports
+grep -q 'detected browser version does not match' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["browser"]["detected_version"] = report["test"]["browser_version"]
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+
 python3 - "$tmp/desktop-edge-cold-current-1.json" <<'PY'
 import json
 import sys
@@ -346,7 +463,7 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
-report["candidate"]["build_id"] = "different-build"
+report["candidate"]["build_id"] = "different-build-" + report["candidate"]["source_hash"]
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
 expect_rejected "a mixed-candidate final matrix" $reports
@@ -359,8 +476,47 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
-report["candidate"]["build_id"] = "fixture-build"
+report["candidate"]["build_id"] = "fixture-build-" + report["candidate"]["source_hash"]
 path.write_text(json.dumps(report), encoding="utf-8")
+PY
+
+python3 - "$tmp"/desktop-edge-cold-current-*.json "$tmp"/android-tablet-chrome-cold-current-*.json <<'PY'
+import json
+import sys
+from pathlib import Path
+
+for value in sys.argv[1:4]:
+    path = Path(value)
+    report = json.loads(path.read_text(encoding="utf-8"))
+    report["test"]["hardware_model"] = "different-desktop"
+    path.write_text(json.dumps(report), encoding="utf-8")
+
+for value in sys.argv[4:]:
+    path = Path(value)
+    report = json.loads(path.read_text(encoding="utf-8"))
+    report["test"]["os_version"] = "different-os"
+    path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "inconsistent comparison environments" $reports
+grep -q 'one hardware model for desktop / edge' "$tmp/rejected.err"
+grep -q 'one OS version for android-tablet' "$tmp/rejected.err"
+
+python3 - "$tmp"/desktop-edge-cold-current-*.json "$tmp"/android-tablet-chrome-cold-current-*.json <<'PY'
+import json
+import sys
+from pathlib import Path
+
+for value in sys.argv[1:4]:
+    path = Path(value)
+    report = json.loads(path.read_text(encoding="utf-8"))
+    report["test"]["hardware_model"] = "fixture-desktop"
+    path.write_text(json.dumps(report), encoding="utf-8")
+
+for value in sys.argv[4:]:
+    path = Path(value)
+    report = json.loads(path.read_text(encoding="utf-8"))
+    report["test"]["os_version"] = "fixture-os"
+    path.write_text(json.dumps(report), encoding="utf-8")
 PY
 
 python3 - "$tmp/iphone-safari-cold-current-1.json" "$tmp/iphone-safari-lifecycle-minimum-1.json" "$tmp/iphone-safari-lifecycle-minimum-2.json" "$tmp/iphone-safari-lifecycle-minimum-3.json" <<'PY'
@@ -394,6 +550,106 @@ for value in sys.argv[1:]:
     report = json.loads(path.read_text(encoding="utf-8"))
     report["test"]["minimum_version_run"] = "yes"
     path.write_text(json.dumps(report), encoding="utf-8")
+PY
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["test"]["browser_version"] = "152"
+report["browser"]["declared_version"] = "152"
+report["browser"]["detected_version"] = "152"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "mixed exact current versions" $reports
+grep -q 'one current browser version for iphone / safari' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["test"]["browser_version"] = "151"
+report["browser"]["declared_version"] = "151"
+report["browser"]["detected_version"] = "151"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+
+python3 - "$tmp"/iphone-safari-cold-minimum-*.json "$tmp"/iphone-safari-warm-minimum-*.json "$tmp"/iphone-safari-lifecycle-minimum-*.json <<'PY'
+import json
+import sys
+from pathlib import Path
+
+for value in sys.argv[1:]:
+    path = Path(value)
+    report = json.loads(path.read_text(encoding="utf-8"))
+    report["test"]["browser_version"] = "152"
+    report["browser"]["declared_version"] = "152"
+    report["browser"]["detected_version"] = "152"
+    path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "a proposed minimum newer than current" $reports
+grep -q 'proposed-minimum browser version must be older than current for iphone / safari' "$tmp/rejected.err"
+
+python3 - "$tmp"/iphone-safari-cold-minimum-*.json "$tmp"/iphone-safari-warm-minimum-*.json "$tmp"/iphone-safari-lifecycle-minimum-*.json <<'PY'
+import json
+import sys
+from pathlib import Path
+
+for value in sys.argv[1:]:
+    path = Path(value)
+    report = json.loads(path.read_text(encoding="utf-8"))
+    report["test"]["browser_version"] = "150"
+    report["browser"]["declared_version"] = "150"
+    report["browser"]["detected_version"] = "150"
+    path.write_text(json.dumps(report), encoding="utf-8")
+PY
+
+python3 - "$tmp/iphone-safari-warm-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["timing_ms"]["hidden_duration"] = 30_000
+report["timing_ms"]["hidden_durations"] = [30_000]
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "backgrounded interaction capture" $reports
+grep -q 'non-lifecycle capture contains background intervals' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-warm-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["timing_ms"]["hidden_duration"] = 0
+report["timing_ms"]["hidden_durations"] = []
+report["interaction"]["orientation_changes"] = 1
+report["interaction"]["orientation_states"] = ["portrait-primary"]
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "rotated interaction capture" $reports
+grep -q 'non-lifecycle capture contains orientation changes' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-warm-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["interaction"]["orientation_changes"] = 0
+report["interaction"]["orientation_states"] = []
+path.write_text(json.dumps(report), encoding="utf-8")
 PY
 
 python3 - "$tmp/android-tablet-chrome-cold-current-1.json" <<'PY'
@@ -433,7 +689,22 @@ report["external_observations"]["first_accepted_input_ms"] = 3_200
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
 expect_rejected "warm startup over budget" $reports
-grep -q 'exceeds 3000ms' "$tmp/rejected.err"
+grep -q 'first-visible 3001.00ms exceeds 3000ms' "$tmp/rejected.err"
+grep -q 'first accepted input 3200.00ms exceeds 3000ms' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-warm-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["external_observations"]["first_visible_table_ms"] = 2_900
+report["external_observations"]["first_accepted_input_ms"] = 3_001
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "accepted input over budget after a timely visible table" $reports
+grep -q 'first accepted input 3001.00ms exceeds 3000ms' "$tmp/rejected.err"
 
 python3 - "$tmp/iphone-safari-warm-current-1.json" "$tmp/ipad-safari-lifecycle-current-1.json" <<'PY'
 import json
@@ -454,6 +725,69 @@ PY
 expect_rejected "short lifecycle capture" $reports
 grep -q 'shorter than 10 minutes' "$tmp/rejected.err"
 
+python3 - "$tmp/ipad-safari-lifecycle-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["timing_ms"]["capture_duration"] = 610_000
+report["interaction"]["orientation_states"] = ["landscape-primary", "portrait-primary"]
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "reversed orientation lifecycle" $reports
+grep -q 'exact portrait-to-landscape transition was not observed' "$tmp/rejected.err"
+
+python3 - "$tmp/ipad-safari-lifecycle-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["timing_ms"]["capture_duration"] = 610_000
+report["interaction"]["orientation_states"] = ["portrait-primary", "landscape-primary"]
+report["interaction"]["page_hide_count"] = 1
+report["interaction"]["page_show_count"] = 1
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "incomplete page lifecycle evidence" $reports
+grep -q 'lifecycle capture must contain exactly two page-hide events' "$tmp/rejected.err"
+grep -q 'lifecycle capture must contain exactly two page-show events' "$tmp/rejected.err"
+
+python3 - "$tmp/ipad-safari-lifecycle-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["interaction"]["page_hide_count"] = 2
+report["interaction"]["page_show_count"] = 2
+report["timing_ms"]["hidden_duration"] = 59_999
+report["timing_ms"]["hidden_durations"] = [30_000, 29_999]
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "short background intervals" $reports
+grep -q 'fewer than two 30-second background intervals' "$tmp/rejected.err"
+
+python3 - "$tmp/ipad-safari-lifecycle-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["timing_ms"]["hidden_duration"] = 60_000
+report["timing_ms"]["hidden_durations"] = [30_000, 30_000]
+report["audio"]["backgroundSuspensions"] = 3
+report["audio"]["explicitResumes"] = 2
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "impossible audio lifecycle counters" $reports
+grep -q 'audio suspensions exceed recorded background intervals' "$tmp/rejected.err"
+
 python3 - "$tmp/ipad-safari-lifecycle-current-1.json" "$tmp/android-phone-chrome-lifecycle-current-1.json" <<'PY'
 import json
 import sys
@@ -462,6 +796,12 @@ from pathlib import Path
 short = Path(sys.argv[1])
 short_report = json.loads(short.read_text(encoding="utf-8"))
 short_report["timing_ms"]["capture_duration"] = 610_000
+short_report["interaction"]["page_hide_count"] = 2
+short_report["interaction"]["page_show_count"] = 2
+short_report["timing_ms"]["hidden_duration"] = 60_000
+short_report["timing_ms"]["hidden_durations"] = [30_000, 30_000]
+short_report["audio"]["backgroundSuspensions"] = 1
+short_report["audio"]["explicitResumes"] = 1
 short.write_text(json.dumps(short_report), encoding="utf-8")
 
 audio = Path(sys.argv[2])
