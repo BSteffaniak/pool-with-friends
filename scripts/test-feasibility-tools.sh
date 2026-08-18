@@ -68,7 +68,11 @@ for platform, browser_families in platforms.items():
                             "thermal_result": "no-warning",
                             "reload_or_eviction_observed": "no",
                         },
-                        "browser": {},
+                        "browser": {
+                            "declared_family": browser_family,
+                            "detected_family": browser_family,
+                            "user_agent": "fixture-user-agent",
+                        },
                         "display": {},
                         "timing_ms": {
                             "client_ready": 1_000,
@@ -150,6 +154,20 @@ PY
 expect_rejected "an invalid candidate source hash" $reports
 grep -q 'invalid candidate.source_hash' "$tmp/rejected.err"
 
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["candidate"]["source_hash"] = "0" * 64
+report["browser"]["detected_family"] = "chrome"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "a mismatched detected browser family" $reports
+grep -q 'detected browser family does not match' "$tmp/rejected.err"
+
 python3 - "$tmp/iphone-safari-cold-current-1.json" "$tmp/iphone-safari-lifecycle-minimum-1.json" "$tmp/iphone-safari-lifecycle-minimum-2.json" "$tmp/iphone-safari-lifecycle-minimum-3.json" <<'PY'
 import json
 import sys
@@ -159,6 +177,7 @@ check_path = Path(sys.argv[1])
 check_report = json.loads(check_path.read_text(encoding="utf-8"))
 check_report["physical_checks"]["audio"] = "pass"
 check_report["candidate"]["source_hash"] = "0" * 64
+check_report["browser"]["detected_family"] = "safari"
 check_path.write_text(json.dumps(check_report), encoding="utf-8")
 
 for value in sys.argv[2:]:

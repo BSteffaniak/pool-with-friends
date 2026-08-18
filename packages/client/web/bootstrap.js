@@ -87,6 +87,25 @@ let audioContext = null;
 let masterGain = null;
 let audioNeedsExplicitResume = false;
 
+function detectBrowserFamily(userAgent) {
+  if (/SamsungBrowser\//u.test(userAgent)) {
+    return "samsung-internet";
+  }
+  if (/(?:Edg|EdgA|EdgiOS)\//u.test(userAgent)) {
+    return "edge";
+  }
+  if (/(?:Firefox|FxiOS)\//u.test(userAgent)) {
+    return "firefox";
+  }
+  if (/(?:Chrome|CriOS)\//u.test(userAgent)) {
+    return "chrome";
+  }
+  if (/Version\/.+Safari\//u.test(userAgent)) {
+    return "safari";
+  }
+  return "unknown";
+}
+
 function formatDuration(milliseconds) {
   if (milliseconds === null) {
     return "pending";
@@ -406,6 +425,8 @@ function report() {
     physical_checks: physicalCheckResults(),
     external_observations: externalObservations(),
     browser: {
+      declared_family: browserFamilyInput.value,
+      detected_family: detectBrowserFamily(navigator.userAgent),
       user_agent: navigator.userAgent,
       language: navigator.language,
       hardware_concurrency: navigator.hardwareConcurrency ?? null,

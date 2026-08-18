@@ -149,6 +149,17 @@ def load_report(path: Path) -> dict[str, Any]:
         if not isinstance(report.get(section), dict):
             raise ValueError(f"{path}: {section} must be an object")
 
+    browser = report["browser"]
+    if browser.get("declared_family") != test["browser_family"]:
+        raise ValueError(f"{path}: browser.declared_family does not match test.browser_family")
+    detected_family = browser.get("detected_family")
+    if detected_family not in ALLOWED_BROWSER_FAMILIES | {"unknown"}:
+        raise ValueError(f"{path}: invalid browser.detected_family")
+    if detected_family != "unknown" and detected_family != test["browser_family"]:
+        raise ValueError(f"{path}: detected browser family does not match test.browser_family")
+    if not isinstance(browser.get("user_agent"), str) or not browser["user_agent"]:
+        raise ValueError(f"{path}: browser.user_agent must be a non-empty string")
+
     checks = report["physical_checks"]
     if set(checks) != REQUIRED_PHYSICAL_CHECKS:
         missing = sorted(REQUIRED_PHYSICAL_CHECKS - set(checks))
