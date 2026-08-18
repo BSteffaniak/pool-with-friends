@@ -22,6 +22,7 @@
       </section>
       <aside id="feasibility-tools" hidden>
         <strong>Feasibility capture</strong>
+        <output id="candidate-identity">Waiting for candidate identity…</output>
         <fieldset>
           <legend>Test device</legend>
           <label>
@@ -128,6 +129,16 @@
           </label>
         </fieldset>
         <output id="feasibility-metrics">Waiting for the client…</output>
+        <label>
+          Event label
+          <input
+            id="event-label"
+            type="text"
+            maxlength="120"
+            autocomplete="off"
+            placeholder="e.g. rotate portrait or audio resume"
+          />
+        </label>
         <div>
           <button id="capture-toggle" type="button">Start capture</button>
           <button id="audio-probe" type="button">Play audio probe</button>

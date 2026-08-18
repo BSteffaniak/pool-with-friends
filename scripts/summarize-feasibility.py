@@ -248,6 +248,16 @@ def load_report(path: Path) -> dict[str, Any]:
             raise ValueError(f"{path}: performance.{name} must be non-negative and finite")
     if performance["frame_count"] <= 0:
         raise ValueError(f"{path}: performance.frame_count must be greater than zero")
+    if performance["minimum_one_second_fps"] > performance["median_one_second_fps"]:
+        raise ValueError(f"{path}: minimum FPS cannot exceed median FPS")
+    if performance["median_one_second_fps"] > performance["maximum_one_second_fps"]:
+        raise ValueError(f"{path}: median FPS cannot exceed maximum FPS")
+    if performance["median_frame_time_ms"] > performance["p95_frame_time_ms"]:
+        raise ValueError(f"{path}: median frame time cannot exceed p95 frame time")
+    if performance["p95_frame_time_ms"] > performance["p99_frame_time_ms"]:
+        raise ValueError(f"{path}: p95 frame time cannot exceed p99 frame time")
+    if performance["p99_frame_time_ms"] > performance["maximum_frame_gap_ms"]:
+        raise ValueError(f"{path}: p99 frame time cannot exceed maximum frame gap")
 
     checks = report["physical_checks"]
     if set(checks) != REQUIRED_PHYSICAL_CHECKS:
@@ -472,7 +482,13 @@ def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> li
             if audio.get("muted") is not False:
                 errors.append(f"{key} run {run}: audio remained muted when exported")
             if audio.get("gestureStarts", 0) < 2:
-                errors.append(f"{key} run {run}: audio probe did not cover pre/post-mute playback")
+                errors.append(f"{key} run {run}: audio probe did not cover repeated playback")
+            if audio.get("muteChanges", 0) < 2:
+                errors.append(f"{key} run {run}: audio mute/unmute cycle was incomplete")
+            if audio.get("mutedPlaybackAttempts", 0) < 1:
+                errors.append(f"{key} run {run}: muted audio playback was not exercised")
+            if audio.get("audiblePlaybackAttempts", 0) < 1:
+                errors.append(f"{key} run {run}: audible audio playback was not exercised")
             if cache_state == "lifecycle":
                 if audio.get("backgroundSuspensions", 0) < 1:
                     errors.append(f"{key} run {run}: audio background suspension was not observed")

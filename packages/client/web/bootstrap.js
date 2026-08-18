@@ -21,10 +21,12 @@ const peakMemoryInput = document.querySelector("#peak-memory-mib");
 const thermalResultInput = document.querySelector("#thermal-result");
 const reloadObservedInput = document.querySelector("#reload-observed");
 const metricsOutput = document.querySelector("#feasibility-metrics");
+const candidateOutput = document.querySelector("#candidate-identity");
 const captureButton = document.querySelector("#capture-toggle");
 const audioButton = document.querySelector("#audio-probe");
 const muteButton = document.querySelector("#audio-mute");
 const markEventButton = document.querySelector("#mark-event");
+const eventLabelInput = document.querySelector("#event-label");
 const downloadButton = document.querySelector("#download-report");
 const statusOutput = document.querySelector("#feasibility-status");
 const query = new URLSearchParams(window.location.search);
@@ -76,6 +78,9 @@ const telemetry = {
     gestureStarts: 0,
     backgroundSuspensions: 0,
     explicitResumes: 0,
+    muteChanges: 0,
+    mutedPlaybackAttempts: 0,
+    audiblePlaybackAttempts: 0,
     muted: false,
   },
 };
@@ -382,6 +387,11 @@ async function playAudioProbe() {
 
   audioNeedsExplicitResume = false;
   telemetry.audio.gestureStarts += 1;
+  if (telemetry.audio.muted) {
+    telemetry.audio.mutedPlaybackAttempts += 1;
+  } else {
+    telemetry.audio.audiblePlaybackAttempts += 1;
+  }
 
   const oscillator = audioContext.createOscillator();
   const envelope = audioContext.createGain();
@@ -409,6 +419,7 @@ function toggleMute() {
   }
 
   telemetry.audio.muted = !telemetry.audio.muted;
+  telemetry.audio.muteChanges += 1;
   masterGain.gain.setValueAtTime(telemetry.audio.muted ? 0 : 0.12, audioContext.currentTime);
   updateAudioControls();
 }
@@ -420,18 +431,20 @@ function markEvent() {
       return;
     }
   }
-  const label = window.prompt(
-    "Short event label (for example: rotate portrait, background, audio resume, thermal warning)",
-  );
-  if (label === null || label.trim() === "") {
+  const label = eventLabelInput.value.trim();
+  if (label === "") {
+    showStatus("Enter a short event label before marking the event.");
+    eventLabelInput.focus();
     return;
   }
   telemetry.events.push({
     elapsed_ms: captureDuration(),
-    label: label.trim().slice(0, 120),
+    label: label.slice(0, 120),
     visibility: document.visibilityState,
     orientation: window.screen.orientation?.type ?? null,
   });
+  eventLabelInput.value = "";
+  showStatus(`Marked event: ${label.slice(0, 120)}`);
   refreshMetrics();
 }
 
@@ -576,6 +589,7 @@ document.addEventListener("visibilitychange", () => {
 });
 
 if (feasibilityEnabled) {
+  candidateOutput.textContent = `Build ${candidateBuildId}\nSource ${candidateSourceHash}`;
   presentationTierInput.value = activePresentationTier;
   presentationTierInput.disabled = true;
   for (const [id, label] of PHYSICAL_CHECKS) {

@@ -119,6 +119,9 @@ for platform, browser_families in platforms.items():
                             "gestureStarts": 2,
                             "backgroundSuspensions": 1 if lifecycle else 0,
                             "explicitResumes": 1 if lifecycle else 0,
+                            "muteChanges": 2,
+                            "mutedPlaybackAttempts": 1,
+                            "audiblePlaybackAttempts": 1,
                         },
                     }
                     version_label = "minimum" if minimum_version_run == "yes" else "current"
@@ -237,8 +240,23 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
+report["timing_ms"]["first_canvas_contact"] = 1_200
+report["performance"]["p95_frame_time_ms"] = 21
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "non-monotonic frame percentiles" $reports
+grep -q 'p95 frame time cannot exceed p99' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
 report["timing_ms"]["capture_duration"] = 65_000
 report["timing_ms"]["first_canvas_contact"] = 1_200
+report["performance"]["p95_frame_time_ms"] = 18
 report["test"]["hardware_model"] = "bad\nmodel"
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
@@ -466,8 +484,8 @@ mute_report = json.loads(mute.read_text(encoding="utf-8"))
 mute_report["audio"]["gestureStarts"] = 1
 mute.write_text(json.dumps(mute_report), encoding="utf-8")
 PY
-expect_rejected "incomplete pre/post-mute playback" $reports
-grep -q 'pre/post-mute playback' "$tmp/rejected.err"
+expect_rejected "incomplete repeated audio playback" $reports
+grep -q 'repeated playback' "$tmp/rejected.err"
 
 python3 - "$tmp/android-tablet-chrome-warm-current-1.json" "$tmp/iphone-safari-cold-current-1.json" <<'PY'
 import json
