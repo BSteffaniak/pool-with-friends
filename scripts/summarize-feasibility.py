@@ -258,6 +258,8 @@ def load_report(path: Path) -> dict[str, Any]:
             raise ValueError(f"{path}: performance.{name} must be non-negative and finite")
     if performance["frame_count"] <= 0:
         raise ValueError(f"{path}: performance.frame_count must be greater than zero")
+    if report["interaction"]["canvas_contacts"] <= 0:
+        raise ValueError(f"{path}: interaction.canvas_contacts must be greater than zero")
     if performance["minimum_one_second_fps"] > performance["median_one_second_fps"]:
         raise ValueError(f"{path}: minimum FPS cannot exceed median FPS")
     if performance["median_one_second_fps"] > performance["maximum_one_second_fps"]:
@@ -278,6 +280,73 @@ def load_report(path: Path) -> dict[str, Any]:
         and performance["peak_js_heap_bytes"] < performance["current_js_heap_bytes"]
     ):
         raise ValueError(f"{path}: peak JS heap cannot be lower than current JS heap")
+
+    expected_interaction_keys = {
+        "canvas_contacts",
+        "visibility_changes",
+        "orientation_changes",
+        "page_hide_count",
+        "page_show_count",
+        "restored_from_page_cache",
+        "marked_events",
+    }
+    interaction = report["interaction"]
+    if set(interaction) != expected_interaction_keys:
+        raise ValueError(f"{path}: interaction keys are invalid")
+    for name in (
+        "canvas_contacts",
+        "visibility_changes",
+        "orientation_changes",
+        "page_hide_count",
+        "page_show_count",
+    ):
+        value = interaction[name]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{path}: interaction.{name} must be a non-negative integer")
+    if not isinstance(interaction["restored_from_page_cache"], bool):
+        raise ValueError(f"{path}: interaction.restored_from_page_cache must be boolean")
+    events = interaction["marked_events"]
+    if not isinstance(events, list) or len(events) > 100:
+        raise ValueError(f"{path}: interaction.marked_events must be a bounded list")
+    for event in events:
+        if not isinstance(event, dict) or set(event) != {"elapsed_ms", "label", "visibility", "orientation"}:
+            raise ValueError(f"{path}: invalid marked event structure")
+        if number(event["elapsed_ms"]) is None or event["elapsed_ms"] < 0:
+            raise ValueError(f"{path}: marked event elapsed_ms must be non-negative and finite")
+        if not isinstance(event["label"], str) or not event["label"] or len(event["label"]) > 120:
+            raise ValueError(f"{path}: invalid marked event label")
+
+    expected_audio_keys = {
+        "supported",
+        "state",
+        "gestureStarts",
+        "backgroundSuspensions",
+        "explicitResumes",
+        "muteChanges",
+        "mutedPlaybackAttempts",
+        "audiblePlaybackAttempts",
+        "muted",
+    }
+    audio = report["audio"]
+    if set(audio) != expected_audio_keys:
+        raise ValueError(f"{path}: audio keys are invalid")
+    if not isinstance(audio["supported"], bool) or not isinstance(audio["muted"], bool):
+        raise ValueError(f"{path}: audio boolean fields are invalid")
+    if audio["state"] not in {"not started", "suspended", "running", "closed", "unsupported"}:
+        raise ValueError(f"{path}: invalid audio.state")
+    for name in (
+        "gestureStarts",
+        "backgroundSuspensions",
+        "explicitResumes",
+        "muteChanges",
+        "mutedPlaybackAttempts",
+        "audiblePlaybackAttempts",
+    ):
+        value = audio[name]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{path}: audio.{name} must be a non-negative integer")
+    if audio["gestureStarts"] != audio["mutedPlaybackAttempts"] + audio["audiblePlaybackAttempts"]:
+        raise ValueError(f"{path}: audio playback counters are inconsistent")
 
     checks = report["physical_checks"]
     if set(checks) != REQUIRED_PHYSICAL_CHECKS:

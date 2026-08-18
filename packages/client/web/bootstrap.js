@@ -113,6 +113,31 @@ function detectBrowserFamily(userAgent) {
   return "unknown";
 }
 
+function allowedBrowserFamilies(platform) {
+  return {
+    iphone: ["safari"],
+    ipad: ["safari"],
+    "android-phone": ["chrome", "firefox", "samsung-internet"],
+    "android-tablet": ["chrome"],
+    desktop: ["safari", "chrome", "firefox", "edge"],
+  }[platform] ?? [];
+}
+
+function updateBrowserFamilyOptions() {
+  const allowed = new Set(allowedBrowserFamilies(platformInput.value));
+  for (const option of browserFamilyInput.options) {
+    option.hidden = option.value !== "" && !allowed.has(option.value);
+    option.disabled = option.hidden;
+  }
+  if (!allowed.has(browserFamilyInput.value)) {
+    browserFamilyInput.value = "";
+  }
+  const isDesktop = platformInput.value === "desktop";
+  if (isDesktop && activePresentationTier !== "default") {
+    showStatus("Desktop compatibility captures require the default-tier URL.");
+  }
+}
+
 function formatDuration(milliseconds) {
   if (milliseconds === null) {
     return "pending";
@@ -519,13 +544,33 @@ function requireStoppedCapture() {
   return false;
 }
 
+function requireCaptureEvidence() {
+  const duration = captureDuration();
+  if (telemetry.frameCount <= 0 || telemetry.fpsSamples.length === 0 || telemetry.frameGapSamplesMs.length === 0) {
+    showStatus("Capture must include frame-rate samples before export.");
+    captureButton.focus();
+    return false;
+  }
+  if (telemetry.pointerContacts <= 0) {
+    showStatus("Capture must include at least one canvas contact before export.");
+    canvas.focus({ preventScroll: true });
+    return false;
+  }
+  if (duration === null || duration <= 0) {
+    showStatus("Capture duration must be greater than zero.");
+    return false;
+  }
+  return true;
+}
+
 function downloadReport() {
   showStatus("");
   if (
     !requireTestMetadata() ||
     !requirePhysicalChecks() ||
     !requireExternalObservations() ||
-    !requireStoppedCapture()
+    !requireStoppedCapture() ||
+    !requireCaptureEvidence()
   ) {
     return;
   }
@@ -577,6 +622,7 @@ function resetReportForm() {
 }
 
 reload.addEventListener("click", () => window.location.reload());
+platformInput.addEventListener("change", updateBrowserFamilyOptions);
 captureButton.addEventListener("click", () => (captureActive ? stopCapture() : startCapture()));
 audioButton.addEventListener("click", () => void playAudioProbe());
 muteButton.addEventListener("click", toggleMute);
@@ -626,6 +672,7 @@ if (feasibilityEnabled) {
   candidateOutput.textContent = `Build ${candidateBuildId}\nSource ${candidateSourceHash}`;
   presentationTierInput.value = activePresentationTier;
   presentationTierInput.disabled = true;
+  updateBrowserFamilyOptions();
   for (const [id, label] of PHYSICAL_CHECKS) {
     const row = document.createElement("div");
     row.className = "physical-check";

@@ -107,13 +107,16 @@ for platform, browser_families in platforms.items():
                             "peak_js_heap_bytes": None,
                         },
                         "interaction": {
+                            "canvas_contacts": 8,
                             "visibility_changes": 4 if lifecycle else 0,
                             "orientation_changes": 2 if lifecycle else 0,
                             "page_hide_count": 2 if lifecycle else 0,
                             "page_show_count": 2 if lifecycle else 1,
                             "restored_from_page_cache": False,
+                            "marked_events": [],
                         },
                         "audio": {
+                            "supported": True,
                             "state": "running",
                             "muted": False,
                             "gestureStarts": 2,
@@ -482,6 +485,7 @@ resume.write_text(json.dumps(resume_report), encoding="utf-8")
 mute = Path(sys.argv[2])
 mute_report = json.loads(mute.read_text(encoding="utf-8"))
 mute_report["audio"]["gestureStarts"] = 1
+mute_report["audio"]["audiblePlaybackAttempts"] = 0
 mute.write_text(json.dumps(mute_report), encoding="utf-8")
 PY
 expect_rejected "incomplete repeated audio playback" $reports
@@ -495,6 +499,7 @@ from pathlib import Path
 mute = Path(sys.argv[1])
 mute_report = json.loads(mute.read_text(encoding="utf-8"))
 mute_report["audio"]["gestureStarts"] = 2
+mute_report["audio"]["audiblePlaybackAttempts"] = 1
 mute.write_text(json.dumps(mute_report), encoding="utf-8")
 
 duration = Path(sys.argv[2])
