@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+from wasm_bundle_lock import generated_bundle_locked
+
 MANIFEST_NAME = "pwmtf-bundle-manifest.json"
 BUNDLE_HASH_ALGORITHM = "sha256-length-prefixed-v1"
 BUNDLE_HASH_PATTERN = re.compile(r'^const candidateBundleHash = "([0-9a-f]{64})";$', re.MULTILINE)
@@ -161,6 +163,7 @@ class BundleServer(http.server.ThreadingHTTPServer):
         return request, address
 
 
+@generated_bundle_locked
 def main() -> int:
     """Load the complete bundle, configure optional TLS, and serve it."""
     parser = argparse.ArgumentParser(description=__doc__)

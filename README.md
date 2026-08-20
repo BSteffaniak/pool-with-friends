@@ -32,13 +32,17 @@ cargo deny check
 ./scripts/check-native.sh
 ./scripts/check-wasm.sh
 ./scripts/build-wasm.sh
+./scripts/test-wasm-source-hash.py
 ./scripts/serve-wasm-bundle.py --port 8080 --directory dist
 ./scripts/report-wasm-size.sh
 ./scripts/serve-feasibility.sh
 ./scripts/validate-feasibility-matrix.sh
 ./scripts/test-feasibility-tools.sh
+./scripts/test-feasibility-matrix-lock.sh
 ./scripts/test-feasibility-server.sh
 ./scripts/test-wasm-bundle-integrity.sh
+./scripts/test-wasm-bundle-lock.py
+./scripts/test-wasm-bundle-concurrency.sh
 ./scripts/test-wasm-bundle-server.sh
 ./scripts/test-wasm-reproducible-build.sh
 ./scripts/test-wasm-size-evidence.sh

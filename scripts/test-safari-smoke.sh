@@ -4,6 +4,10 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
+if [ "${PWMTF_WASM_BUNDLE_LOCKED:-0}" != 1 ]; then
+    exec ./scripts/with-wasm-bundle-lock.py -- "$0" "$@"
+fi
+
 PWMTF_SKIP_WASM_OPT=1 ./scripts/build-wasm.sh
 
 safaridriver=${SAFARIDRIVER_BIN:-/usr/bin/safaridriver}

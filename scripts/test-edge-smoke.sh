@@ -4,6 +4,10 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
+if [ "${PWMTF_WASM_BUNDLE_LOCKED:-0}" != 1 ]; then
+    exec ./scripts/with-wasm-bundle-lock.py -- "$0" "$@"
+fi
+
 PWMTF_SKIP_WASM_OPT=1 ./scripts/build-wasm.sh
 
 edge=${EDGE_BIN:-}
@@ -68,11 +72,12 @@ import sys
 log, browser, url = sys.argv[1:]
 command = [
     browser,
-    "--headless",
+    "--headless=new",
     "--disable-background-networking",
     "--disable-component-update",
     "--disable-default-apps",
     "--disable-extensions",
+    "--disable-gpu-sandbox",
     "--disable-sync",
     "--enable-webgl",
     "--enable-unsafe-swiftshader",
@@ -80,6 +85,8 @@ command = [
     "--metrics-recording-only",
     "--no-first-run",
     "--no-default-browser-check",
+    "--run-all-compositor-stages-before-draw",
+    "--use-angle=swiftshader",
     "--virtual-time-budget=30000",
     "--window-size=1280,720",
     "--dump-dom",

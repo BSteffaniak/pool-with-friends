@@ -4,6 +4,10 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
+if [ "${PWMTF_WASM_BUNDLE_LOCKED:-0}" != 1 ]; then
+    exec ./scripts/with-wasm-bundle-lock.py -- "$0" "$@"
+fi
+
 first=$(mktemp -d "${TMPDIR:-/tmp}/pwmtf-reproducible-build-a.XXXXXX")
 second=$(mktemp -d "${TMPDIR:-/tmp}/pwmtf-reproducible-build-b.XXXXXX")
 first_optimized=$(mktemp -d "${TMPDIR:-/tmp}/pwmtf-reproducible-optimized-a.XXXXXX")

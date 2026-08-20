@@ -59,7 +59,7 @@ const PHYSICAL_CHECKS = [
 ];
 
 const telemetry = {
-  schemaVersion: 10,
+  schemaVersion: 11,
   clientReadyMs: null,
   firstCanvasContactMs: null,
   pointerContacts: 0,
@@ -88,13 +88,14 @@ const telemetry = {
   events: [],
   audio: {
     supported: Boolean(window.AudioContext || window.webkitAudioContext),
-    state: "not started",
+    state: Boolean(window.AudioContext || window.webkitAudioContext) ? "not started" : "unsupported",
     gestureStarts: 0,
     backgroundSuspensions: 0,
     explicitResumes: 0,
     muteChanges: 0,
     mutedPlaybackAttempts: 0,
     audiblePlaybackAttempts: 0,
+    transitionFailures: 0,
     muted: false,
   },
 };
@@ -104,8 +105,12 @@ let lastFrameAt = null;
 let frameWindowStartedAt = null;
 let frameWindowCount = 0;
 let audioContext = null;
+let audioContextPendingClose = null;
 let masterGain = null;
 let audioNeedsExplicitResume = false;
+let audioProbeInFlight = false;
+let audioLifecycleOperations = 0;
+let audioLifecycleTransition = Promise.resolve();
 
 function detectBrowserFamily(userAgent) {
   if (/SamsungBrowser\//u.test(userAgent)) {
@@ -248,7 +253,7 @@ function refreshMetrics() {
     `page hide/show: ${telemetry.pageHideCount}/${telemetry.pageShowCount}`,
     `restored from page cache: ${telemetry.restoredFromPageCache ? "yes" : "no"}`,
     `audio: ${telemetry.audio.state}${telemetry.audio.muted ? " (muted)" : ""}`,
-    `audio evidence: ${telemetry.audio.audiblePlaybackAttempts}/1 audible · ${telemetry.audio.mutedPlaybackAttempts}/1 muted · ${telemetry.audio.muteChanges}/2 mute changes · ${telemetry.audio.backgroundSuspensions}/1 suspend · ${telemetry.audio.explicitResumes}/1 resume`,
+    `audio evidence: ${telemetry.audio.audiblePlaybackAttempts}/1 audible · ${telemetry.audio.mutedPlaybackAttempts}/1 muted · ${telemetry.audio.muteChanges}/2 mute changes · ${telemetry.audio.backgroundSuspensions}/1 suspend · ${telemetry.audio.explicitResumes}/1 resume · ${telemetry.audio.transitionFailures} failures`,
     `viewport: ${window.innerWidth}×${window.innerHeight} @ ${window.devicePixelRatio.toFixed(2)}x`,
   ].join("\n");
 }
@@ -329,6 +334,14 @@ function requireExternalObservations() {
     }
   }
   const observations = externalObservations();
+  if (Object.values(observations).some((value) => value === null)) {
+    showStatus("All external observations must be valid finite values or selected outcomes.");
+    return false;
+  }
+  if (telemetry.clientReadyMs === null || telemetry.firstCanvasContactMs === null) {
+    showStatus("Client readiness and the first canvas contact must be recorded before export.");
+    return false;
+  }
   if (observations.first_visible_table_ms < telemetry.clientReadyMs) {
     showStatus("First visible table cannot precede client readiness.");
     firstVisibleInput.focus();
@@ -391,7 +404,7 @@ function testMetadata() {
     cache_state: cacheStateInput.value,
     minimum_version_run: minimumVersionInput.value,
     presentation_tier: presentationTierInput.value,
-    run_number: Number.parseInt(runNumberInput.value, 10) || null,
+    run_number: Number(runNumberInput.value),
   };
 }
 
@@ -412,6 +425,19 @@ function requireTestMetadata() {
       showStatus(`Complete the required test metadata: ${input.labels?.[0]?.textContent.trim() ?? input.id}`);
       return false;
     }
+  }
+  for (const input of [hardwareModelInput, osVersionInput, browserVersionInput]) {
+    if (input.value !== input.value.trim()) {
+      showStatus(`Remove surrounding whitespace from: ${input.labels?.[0]?.textContent.trim() ?? input.id}`);
+      input.focus();
+      return false;
+    }
+  }
+  const runNumber = Number(runNumberInput.value);
+  if (!Number.isInteger(runNumber) || runNumber < 1 || runNumber > 99) {
+    showStatus("Run number must be an integer from 1 through 99.");
+    runNumberInput.focus();
+    return false;
   }
   if (platformInput.value === "desktop" && presentationTierInput.value !== "default") {
     showStatus("Desktop compatibility captures must use the default presentation tier.");
@@ -476,6 +502,24 @@ function setCaptureMetadataLocked(locked) {
 
 function startCapture() {
   showStatus("");
+  if (telemetry.audio.transitionFailures > 0) {
+    showStatus("Reset the report form after the failed audio transition before starting a capture.");
+    resetButton.focus();
+    return;
+  }
+  if (audioContext !== null && audioContext.state !== "running") {
+    showStatus("Resume audio before starting the capture.");
+    audioButton.focus();
+    return;
+  }
+  if (audioContext !== null && telemetry.audio.transitionFailures === 0) {
+    showStatus("Reset the report form before reusing an existing audio context for a new capture.");
+    resetButton.focus();
+    return;
+  }
+  if (rejectForAudioLifecycle("starting a capture")) {
+    return;
+  }
   if (document.hidden) {
     showStatus("Return this page to the foreground before starting a capture.");
     captureButton.focus();
@@ -513,7 +557,9 @@ function startCapture() {
   telemetry.audio.muteChanges = 0;
   telemetry.audio.mutedPlaybackAttempts = 0;
   telemetry.audio.audiblePlaybackAttempts = 0;
+  telemetry.audio.transitionFailures = 0;
   telemetry.audio.muted = false;
+  audioNeedsExplicitResume = false;
   if (masterGain !== null && audioContext !== null) {
     masterGain.gain.setValueAtTime(0.12, audioContext.currentTime);
   }
@@ -525,11 +571,15 @@ function startCapture() {
   toggleToolsButton.textContent = "Expand panel";
   toggleToolsButton.setAttribute("aria-expanded", "false");
   captureButton.textContent = "Stop capture";
+  updateCaptureControls();
   showStatus("Capture started.");
   refreshMetrics();
 }
 
 function stopCapture() {
+  if (rejectForAudioLifecycle("stopping the capture")) {
+    return;
+  }
   if (document.hidden) {
     showStatus("Return this page to the foreground before stopping the capture.");
     return;
@@ -547,17 +597,58 @@ function stopCapture() {
   toggleToolsButton.textContent = "Minimize panel";
   toggleToolsButton.setAttribute("aria-expanded", "true");
   captureButton.textContent = "Restart capture";
-  showStatus("Capture stopped and ready for validation.");
+  updateAudioControls();
+  showStatus(
+    stoppedCaptureNeedsAudioResume()
+      ? "Capture stopped. Resume audio before validating this report."
+      : "Capture stopped and ready for validation.",
+  );
   sampleMemory();
   refreshMetrics();
 }
 
+function updateCaptureControls() {
+  const busy = audioLifecycleBusy();
+  markEventButton.disabled = !captureActive || busy;
+  resetButton.disabled = captureActive || busy;
+  downloadButton.disabled =
+    captureActive ||
+    busy ||
+    telemetry.captureStoppedAt === null ||
+    telemetry.audio.transitionFailures > 0 ||
+    stoppedCaptureNeedsAudioResume();
+  toggleToolsButton.disabled = captureActive || busy;
+}
+
+function stoppedCaptureNeedsAudioResume() {
+  return (
+    !captureActive &&
+    telemetry.captureStoppedAt !== null &&
+    audioContext !== null &&
+    (audioNeedsExplicitResume || audioContext.state !== "running")
+  );
+}
+
 function updateAudioControls() {
-  telemetry.audio.state = audioContext?.state ?? (telemetry.audio.supported ? "not started" : "unsupported");
-  audioButton.textContent = audioNeedsExplicitResume ? "Resume audio probe" : "Play audio probe";
-  audioButton.disabled = !telemetry.audio.supported;
-  muteButton.disabled = audioContext === null;
+  telemetry.audio.state =
+    audioContext?.state ??
+    audioContextPendingClose?.state ??
+    (telemetry.audio.supported ? "not started" : "unsupported");
+  audioButton.textContent = stoppedCaptureNeedsAudioResume()
+    ? "Resume audio for export"
+    : audioNeedsExplicitResume
+      ? "Resume audio probe"
+      : "Play audio probe";
+  audioButton.disabled =
+    !telemetry.audio.supported ||
+    audioProbeInFlight ||
+    audioLifecycleOperations > 0 ||
+    (!captureActive && telemetry.audio.transitionFailures === 0 && !stoppedCaptureNeedsAudioResume()) ||
+    (captureActive && telemetry.audio.gestureStarts >= 2);
+  muteButton.disabled =
+    audioContext === null || audioProbeInFlight || audioLifecycleOperations > 0 || !captureActive;
   muteButton.textContent = telemetry.audio.muted ? "Unmute" : "Mute";
+  updateCaptureControls();
   refreshMetrics();
 }
 
@@ -570,54 +661,159 @@ function createAudioGraph() {
   audioContext.addEventListener("statechange", updateAudioControls);
 }
 
-async function playAudioProbe() {
-  if (!telemetry.audio.supported) {
+function queueAudioLifecycleTransition(transition) {
+  audioLifecycleOperations += 1;
+  updateAudioControls();
+  const queued = audioLifecycleTransition.then(transition, transition);
+  audioLifecycleTransition = queued.catch(() => {});
+  void queued
+    .finally(() => {
+      audioLifecycleOperations -= 1;
+      updateAudioControls();
+    })
+    .catch(() => {});
+  return queued;
+}
+
+function audioLifecycleBusy() {
+  return audioProbeInFlight || audioLifecycleOperations > 0;
+}
+
+function rejectForAudioLifecycle(action) {
+  if (!audioLifecycleBusy()) {
+    return false;
+  }
+  showStatus(`Wait for audio operations to finish before ${action}.`);
+  audioButton.focus();
+  return true;
+}
+
+function requestBackgroundAudioSuspension() {
+  if (!document.hidden || audioContext === null || audioNeedsExplicitResume) {
     return;
   }
 
-  if (audioContext === null) {
-    createAudioGraph();
-  }
-
-  if (audioContext.state === "suspended") {
-    await audioContext.resume();
-    if (audioNeedsExplicitResume && captureActive) {
-      telemetry.audio.explicitResumes += 1;
+  const contextToSuspend = audioContext;
+  audioNeedsExplicitResume = true;
+  void queueAudioLifecycleTransition(async () => {
+    if (!document.hidden || audioContext !== contextToSuspend) {
+      return false;
     }
-  }
-
-  audioNeedsExplicitResume = false;
-  if (captureActive) {
-    telemetry.audio.gestureStarts += 1;
-    if (telemetry.audio.muted) {
-      telemetry.audio.mutedPlaybackAttempts += 1;
-    } else {
-      telemetry.audio.audiblePlaybackAttempts += 1;
+    if (contextToSuspend.state === "running") {
+      await contextToSuspend.suspend();
     }
+    if (contextToSuspend.state !== "suspended" && contextToSuspend.state !== "interrupted") {
+      throw new Error(`audio context did not suspend: ${contextToSuspend.state}`);
+    }
+    return true;
+  })
+    .then((suspended) => {
+      if (!suspended) {
+        if (audioContext === contextToSuspend && contextToSuspend.state === "running") {
+          audioNeedsExplicitResume = false;
+        }
+        return;
+      }
+      if (captureActive) {
+        telemetry.audio.backgroundSuspensions += 1;
+      }
+    })
+    .catch((error) => {
+      telemetry.audio.transitionFailures += 1;
+      showStatus(`Audio suspend failed: ${error instanceof Error ? error.message : String(error)}`);
+    })
+    .finally(updateAudioControls);
+}
+
+async function playAudioProbe() {
+  if (!telemetry.audio.supported || audioProbeInFlight) {
+    return;
   }
 
-  const oscillator = audioContext.createOscillator();
-  const envelope = audioContext.createGain();
-  const startedAt = audioContext.currentTime;
-  oscillator.type = "triangle";
-  oscillator.frequency.setValueAtTime(523.25, startedAt);
-  oscillator.frequency.exponentialRampToValueAtTime(659.25, startedAt + 0.16);
-  envelope.gain.setValueAtTime(0.0001, startedAt);
-  envelope.gain.exponentialRampToValueAtTime(1, startedAt + 0.015);
-  envelope.gain.exponentialRampToValueAtTime(0.0001, startedAt + 0.24);
-  oscillator.connect(envelope);
-  envelope.connect(masterGain);
-  oscillator.start(startedAt);
-  oscillator.stop(startedAt + 0.25);
-  oscillator.addEventListener("ended", () => {
-    oscillator.disconnect();
-    envelope.disconnect();
-  });
-  updateAudioControls();
+  if (!captureActive && telemetry.audio.transitionFailures === 0 && !stoppedCaptureNeedsAudioResume()) {
+    showStatus("Start a capture before playing the audio probe.");
+    captureButton.focus();
+    return;
+  }
+  if (captureActive && telemetry.audio.gestureStarts >= 2) {
+    showStatus("This capture already contains the required two audio probe plays.");
+    return;
+  }
+
+  const resumeForStoppedCapture = stoppedCaptureNeedsAudioResume();
+  audioProbeInFlight = true;
+  audioButton.disabled = true;
+  try {
+    if (audioContext === null) {
+      createAudioGraph();
+    }
+
+    if (
+      audioContext.state === "suspended" ||
+      audioContext.state === "interrupted" ||
+      (audioNeedsExplicitResume && audioContext.state !== "running")
+    ) {
+      await queueAudioLifecycleTransition(async () => {
+        if (document.hidden) {
+          throw new Error("return this page to the foreground before resuming audio");
+        }
+        if (audioContext.state !== "running") {
+          await audioContext.resume();
+        }
+      });
+      if (audioContext.state !== "running") {
+        throw new Error(`audio context did not resume: ${audioContext.state}`);
+      }
+      if (audioNeedsExplicitResume && captureActive) {
+        telemetry.audio.explicitResumes += 1;
+      }
+    }
+
+    audioNeedsExplicitResume = false;
+    if (resumeForStoppedCapture) {
+      showStatus("Audio resumed. The stopped report is ready for validation.");
+      return;
+    }
+    if (captureActive) {
+      telemetry.audio.gestureStarts += 1;
+      if (telemetry.audio.muted) {
+        telemetry.audio.mutedPlaybackAttempts += 1;
+      } else {
+        telemetry.audio.audiblePlaybackAttempts += 1;
+      }
+    }
+
+    const oscillator = audioContext.createOscillator();
+    const envelope = audioContext.createGain();
+    const startedAt = audioContext.currentTime;
+    oscillator.type = "triangle";
+    oscillator.frequency.setValueAtTime(523.25, startedAt);
+    oscillator.frequency.exponentialRampToValueAtTime(659.25, startedAt + 0.16);
+    envelope.gain.setValueAtTime(0.0001, startedAt);
+    envelope.gain.exponentialRampToValueAtTime(1, startedAt + 0.015);
+    envelope.gain.exponentialRampToValueAtTime(0.0001, startedAt + 0.24);
+    oscillator.connect(envelope);
+    envelope.connect(masterGain);
+    oscillator.start(startedAt);
+    oscillator.stop(startedAt + 0.25);
+    oscillator.addEventListener("ended", () => {
+      oscillator.disconnect();
+      envelope.disconnect();
+    });
+    showStatus(telemetry.audio.muted ? "Muted audio probe played." : "Audio probe played.");
+  } catch (error) {
+    audioNeedsExplicitResume = true;
+    telemetry.audio.transitionFailures += 1;
+    showStatus(`Audio probe failed: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    audioProbeInFlight = false;
+    updateAudioControls();
+  }
 }
 
 function toggleMute() {
-  if (masterGain === null || audioContext === null) {
+  if (masterGain === null || audioContext === null || !captureActive || audioLifecycleBusy()) {
+    showStatus("Mute changes are available only during an active capture with idle audio.");
     return;
   }
 
@@ -630,11 +826,14 @@ function toggleMute() {
 }
 
 function markEvent() {
-  if (telemetry.captureStartedAt === null) {
-    startCapture();
-    if (telemetry.captureStartedAt === null) {
-      return;
-    }
+  if (!captureActive || audioLifecycleBusy()) {
+    showStatus(
+      captureActive
+        ? "Wait for audio operations before marking an event."
+        : "Start a capture before marking an event.",
+    );
+    (captureActive ? audioButton : captureButton).focus();
+    return;
   }
   const label = eventLabelInput.value.trim();
   if (label === "") {
@@ -642,11 +841,22 @@ function markEvent() {
     eventLabelInput.focus();
     return;
   }
+  if ([...label].some((character) => character.codePointAt(0) < 32 || character.codePointAt(0) === 127)) {
+    showStatus("Event labels cannot contain control characters.");
+    eventLabelInput.focus();
+    return;
+  }
+  const elapsedMs = captureDuration();
+  const orientation = window.screen.orientation?.type ?? null;
+  if (elapsedMs === null || elapsedMs < 0 || document.visibilityState !== "visible" || orientation === null) {
+    showStatus("Event markers require visible capture timing and a known orientation.");
+    return;
+  }
   telemetry.events.push({
-    elapsed_ms: captureDuration(),
+    elapsed_ms: elapsedMs,
     label: label.slice(0, 120),
     visibility: document.visibilityState,
-    orientation: window.screen.orientation?.type ?? null,
+    orientation,
   });
   eventLabelInput.value = "";
   showStatus(`Marked event: ${label.slice(0, 120)}`);
@@ -737,6 +947,9 @@ function requireStoppedCapture() {
 }
 
 function requireCaptureEvidence() {
+  if (rejectForAudioLifecycle("downloading the report")) {
+    return false;
+  }
   const duration = captureDuration();
   if (telemetry.frameCount <= 0 || telemetry.fpsSamples.length === 0 || telemetry.frameGapSamplesMs.length === 0) {
     showStatus("Capture must include frame-rate samples before export.");
@@ -761,12 +974,12 @@ function requireCaptureEvidence() {
     );
     return false;
   }
-  if (cacheStateInput.value !== "lifecycle" && telemetry.audio.backgroundSuspensions > 0) {
-    showStatus("Interaction captures cannot include audio background suspension; restart this run.");
+  if (cacheStateInput.value !== "lifecycle" && telemetry.audio.backgroundSuspensions !== 0) {
+    showStatus("Interaction captures require exactly zero audio background suspensions; restart this run.");
     return false;
   }
-  if (cacheStateInput.value !== "lifecycle" && telemetry.audio.explicitResumes > 0) {
-    showStatus("Interaction captures cannot include audio foreground resume; restart this run.");
+  if (cacheStateInput.value !== "lifecycle" && telemetry.audio.explicitResumes !== 0) {
+    showStatus("Interaction captures require exactly zero audio foreground resumes; restart this run.");
     return false;
   }
   if (
@@ -812,24 +1025,35 @@ function requireCaptureEvidence() {
       showStatus("Lifecycle capture requires an exact landscape → portrait → landscape sequence.");
       return false;
     }
-    if (telemetry.audio.backgroundSuspensions < 1 || telemetry.audio.explicitResumes < 1) {
-      showStatus("Lifecycle capture requires audio background suspension and explicit resume.");
+    if (telemetry.audio.backgroundSuspensions !== 2 || telemetry.audio.explicitResumes !== 2) {
+      showStatus("Lifecycle capture requires exactly two audio suspensions and two explicit resumes.");
       return false;
     }
     if (
-      telemetry.audio.backgroundSuspensions > telemetry.hiddenDurationsMs.length ||
-      telemetry.audio.explicitResumes > telemetry.audio.backgroundSuspensions
+      telemetry.audio.backgroundSuspensions !== telemetry.hiddenDurationsMs.length ||
+      telemetry.audio.explicitResumes !== telemetry.audio.backgroundSuspensions
     ) {
-      showStatus("Audio lifecycle counters do not match the recorded background intervals.");
+      showStatus("Audio lifecycle counters do not match every recorded background interval.");
       return false;
     }
   }
+  if (telemetry.audio.transitionFailures > 0) {
+    showStatus("Capture contains a failed audio transition; restart this run.");
+    return false;
+  }
+  if (telemetry.audio.state !== "running") {
+    showStatus("Resume audio and confirm it is running before downloading this report.");
+    audioButton.focus();
+    return false;
+  }
   if (
-    telemetry.audio.audiblePlaybackAttempts < 1 ||
-    telemetry.audio.mutedPlaybackAttempts < 1 ||
-    telemetry.audio.muteChanges < 2
+    telemetry.audio.audiblePlaybackAttempts !== 1 ||
+    telemetry.audio.mutedPlaybackAttempts !== 1 ||
+    telemetry.audio.gestureStarts !== 2 ||
+    telemetry.audio.muteChanges !== 2 ||
+    telemetry.audio.muted
   ) {
-    showStatus("Capture requires audible and muted playback plus a complete mute/unmute cycle.");
+    showStatus("Capture requires exactly one audible and one muted probe plus one completed mute/unmute cycle.");
     return false;
   }
   return true;
@@ -850,6 +1074,7 @@ function clearCaptureEvidence() {
   telemetry.currentFps = null;
   telemetry.pointerContacts = 0;
   captureButton.textContent = "Start capture";
+  updateCaptureControls();
 }
 
 function feasibilityFilename(test, capturedAt) {
@@ -894,6 +1119,9 @@ function resetReportForm() {
     captureButton.focus();
     return;
   }
+  if (rejectForAudioLifecycle("resetting the report form")) {
+    return;
+  }
   for (const input of [
     platformInput,
     hardwareModelInput,
@@ -916,11 +1144,45 @@ function resetReportForm() {
   for (const input of physicalChecks.querySelectorAll('input[type="radio"]')) {
     input.checked = false;
   }
+  telemetry.audio.transitionFailures = 0;
+  audioNeedsExplicitResume = false;
+  const contextToClose = audioContext;
+  audioContext = null;
+  audioContextPendingClose = contextToClose;
+  masterGain = null;
+  if (contextToClose !== null) {
+    audioLifecycleOperations += 1;
+    updateAudioControls();
+    void contextToClose
+      .close()
+      .then(() => {
+        if (contextToClose.state !== "closed") {
+          throw new Error(`audio context did not close: ${contextToClose.state}`);
+        }
+      })
+      .catch((error) => {
+        telemetry.audio.transitionFailures += 1;
+        showStatus(`Audio close failed: ${error instanceof Error ? error.message : String(error)}`);
+      })
+      .finally(() => {
+        if (audioContextPendingClose === contextToClose) {
+          audioContextPendingClose = null;
+        }
+        audioLifecycleOperations -= 1;
+        updateAudioControls();
+      });
+  } else {
+    updateAudioControls();
+  }
   showStatus("Report form reset.");
   platformInput.focus();
 }
 
 function toggleTools() {
+  if (captureActive || audioLifecycleBusy()) {
+    showStatus("The capture panel stays minimized while capture or audio lifecycle work is active.");
+    return;
+  }
   const collapsed = tools.classList.toggle("collapsed");
   toggleToolsButton.textContent = collapsed ? "Expand panel" : "Minimize panel";
   toggleToolsButton.setAttribute("aria-expanded", String(!collapsed));
@@ -987,14 +1249,8 @@ document.addEventListener("visibilitychange", () => {
       telemetry.hiddenStartedAt = null;
     }
   }
-  if (document.hidden && audioContext?.state === "running") {
-    audioNeedsExplicitResume = true;
-    void audioContext.suspend().then(() => {
-      if (captureActive) {
-        telemetry.audio.backgroundSuspensions += 1;
-      }
-      updateAudioControls();
-    });
+  if (document.hidden) {
+    requestBackgroundAudioSuspension();
   }
   refreshMetrics();
 });

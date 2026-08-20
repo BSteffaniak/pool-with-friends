@@ -4,6 +4,10 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
+if [ "${PWMTF_WASM_BUNDLE_LOCKED:-0}" != 1 ]; then
+    exec ./scripts/with-wasm-bundle-lock.py -- "$0" "$@"
+fi
+
 source_hash=$(./scripts/hash-wasm-source.py)
 
 build_id=${PWMTF_BUILD_ID:-}

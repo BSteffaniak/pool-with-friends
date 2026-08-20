@@ -8,13 +8,15 @@ import gzip
 import hashlib
 import json
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
+
+from wasm_bundle_lock import generated_bundle_locked
 
 MANIFEST_NAME = "pwmtf-bundle-manifest.json"
 
 
+@generated_bundle_locked
 def main() -> int:
     """Read a verified manifest and write candidate-bound size evidence."""
     parser = argparse.ArgumentParser(description=__doc__)

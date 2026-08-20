@@ -7,11 +7,14 @@ import argparse
 import hashlib
 import json
 import statistics
+import subprocess
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+from wasm_bundle_lock import generated_bundle_locked
 
 REQUIRED_RUNS = 3
 REQUIRED_PLATFORMS = {"iphone", "ipad", "android-phone", "android-tablet"}
@@ -97,7 +100,7 @@ def browser_version(value: Any) -> tuple[int, ...] | None:
     if not isinstance(value, str):
         return None
     parts = value.split(".")
-    if not parts or any(not part.isdigit() for part in parts):
+    if not parts or any(not part or not part.isascii() or not part.isdecimal() for part in parts):
         return None
     parsed = [int(part) for part in parts]
     while len(parsed) > 1 and parsed[-1] == 0:
@@ -138,7 +141,7 @@ def load_report(path: Path) -> dict[str, Any]:
     }
     if set(report) != expected_report_keys:
         raise ValueError(f"{path}: report root keys are invalid")
-    if report.get("schema_version") != 10:
+    if report.get("schema_version") != 11:
         raise ValueError(f"{path}: unsupported schema_version")
 
     candidate = report.get("candidate")
@@ -186,7 +189,12 @@ def load_report(path: Path) -> dict[str, Any]:
             raise ValueError(f"{path}: missing test.{field}")
     for field, maximum_length in TEXT_FIELD_LIMITS.items():
         value = test[field]
-        if not isinstance(value, str) or not value.strip() or len(value) > maximum_length:
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or value != value.strip()
+            or len(value) > maximum_length
+        ):
             raise ValueError(f"{path}: invalid test.{field}")
         if any(ord(character) < 32 or ord(character) == 127 for character in value):
             raise ValueError(f"{path}: test.{field} contains control characters")
@@ -262,6 +270,15 @@ def load_report(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path}: detected browser version does not match test.browser_version")
     if not isinstance(browser.get("user_agent"), str) or not browser["user_agent"]:
         raise ValueError(f"{path}: browser.user_agent must be a non-empty string")
+    if len(browser["user_agent"]) > 1_024 or any(
+        ord(character) < 32 or ord(character) == 127 for character in browser["user_agent"]
+    ):
+        raise ValueError(f"{path}: browser.user_agent is invalid")
+    language = browser["language"]
+    if not isinstance(language, str) or not language or len(language) > 128:
+        raise ValueError(f"{path}: browser.language must be a bounded non-empty string")
+    if any(ord(character) < 32 or ord(character) == 127 for character in language):
+        raise ValueError(f"{path}: browser.language contains control characters")
     hardware_concurrency = browser["hardware_concurrency"]
     if hardware_concurrency is not None and (
         not isinstance(hardware_concurrency, int)
@@ -284,10 +301,13 @@ def load_report(path: Path) -> dict[str, Any]:
     }
     if set(display) != expected_display_keys:
         raise ValueError(f"{path}: display metadata keys are invalid")
-    for name in ("screen_width", "screen_height", "viewport_width", "viewport_height", "device_pixel_ratio"):
-        value = number(display.get(name))
-        if value is None or value <= 0:
-            raise ValueError(f"{path}: display.{name} must be positive and finite")
+    for name in ("screen_width", "screen_height", "viewport_width", "viewport_height"):
+        value = display.get(name)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{path}: display.{name} must be a positive integer")
+    device_pixel_ratio = number(display.get("device_pixel_ratio"))
+    if device_pixel_ratio is None or device_pixel_ratio <= 0:
+        raise ValueError(f"{path}: display.device_pixel_ratio must be positive and finite")
 
     timing = report["timing_ms"]
     expected_timing_keys = {
@@ -305,6 +325,12 @@ def load_report(path: Path) -> dict[str, Any]:
             raise ValueError(f"{path}: timing_ms.{name} must be a non-negative finite number")
     if timing["first_canvas_contact"] < timing["client_ready"]:
         raise ValueError(f"{path}: first canvas contact cannot precede client readiness")
+    if not isinstance(display["orientation"], str) or not display["orientation"]:
+        raise ValueError(f"{path}: display.orientation must be a non-empty string")
+    if len(display["orientation"]) > 80 or any(
+        ord(character) < 32 or ord(character) == 127 for character in display["orientation"]
+    ):
+        raise ValueError(f"{path}: display.orientation is invalid")
     hidden_durations = timing["hidden_durations"]
     if not isinstance(hidden_durations, list) or len(hidden_durations) > 100:
         raise ValueError(f"{path}: timing_ms.hidden_durations must be a bounded list")
@@ -333,8 +359,10 @@ def load_report(path: Path) -> dict[str, Any]:
     }
     if set(performance) != expected_performance_keys:
         raise ValueError(f"{path}: performance keys are invalid")
+    frame_count = performance["frame_count"]
+    if not isinstance(frame_count, int) or isinstance(frame_count, bool) or frame_count <= 0:
+        raise ValueError(f"{path}: performance.frame_count must be a positive integer")
     for name in (
-        "frame_count",
         "minimum_one_second_fps",
         "median_one_second_fps",
         "maximum_one_second_fps",
@@ -346,8 +374,6 @@ def load_report(path: Path) -> dict[str, Any]:
         value = number(performance.get(name))
         if value is None or value < 0:
             raise ValueError(f"{path}: performance.{name} must be non-negative and finite")
-    if performance["frame_count"] <= 0:
-        raise ValueError(f"{path}: performance.frame_count must be greater than zero")
     if report["interaction"]["canvas_contacts"] <= 0:
         raise ValueError(f"{path}: interaction.canvas_contacts must be greater than zero")
     if performance["minimum_one_second_fps"] > performance["median_one_second_fps"]:
@@ -360,7 +386,7 @@ def load_report(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path}: p95 frame time cannot exceed p99 frame time")
     if performance["p99_frame_time_ms"] > performance["maximum_frame_gap_ms"]:
         raise ValueError(f"{path}: p99 frame time cannot exceed maximum frame gap")
-    for name in ("current_js_heap_bytes", "peak_js_heap_bytes"):
+    for name in ("current_fps", "current_js_heap_bytes", "peak_js_heap_bytes"):
         value = performance[name]
         if value is not None and (number(value) is None or value < 0):
             raise ValueError(f"{path}: performance.{name} must be null or non-negative and finite")
@@ -401,14 +427,28 @@ def load_report(path: Path) -> dict[str, Any]:
     initial_orientation = interaction["initial_orientation"]
     final_orientation = interaction["final_orientation"]
     for name, value in (("initial_orientation", initial_orientation), ("final_orientation", final_orientation)):
-        if value is not None and not isinstance(value, str):
+        if value is not None and (
+            not isinstance(value, str)
+            or not value
+            or len(value) > 80
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
             raise ValueError(f"{path}: invalid interaction.{name}")
     orientation_states = interaction["orientation_states"]
     if not isinstance(orientation_states, list) or len(orientation_states) > 100:
         raise ValueError(f"{path}: interaction.orientation_states must be a bounded list")
     if len(orientation_states) != interaction["orientation_changes"]:
         raise ValueError(f"{path}: orientation states do not match orientation change count")
-    if any(value is not None and not isinstance(value, str) for value in orientation_states):
+    if any(
+        value is not None
+        and (
+            not isinstance(value, str)
+            or not value
+            or len(value) > 80
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        )
+        for value in orientation_states
+    ):
         raise ValueError(f"{path}: invalid interaction orientation state")
     for name in ("restored_from_page_cache", "capture_started_visible", "capture_stopped_visible"):
         if not isinstance(interaction[name], bool):
@@ -429,9 +469,16 @@ def load_report(path: Path) -> dict[str, Any]:
             raise ValueError(f"{path}: invalid marked event label")
         if any(ord(character) < 32 or ord(character) == 127 for character in event["label"]):
             raise ValueError(f"{path}: marked event label contains control characters")
-        if event["visibility"] not in {"visible", "hidden"}:
-            raise ValueError(f"{path}: invalid marked event visibility")
-        if event["orientation"] is not None and not isinstance(event["orientation"], str):
+        if event["visibility"] != "visible":
+            raise ValueError(f"{path}: marked events must be recorded while visible")
+        if event["orientation"] is None:
+            raise ValueError(f"{path}: marked events require a known orientation")
+        if event["orientation"] is not None and (
+            not isinstance(event["orientation"], str)
+            or not event["orientation"]
+            or len(event["orientation"]) > 80
+            or any(ord(character) < 32 or ord(character) == 127 for character in event["orientation"])
+        ):
             raise ValueError(f"{path}: invalid marked event orientation")
 
     expected_audio_keys = {
@@ -443,6 +490,7 @@ def load_report(path: Path) -> dict[str, Any]:
         "muteChanges",
         "mutedPlaybackAttempts",
         "audiblePlaybackAttempts",
+        "transitionFailures",
         "muted",
     }
     audio = report["audio"]
@@ -450,7 +498,7 @@ def load_report(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path}: audio keys are invalid")
     if not isinstance(audio["supported"], bool) or not isinstance(audio["muted"], bool):
         raise ValueError(f"{path}: audio boolean fields are invalid")
-    if audio["state"] not in {"not started", "suspended", "running", "closed", "unsupported"}:
+    if audio["state"] not in {"not started", "suspended", "interrupted", "running", "closed", "unsupported"}:
         raise ValueError(f"{path}: invalid audio.state")
     for name in (
         "gestureStarts",
@@ -459,6 +507,7 @@ def load_report(path: Path) -> dict[str, Any]:
         "muteChanges",
         "mutedPlaybackAttempts",
         "audiblePlaybackAttempts",
+        "transitionFailures",
     ):
         value = audio[name]
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
@@ -471,10 +520,16 @@ def load_report(path: Path) -> dict[str, Any]:
         or audio["muteChanges"] != 0
         or audio["backgroundSuspensions"] != 0
         or audio["explicitResumes"] != 0
+        or audio["mutedPlaybackAttempts"] != 0
+        or audio["audiblePlaybackAttempts"] != 0
+        or audio["transitionFailures"] != 0
+        or audio["muted"]
     ):
         raise ValueError(f"{path}: unsupported audio telemetry is inconsistent")
     if audio["supported"] and audio["state"] == "unsupported":
         raise ValueError(f"{path}: supported audio cannot report an unsupported state")
+    if audio["transitionFailures"] != 0:
+        raise ValueError(f"{path}: audio transition failures invalidate the capture")
     if audio["explicitResumes"] > audio["backgroundSuspensions"]:
         raise ValueError(f"{path}: audio explicit resumes cannot exceed background suspensions")
     if audio["muted"] and audio["muteChanges"] % 2 == 0:
@@ -538,6 +593,11 @@ def load_report(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path}: captured_at must be an ISO 8601 timestamp") from error
     if captured_time.tzinfo is None:
         raise ValueError(f"{path}: captured_at must include a timezone")
+    if captured_time.utcoffset() != timedelta(0):
+        raise ValueError(f"{path}: captured_at must be normalized to UTC")
+    canonical_captured_at = captured_time.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    if captured_at != canonical_captured_at:
+        raise ValueError(f"{path}: captured_at must use canonical UTC millisecond spelling")
     now = datetime.now(timezone.utc)
     if captured_time.astimezone(timezone.utc) > now + timedelta(minutes=5):
         raise ValueError(f"{path}: captured_at is more than five minutes in the future")
@@ -681,16 +741,18 @@ def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> li
             visible = number(observations["first_visible_table_ms"])
             accepted_input = number(observations["first_accepted_input_ms"])
             visible_budget = COLD_VISIBLE_BUDGET_MS if cache_state == "cold" else WARM_VISIBLE_BUDGET_MS
+            if cache_state == "lifecycle":
+                visible_budget = None
             if (
                 is_mobile_platform(platform)
-                and cache_state in ("cold", "warm")
+                and visible_budget is not None
                 and visible is not None
                 and visible > visible_budget
             ):
                 errors.append(f"{key} run {run}: first-visible {visible:.2f}ms exceeds {visible_budget}ms")
             if (
                 is_mobile_platform(platform)
-                and cache_state in ("cold", "warm")
+                and visible_budget is not None
                 and accepted_input is not None
                 and accepted_input > visible_budget
             ):
@@ -741,27 +803,27 @@ def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> li
                     errors.append(f"{key} run {run}: lifecycle capture {actual} is shorter than 10 minutes")
 
             audio = report["audio"]
-            if cache_state != "lifecycle" and audio.get("backgroundSuspensions", 0) > 0:
-                errors.append(f"{key} run {run}: non-lifecycle capture contains audio suspension")
-            if cache_state != "lifecycle" and audio.get("explicitResumes", 0) > 0:
-                errors.append(f"{key} run {run}: non-lifecycle capture contains audio resume")
+            if cache_state != "lifecycle" and audio.get("backgroundSuspensions", 0) != 0:
+                errors.append(f"{key} run {run}: non-lifecycle capture must contain zero audio suspensions")
+            if cache_state != "lifecycle" and audio.get("explicitResumes", 0) != 0:
+                errors.append(f"{key} run {run}: non-lifecycle capture must contain zero audio resumes")
             if audio.get("state") != "running":
                 errors.append(f"{key} run {run}: audio context was not running when exported")
             if audio.get("muted") is not False:
                 errors.append(f"{key} run {run}: audio remained muted when exported")
-            if audio.get("gestureStarts", 0) < 2:
-                errors.append(f"{key} run {run}: audio probe did not cover repeated playback")
-            if audio.get("muteChanges", 0) < 2:
-                errors.append(f"{key} run {run}: audio mute/unmute cycle was incomplete")
-            if audio.get("mutedPlaybackAttempts", 0) < 1:
-                errors.append(f"{key} run {run}: muted audio playback was not exercised")
-            if audio.get("audiblePlaybackAttempts", 0) < 1:
-                errors.append(f"{key} run {run}: audible audio playback was not exercised")
+            if audio.get("gestureStarts", 0) != 2:
+                errors.append(f"{key} run {run}: audio probe must contain exactly two plays")
+            if audio.get("muteChanges", 0) != 2:
+                errors.append(f"{key} run {run}: audio must contain exactly one mute/unmute cycle")
+            if audio.get("mutedPlaybackAttempts", 0) != 1:
+                errors.append(f"{key} run {run}: audio must contain exactly one muted probe")
+            if audio.get("audiblePlaybackAttempts", 0) != 1:
+                errors.append(f"{key} run {run}: audio must contain exactly one audible probe")
             if cache_state == "lifecycle":
-                if audio.get("backgroundSuspensions", 0) < 1:
-                    errors.append(f"{key} run {run}: audio background suspension was not observed")
-                if audio.get("explicitResumes", 0) < 1:
-                    errors.append(f"{key} run {run}: explicit audio resume was not observed")
+                if audio.get("backgroundSuspensions", 0) != 2:
+                    errors.append(f"{key} run {run}: lifecycle capture must contain exactly two audio suspensions")
+                if audio.get("explicitResumes", 0) != 2:
+                    errors.append(f"{key} run {run}: lifecycle capture must contain exactly two explicit audio resumes")
                 if report["interaction"].get("visibility_changes", 0) != 4:
                     errors.append(f"{key} run {run}: lifecycle capture must contain exactly four visibility changes")
                 if report["interaction"].get("page_hide_count", 0) != 2:
@@ -841,7 +903,7 @@ def acceptance_decision(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> 
         "",
         "**Status: ACCEPT — Bevy/WebGL2 is selected for the production browser client.**",
         "",
-        f"- Evidence completed: {captured_at.isoformat().replace('+00:00', 'Z')}",
+        f"- Evidence completed: {captured_at.isoformat(timespec='milliseconds').replace('+00:00', 'Z')}",
         f"- Report set: `{report_set_hash(groups)}` (`sha256-canonical-json-length-prefixed-v1`)",
         f"- Build: `{candidate['build_id']}`",
         f"- Source: `{candidate['source_hash']}`",
@@ -857,6 +919,7 @@ def acceptance_decision(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> 
     return "\n".join(lines)
 
 
+@generated_bundle_locked
 def main() -> int:
     """Validate reports and print a repeatable Markdown summary."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -897,6 +960,21 @@ def main() -> int:
 
     expected_candidate: dict[str, str] | None = None
     if args.expected_bundle is not None:
+        verifier = Path(__file__).resolve().parent / "verify-wasm-bundle.py"
+        try:
+            subprocess.run(
+                [str(verifier), str(args.expected_bundle)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except subprocess.CalledProcessError as error:
+            print(
+                f"feasibility report error: expected bundle verification failed: {error.stderr.strip()}",
+                file=sys.stderr,
+            )
+            return 1
         manifest_path = args.expected_bundle / "pwmtf-bundle-manifest.json"
         if manifest_path.is_symlink() or not manifest_path.is_file():
             print("feasibility report error: expected bundle manifest must be a regular file", file=sys.stderr)

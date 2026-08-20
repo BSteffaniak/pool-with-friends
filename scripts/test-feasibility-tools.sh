@@ -2,6 +2,11 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+if [ "${PWMTF_WASM_BUNDLE_LOCKED:-0}" != 1 ]; then
+    exec "$root/scripts/with-wasm-bundle-lock.py" -- "$0" "$@"
+fi
+
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/pwmtf-feasibility-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
@@ -57,10 +62,10 @@ for platform, browser_families in platforms.items():
                     lifecycle = cache_state == "lifecycle"
                     browser_version = "151" if minimum_version_run == "no" else "150"
                     report = {
-                        "schema_version": 10,
+                        "schema_version": 11,
                         "captured_at": (
                             f"2026-08-{run_number + (10 if minimum_version_run == 'yes' else 0):02d}"
-                            f"T00:00:00Z"
+                            f"T00:00:00.000Z"
                         ),
                         "candidate": candidate,
                         "test": {
@@ -141,11 +146,12 @@ for platform, browser_families in platforms.items():
                             "state": "running",
                             "muted": False,
                             "gestureStarts": 2,
-                            "backgroundSuspensions": 1 if lifecycle else 0,
-                            "explicitResumes": 1 if lifecycle else 0,
+                            "backgroundSuspensions": 2 if lifecycle else 0,
+                            "explicitResumes": 2 if lifecycle else 0,
                             "muteChanges": 2,
                             "mutedPlaybackAttempts": 1,
                             "audiblePlaybackAttempts": 1,
+                            "transitionFailures": 0,
                         },
                     }
                     version_label = "minimum" if minimum_version_run == "yes" else "current"
@@ -156,6 +162,20 @@ for platform, browser_families in platforms.items():
 PY
 
 reports="$tmp"/*.json
+python3 - "$root/scripts/summarize-feasibility.py" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("summarize_feasibility", path)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+sys.path.insert(0, str(path.parent))
+spec.loader.exec_module(module)
+assert module.browser_version("151.0.7922.138") == (151, 0, 7922, 138)
+assert module.browser_version("١٥١") is None
+PY
 if "$root/scripts/summarize-feasibility.py" --write-decision "$tmp/invalid-decision.md" $reports >"$tmp/decision.out" 2>"$tmp/decision.err"; then
     printf '%s\n' "feasibility summarizer wrote a decision without final-matrix mode" >&2
     exit 1
@@ -177,7 +197,7 @@ PWMTF_FEASIBILITY_REPORTS="$tmp" PWMTF_FEASIBILITY_BUNDLE="$tmp/expected-bundle"
     PWMTF_FEASIBILITY_SIZE_EVIDENCE="$tmp/evidence/wasm-size-evidence.json" \
     "$root/scripts/validate-feasibility-matrix.sh" >"$tmp/wrapper-summary.md"
 grep -q '^\*\*Status: ACCEPT — Bevy/WebGL2 is selected for the production browser client\.\*\*$' "$tmp/evidence/acceptance-decision.md"
-grep -q '^- Evidence completed: 2026-08-13T00:00:00Z$' "$tmp/evidence/acceptance-decision.md"
+grep -q '^- Evidence completed: 2026-08-13T00:00:00.000Z$' "$tmp/evidence/acceptance-decision.md"
 grep -Eq '^- Report set: `[0-9a-f]{64}` \(`sha256-canonical-json-length-prefixed-v1`\)$' "$tmp/evidence/acceptance-decision.md"
 grep -q '^  - iphone / safari: 150$' "$tmp/evidence/acceptance-decision.md"
 grep -q '^  - desktop / edge: 150$' "$tmp/evidence/acceptance-decision.md"
@@ -249,7 +269,7 @@ manifest["candidate"]["bundle_hash"] = "2" * 64
 path.write_text(json.dumps(manifest), encoding="utf-8")
 PY
 expect_rejected "reports from a different generated bundle" $reports
-grep -q 'candidate identity does not match --expected-bundle' "$tmp/rejected.err"
+grep -q 'expected bundle verification failed: WASM bundle integrity error: bundle manifest candidate identity does not match bootstrap.js' "$tmp/rejected.err"
 
 python3 - "$tmp/expected-bundle/pwmtf-bundle-manifest.json" <<'PY'
 import json
@@ -273,7 +293,7 @@ manifest["bundle_hash_algorithm"] = "unknown"
 path.write_text(json.dumps(manifest), encoding="utf-8")
 PY
 expect_rejected "an unsupported expected bundle hash algorithm" $reports
-grep -q 'expected bundle hash algorithm is unsupported' "$tmp/rejected.err"
+grep -q 'expected bundle verification failed: WASM bundle integrity error: bundle hash algorithm is unsupported' "$tmp/rejected.err"
 python3 - "$tmp/expected-bundle/pwmtf-bundle-manifest.json" <<'PY'
 import json
 import sys
@@ -288,9 +308,10 @@ PY
 mv "$tmp/expected-bundle/pwmtf-bundle-manifest.json" "$tmp/expected-bundle/manifest.json"
 ln -s "$tmp/expected-bundle/manifest.json" "$tmp/expected-bundle/pwmtf-bundle-manifest.json"
 expect_rejected "a symlinked expected bundle manifest" $reports
-grep -q 'expected bundle manifest must be a regular file' "$tmp/rejected.err"
+grep -q 'expected bundle verification failed: WASM bundle integrity error: bundle manifest must be a regular file' "$tmp/rejected.err"
 rm "$tmp/expected-bundle/pwmtf-bundle-manifest.json"
 mv "$tmp/expected-bundle/manifest.json" "$tmp/expected-bundle/pwmtf-bundle-manifest.json"
+cp "$root/dist/pwmtf-bundle-manifest.json" "$tmp/expected-bundle/pwmtf-bundle-manifest.json"
 
 python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
 import json
@@ -312,7 +333,7 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
-report["schema_version"] = 10
+report["schema_version"] = 11
 report["candidate"]["wasm_optimization"] = "not-applied"
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
@@ -349,7 +370,7 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
-report["captured_at"] = "2026-08-01T00:00:00Z"
+report["captured_at"] = "2026-08-01T00:00:00.000Z"
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
 expect_rejected "duplicate capture timestamps" $reports
@@ -362,7 +383,7 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
-report["captured_at"] = "2026-08-02T00:00:00Z"
+report["captured_at"] = "2026-08-02T00:00:00.000Z"
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
 
@@ -373,7 +394,7 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
-report["captured_at"] = "2026-06-01T00:00:00Z"
+report["captured_at"] = "2026-06-01T00:00:00.000Z"
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
 expect_rejected "a final matrix collected over too long a window" $reports
@@ -386,7 +407,7 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
-report["captured_at"] = "2026-08-02T00:00:00Z"
+report["captured_at"] = "2026-08-02T00:00:00.000Z"
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
 
@@ -397,7 +418,7 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
-report["captured_at"] = "2999-01-01T00:00:00Z"
+report["captured_at"] = "2999-01-01T00:00:00.000Z"
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
 expect_rejected "a future capture timestamp" $reports
@@ -410,7 +431,44 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
+report["captured_at"] = "2026-08-01T00:00:00.000Z"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["captured_at"] = "2026-08-01T00:00:00.000+01:00"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "a non-UTC capture timestamp" $reports
+grep -q 'captured_at must be normalized to UTC' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
 report["captured_at"] = "2026-08-01T00:00:00Z"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "a non-canonical UTC capture timestamp" $reports
+grep -q 'captured_at must use canonical UTC millisecond spelling' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["captured_at"] = "2026-08-01T00:00:00.000Z"
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
 
@@ -534,6 +592,207 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
+report["performance"]["p95_frame_time_ms"] = 18
+report["performance"]["current_fps"] = -1
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "negative current FPS" $reports
+grep -q 'performance.current_fps must be null or non-negative and finite' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["performance"]["current_fps"] = 60
+report["performance"]["frame_count"] = 3600.5
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "a fractional frame count" $reports
+grep -q 'performance.frame_count must be a positive integer' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["performance"]["frame_count"] = 3600
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["performance"]["current_fps"] = 60
+report["display"]["orientation"] = ""
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "a missing display orientation" $reports
+grep -q 'display.orientation must be a non-empty string' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["display"]["orientation"] = "landscape-primary"
+report["display"]["viewport_width"] = 1280.5
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "a fractional viewport dimension" $reports
+grep -q 'display.viewport_width must be a positive integer' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["display"]["viewport_width"] = 1280
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["display"]["orientation"] = "landscape-primary"
+report["interaction"]["initial_orientation"] = "x" * 81
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "an oversized initial orientation" $reports
+grep -q 'invalid interaction.initial_orientation' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["interaction"]["initial_orientation"] = "landscape-primary"
+report["interaction"]["marked_events"] = [
+    {
+        "elapsed_ms": 10,
+        "label": "fixture",
+        "visibility": "visible",
+        "orientation": "bad\norientation",
+    }
+]
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "control characters in marked-event orientation" $reports
+grep -q 'invalid marked event orientation' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["interaction"]["marked_events"][0]["orientation"] = "landscape-primary"
+report["interaction"]["marked_events"][0]["visibility"] = "hidden"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "a hidden marked event" $reports
+grep -q 'marked events must be recorded while visible' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["interaction"]["marked_events"][0]["visibility"] = "visible"
+report["interaction"]["marked_events"][0]["orientation"] = None
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "a marked event without orientation" $reports
+grep -q 'marked events require a known orientation' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["interaction"]["marked_events"] = []
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["performance"]["current_fps"] = 60
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["browser"]["user_agent"] = "x" * 1_025
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "an oversized user agent" $reports
+grep -q 'browser.user_agent is invalid' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["browser"]["user_agent"] = "fixture-user-agent"
+report["browser"]["language"] = "en-US\ninvalid"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "control characters in browser language" $reports
+grep -q 'browser.language contains control characters' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["browser"]["language"] = "en-US"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
 report["timing_ms"]["capture_duration"] = 65_000
 report["timing_ms"]["first_canvas_contact"] = 1_200
 report["performance"]["p95_frame_time_ms"] = 18
@@ -542,6 +801,30 @@ path.write_text(json.dumps(report), encoding="utf-8")
 PY
 expect_rejected "control characters in test metadata" $reports
 grep -q 'hardware_model contains control characters' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["test"]["hardware_model"] = " fixture-iphone "
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "non-canonical whitespace in test metadata" $reports
+grep -q 'invalid test.hardware_model' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["test"]["hardware_model"] = "fixture-iphone"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
 
 python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
 import json
@@ -999,7 +1282,7 @@ report["audio"]["explicitResumes"] = 2
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
 expect_rejected "impossible audio lifecycle counters" $reports
-grep -q 'audio suspensions exceed recorded background intervals' "$tmp/rejected.err"
+grep -q 'exactly two audio suspensions' "$tmp/rejected.err"
 
 python3 - "$tmp/ipad-safari-lifecycle-current-1.json" "$tmp/android-phone-chrome-lifecycle-current-1.json" <<'PY'
 import json
@@ -1013,8 +1296,8 @@ short_report["interaction"]["page_hide_count"] = 2
 short_report["interaction"]["page_show_count"] = 2
 short_report["timing_ms"]["hidden_duration"] = 60_000
 short_report["timing_ms"]["hidden_durations"] = [30_000, 30_000]
-short_report["audio"]["backgroundSuspensions"] = 1
-short_report["audio"]["explicitResumes"] = 1
+short_report["audio"]["backgroundSuspensions"] = 2
+short_report["audio"]["explicitResumes"] = 2
 short.write_text(json.dumps(short_report), encoding="utf-8")
 
 audio = Path(sys.argv[2])
@@ -1023,7 +1306,73 @@ audio_report["audio"]["explicitResumes"] = 0
 audio.write_text(json.dumps(audio_report), encoding="utf-8")
 PY
 expect_rejected "missing explicit audio resume" $reports
-grep -q 'explicit audio resume was not observed' "$tmp/rejected.err"
+grep -q 'exactly two explicit audio resumes' "$tmp/rejected.err"
+
+python3 - "$tmp/android-tablet-chrome-warm-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["audio"]["backgroundSuspensions"] = -1
+report["audio"]["explicitResumes"] = -1
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "negative non-lifecycle audio counters" $reports
+grep -q 'audio.backgroundSuspensions must be a non-negative integer' "$tmp/rejected.err"
+
+python3 - "$tmp/android-tablet-chrome-warm-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["audio"]["backgroundSuspensions"] = 0
+report["audio"]["explicitResumes"] = 0
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+
+python3 - "$tmp/android-phone-chrome-lifecycle-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["audio"]["explicitResumes"] = 2
+report["audio"]["transitionFailures"] = 1
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "a failed audio lifecycle transition" $reports
+grep -q 'audio transition failures invalidate the capture' "$tmp/rejected.err"
+
+python3 - "$tmp/android-phone-chrome-lifecycle-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["audio"].update(
+    {
+        "supported": False,
+        "state": "unsupported",
+        "gestureStarts": 1,
+        "backgroundSuspensions": 0,
+        "explicitResumes": 0,
+        "muteChanges": 0,
+        "mutedPlaybackAttempts": 1,
+        "audiblePlaybackAttempts": 0,
+        "transitionFailures": 0,
+        "muted": False,
+    }
+)
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "unsupported audio with playback evidence" $reports
+grep -q 'unsupported audio telemetry is inconsistent' "$tmp/rejected.err"
 
 python3 - "$tmp/android-phone-chrome-lifecycle-current-1.json" "$tmp/android-tablet-chrome-warm-current-1.json" <<'PY'
 import json
@@ -1032,7 +1381,20 @@ from pathlib import Path
 
 resume = Path(sys.argv[1])
 resume_report = json.loads(resume.read_text(encoding="utf-8"))
-resume_report["audio"]["explicitResumes"] = 1
+resume_report["audio"].update(
+    {
+        "supported": True,
+        "state": "running",
+        "gestureStarts": 2,
+        "backgroundSuspensions": 2,
+        "explicitResumes": 2,
+        "muteChanges": 2,
+        "mutedPlaybackAttempts": 1,
+        "audiblePlaybackAttempts": 1,
+        "transitionFailures": 0,
+        "muted": False,
+    }
+)
 resume.write_text(json.dumps(resume_report), encoding="utf-8")
 
 mute = Path(sys.argv[2])
@@ -1042,7 +1404,35 @@ mute_report["audio"]["audiblePlaybackAttempts"] = 0
 mute.write_text(json.dumps(mute_report), encoding="utf-8")
 PY
 expect_rejected "incomplete repeated audio playback" $reports
-grep -q 'repeated playback' "$tmp/rejected.err"
+grep -q 'exactly two plays' "$tmp/rejected.err"
+
+python3 - "$tmp/android-tablet-chrome-warm-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["audio"]["muteChanges"] = 4
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "extra audio mute cycles" $reports
+grep -q 'exactly one mute/unmute cycle' "$tmp/rejected.err"
+
+python3 - "$tmp/android-tablet-chrome-warm-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["audio"]["muteChanges"] = 2
+report["audio"]["gestureStarts"] = 3
+report["audio"]["audiblePlaybackAttempts"] = 2
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "extra audio probe playback" $reports
+grep -q 'exactly two plays' "$tmp/rejected.err"
 
 python3 - "$tmp/android-tablet-chrome-warm-current-1.json" "$tmp/iphone-safari-cold-current-1.json" <<'PY'
 import json
@@ -1053,6 +1443,7 @@ mute = Path(sys.argv[1])
 mute_report = json.loads(mute.read_text(encoding="utf-8"))
 mute_report["audio"]["gestureStarts"] = 2
 mute_report["audio"]["audiblePlaybackAttempts"] = 1
+mute_report["audio"]["muteChanges"] = 2
 mute.write_text(json.dumps(mute_report), encoding="utf-8")
 
 duration = Path(sys.argv[2])

@@ -4,6 +4,10 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
+if [ "${PWMTF_WASM_BUNDLE_LOCKED:-0}" != 1 ]; then
+    exec ./scripts/with-wasm-bundle-lock.py -- "$0" "$@"
+fi
+
 PWMTF_SKIP_WASM_OPT=1 ./scripts/build-wasm.sh
 
 geckodriver=${GECKODRIVER_BIN:-$(command -v geckodriver 2>/dev/null || true)}
@@ -14,8 +18,17 @@ fi
 
 firefox=${FIREFOX_BIN:-}
 if [ -z "$firefox" ]; then
+    macos_firefox="/Applications/Firefox.app/Contents/MacOS/firefox"
+    if [ "$(uname -s)" = Darwin ] && [ -e /Applications/Firefox.app ] && [ ! -x "$macos_firefox" ] && command -v osascript >/dev/null 2>&1; then
+        alias_parent=$(osascript \
+            -e 'tell application "Finder" to get POSIX path of (container of (original item of (POSIX file "/Applications/Firefox.app" as alias)) as alias)' \
+            2>/dev/null || true)
+        if [ -n "$alias_parent" ]; then
+            macos_firefox="${alias_parent}Firefox.app/Contents/MacOS/firefox"
+        fi
+    fi
     for candidate in \
-        "/Applications/Firefox.app/Contents/MacOS/firefox" \
+        "$macos_firefox" \
         "$(command -v firefox 2>/dev/null || true)"
     do
         if [ -n "$candidate" ] && [ -x "$candidate" ]; then

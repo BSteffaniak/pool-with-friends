@@ -2,6 +2,11 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+if [ "${PWMTF_WASM_BUNDLE_LOCKED:-0}" != 1 ]; then
+    exec "$root/scripts/with-wasm-bundle-lock.py" -- "$0" "$@"
+fi
+
 reports=${PWMTF_FEASIBILITY_REPORTS:-$root/feasibility-reports}
 bundle=${PWMTF_FEASIBILITY_BUNDLE:-$root/dist}
 decision=${PWMTF_FEASIBILITY_DECISION:-$reports/acceptance-decision.md}

@@ -3,6 +3,11 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
+
+if [ "${PWMTF_WASM_BUNDLE_LOCKED:-0}" != 1 ]; then
+    exec ./scripts/with-wasm-bundle-lock.py -- "$0" "$@"
+fi
+
 tmp=$(mktemp "${TMPDIR:-/tmp}/pwmtf-wasm-size-evidence.XXXXXX")
 trap 'rm -f "$tmp"' EXIT HUP INT TERM
 

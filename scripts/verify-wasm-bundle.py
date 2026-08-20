@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from wasm_bundle_lock import generated_bundle_locked
+
 MANIFEST_NAME = "pwmtf-bundle-manifest.json"
 BUNDLE_HASH_ALGORITHM = "sha256-length-prefixed-v1"
 EXPECTED_ASSETS = {
@@ -163,6 +165,7 @@ def verify_manifest(directory: Path) -> None:
         raise ValueError("bundle assets do not match the integrity manifest")
 
 
+@generated_bundle_locked
 def main() -> int:
     """Run the manifest writer or verifier."""
     parser = argparse.ArgumentParser(description=__doc__)

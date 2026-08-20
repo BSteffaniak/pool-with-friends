@@ -33,11 +33,15 @@ jobs:
       - run: cargo machete --with-metadata
       - run: cargo deny check
       - run: ./scripts/build-wasm.sh
+      - run: ./scripts/test-wasm-source-hash.py
       - run: ./scripts/test-wasm-bundle-integrity.sh
+      - run: ./scripts/test-wasm-bundle-lock.py
+      - run: ./scripts/test-wasm-bundle-concurrency.sh
       - run: ./scripts/test-wasm-bundle-server.sh
       - run: ./scripts/test-wasm-reproducible-build.sh
       - run: ./scripts/test-wasm-size-evidence.sh
       - run: ./scripts/test-feasibility-tools.sh
+      - run: ./scripts/test-feasibility-matrix-lock.sh
       - run: ./scripts/test-feasibility-server.sh
       - run: ./scripts/test-browser-telemetry.js
       - run: ./scripts/check-architecture.sh
