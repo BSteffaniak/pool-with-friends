@@ -51,7 +51,10 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-python3 -m http.server "$server_port" --bind 127.0.0.1 --directory dist >"$server_log" 2>&1 &
+python3 "$root/scripts/serve-wasm-bundle.py" \
+    --bind 127.0.0.1 \
+    --port "$server_port" \
+    --directory "$root/dist" >"$server_log" 2>&1 &
 server_pid=$!
 
 attempt=0

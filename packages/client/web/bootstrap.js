@@ -36,6 +36,8 @@ const feasibilityEnabled = query.has("feasibility");
 const activePresentationTier = query.get("tier") === "reduced" ? "reduced" : "default";
 const candidateBuildId = "__PWMTF_BUILD_ID__";
 const candidateSourceHash = "__PWMTF_SOURCE_HASH__";
+const candidateBundleHash = "__PWMTF_BUNDLE_HASH__";
+const candidateBundleHashAlgorithm = "sha256-length-prefixed-v1";
 const candidateWasmOptimization = "__PWMTF_WASM_OPTIMIZATION__";
 const navigationStartedAt = performance.now();
 const detectedBrowserFamily = detectBrowserFamily(navigator.userAgent);
@@ -57,7 +59,7 @@ const PHYSICAL_CHECKS = [
 ];
 
 const telemetry = {
-  schemaVersion: 9,
+  schemaVersion: 10,
   clientReadyMs: null,
   firstCanvasContactMs: null,
   pointerContacts: 0,
@@ -659,6 +661,8 @@ function report() {
     candidate: {
       build_id: candidateBuildId,
       source_hash: candidateSourceHash,
+      bundle_hash: candidateBundleHash,
+      bundle_hash_algorithm: candidateBundleHashAlgorithm,
       wasm_optimization: candidateWasmOptimization,
       bevy: "0.19.1",
       renderer: "WebGL2",
@@ -767,7 +771,10 @@ function requireCaptureEvidence() {
   }
   if (
     cacheStateInput.value !== "lifecycle" &&
-    (telemetry.visibilityChanges > 0 || telemetry.pageHideCount > 0 || telemetry.pageShowCount > 0)
+    (telemetry.restoredFromPageCache ||
+      telemetry.visibilityChanges > 0 ||
+      telemetry.pageHideCount > 0 ||
+      telemetry.pageShowCount > 0)
   ) {
     showStatus("Interaction captures cannot include page lifecycle transitions; restart this run.");
     return false;
@@ -850,8 +857,9 @@ function feasibilityFilename(test, capturedAt) {
   const browser = test.browser_family || "unknown-browser";
   const version = (test.browser_version || "unknown-version").replaceAll(".", "_");
   const build = candidateBuildId.slice(0, 20);
+  const bundle = candidateBundleHash.slice(0, 20);
   const run = test.run_number === null ? "unknown-run" : `run-${test.run_number}`;
-  return `pwmtf-feasibility-${build}-${platform}-${browser}-${version}-${test.cache_state || "unknown-cache"}-${test.minimum_version_run === "yes" ? "minimum" : "current"}-${test.presentation_tier || "unknown-tier"}-${run}-${capturedAt.replaceAll(":", "-")}.json`;
+  return `pwmtf-feasibility-${build}-${bundle}-${platform}-${browser}-${version}-${test.cache_state || "unknown-cache"}-${test.minimum_version_run === "yes" ? "minimum" : "current"}-${test.presentation_tier || "unknown-tier"}-${run}-${capturedAt.replaceAll(":", "-")}.json`;
 }
 
 function downloadReport() {
@@ -992,7 +1000,7 @@ document.addEventListener("visibilitychange", () => {
 });
 
 if (feasibilityEnabled) {
-  candidateOutput.textContent = `Build ${candidateBuildId}\nSource ${candidateSourceHash}\nWASM ${candidateWasmOptimization}\nDetected browser ${detectedBrowserFamily}`;
+  candidateOutput.textContent = `Build ${candidateBuildId}\nSource ${candidateSourceHash}\nBundle ${candidateBundleHash}\nBundle algorithm ${candidateBundleHashAlgorithm}\nWASM ${candidateWasmOptimization}\nDetected browser ${detectedBrowserFamily}`;
   presentationTierInput.value = activePresentationTier;
   presentationTierInput.disabled = true;
   updateBrowserFamilyOptions();

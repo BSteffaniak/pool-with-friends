@@ -24,6 +24,8 @@ jobs:
         uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60
         with:
           tool: cargo-deny,cargo-nextest@0.9.114,cargo-machete@0.8.0,wasm-bindgen-cli@0.2.127
+      - name: Install feasibility server tools
+        run: command -v curl && command -v openssl
       - run: cargo fmt --check
       - run: cargo check --workspace --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -31,6 +33,10 @@ jobs:
       - run: cargo machete --with-metadata
       - run: cargo deny check
       - run: ./scripts/build-wasm.sh
+      - run: ./scripts/test-wasm-bundle-integrity.sh
+      - run: ./scripts/test-wasm-bundle-server.sh
+      - run: ./scripts/test-wasm-reproducible-build.sh
+      - run: ./scripts/test-wasm-size-evidence.sh
       - run: ./scripts/test-feasibility-tools.sh
       - run: ./scripts/test-feasibility-server.sh
       - run: ./scripts/test-browser-telemetry.js

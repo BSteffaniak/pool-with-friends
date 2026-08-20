@@ -4,11 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import statistics
 import sys
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,7 @@ MINIMUM_FPS_FLOOR = 30
 FULL_QUALITY_FPS_THRESHOLD = 55
 MINIMUM_AIM_CAPTURE_MS = 60 * 1_000
 LIFECYCLE_DURATION_MS = 10 * 60 * 1_000
+CAPTURE_WINDOW_DAYS = 30
 REQUIRED_TEST_FIELDS = (
     "platform",
     "hardware_model",
@@ -72,6 +74,8 @@ TEXT_FIELD_LIMITS = {
 REQUIRED_CANDIDATE_FIELDS = (
     "build_id",
     "source_hash",
+    "bundle_hash",
+    "bundle_hash_algorithm",
     "wasm_optimization",
     "bevy",
     "renderer",
@@ -134,7 +138,7 @@ def load_report(path: Path) -> dict[str, Any]:
     }
     if set(report) != expected_report_keys:
         raise ValueError(f"{path}: report root keys are invalid")
-    if report.get("schema_version") != 9:
+    if report.get("schema_version") != 10:
         raise ValueError(f"{path}: unsupported schema_version")
 
     candidate = report.get("candidate")
@@ -155,6 +159,12 @@ def load_report(path: Path) -> dict[str, Any]:
         character not in "0123456789abcdef" for character in candidate["source_hash"]
     ):
         raise ValueError(f"{path}: invalid candidate.source_hash")
+    if len(candidate["bundle_hash"]) != 64 or any(
+        character not in "0123456789abcdef" for character in candidate["bundle_hash"]
+    ):
+        raise ValueError(f"{path}: invalid candidate.bundle_hash")
+    if candidate["bundle_hash_algorithm"] != "sha256-length-prefixed-v1":
+        raise ValueError(f"{path}: unsupported candidate.bundle_hash_algorithm")
     if candidate["source_hash"] not in candidate["build_id"]:
         raise ValueError(f"{path}: candidate.build_id must include candidate.source_hash")
     if candidate["wasm_optimization"] not in {"wasm-opt-Oz", "not-applied"}:
@@ -528,6 +538,9 @@ def load_report(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path}: captured_at must be an ISO 8601 timestamp") from error
     if captured_time.tzinfo is None:
         raise ValueError(f"{path}: captured_at must include a timezone")
+    now = datetime.now(timezone.utc)
+    if captured_time.astimezone(timezone.utc) > now + timedelta(minutes=5):
+        raise ValueError(f"{path}: captured_at is more than five minutes in the future")
 
     return report
 
@@ -539,6 +552,8 @@ def group_key(report: dict[str, Any]) -> tuple[str, ...]:
     return (
         str(candidate["build_id"]),
         str(candidate["source_hash"]),
+        str(candidate["bundle_hash"]),
+        str(candidate["bundle_hash_algorithm"]),
         str(candidate["wasm_optimization"]),
         str(candidate["bevy"]),
         str(candidate["renderer"]),
@@ -576,6 +591,8 @@ def markdown_table(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> str:
         (
             build_id,
             source_hash,
+            bundle_hash,
+            bundle_hash_algorithm,
             wasm_optimization,
             bevy,
             renderer,
@@ -640,9 +657,9 @@ def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> li
     """Return objective budget and lifecycle failures in final-gate reports."""
     errors: list[str] = []
     for key, reports in groups.items():
-        cache_state = key[10]
-        platform = key[5]
-        presentation_tier = key[12]
+        cache_state = key[12]
+        platform = key[7]
+        presentation_tier = key[14]
         for report in reports:
             run = report["test"]["run_number"]
             observations = report["external_observations"]
@@ -706,6 +723,8 @@ def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> li
                 errors.append(f"{key} run {run}: p95 frame time is unavailable")
 
             hidden_durations = report["timing_ms"]["hidden_durations"]
+            if cache_state != "lifecycle" and report["interaction"]["restored_from_page_cache"]:
+                errors.append(f"{key} run {run}: non-lifecycle capture restored from page cache")
             if cache_state != "lifecycle" and report["interaction"]["page_hide_count"] > 0:
                 errors.append(f"{key} run {run}: non-lifecycle capture contains page-hide events")
             if cache_state != "lifecycle" and report["interaction"]["page_show_count"] > 0:
@@ -779,6 +798,65 @@ def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> li
     return errors
 
 
+def report_set_hash(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> str:
+    """Hash the canonical contents of every validated physical report."""
+    digest = hashlib.sha256()
+    reports = sorted(
+        (report for grouped_reports in groups.values() for report in grouped_reports),
+        key=lambda report: (
+            report["test"]["platform"],
+            report["test"]["browser_family"],
+            report["test"]["browser_version"],
+            report["test"]["cache_state"],
+            report["test"]["minimum_version_run"],
+            report["test"]["presentation_tier"],
+            report["test"]["run_number"],
+        ),
+    )
+    for report in reports:
+        encoded = json.dumps(report, sort_keys=True, separators=(",", ":")).encode()
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
+def acceptance_decision(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> str:
+    """Build an explicit final gate decision from a passing complete matrix."""
+    candidate = next(iter(groups.values()))[0]["candidate"]
+    browser_minimums = sorted(
+        {
+            (report["test"]["platform"], report["test"]["browser_family"], report["test"]["browser_version"])
+            for reports in groups.values()
+            for report in reports
+            if report["test"]["minimum_version_run"] == "yes"
+        }
+    )
+    captured_at = max(
+        datetime.fromisoformat(report["captured_at"].replace("Z", "+00:00"))
+        for reports in groups.values()
+        for report in reports
+    ).astimezone(timezone.utc)
+    lines = [
+        "## Acceptance decision",
+        "",
+        "**Status: ACCEPT — Bevy/WebGL2 is selected for the production browser client.**",
+        "",
+        f"- Evidence completed: {captured_at.isoformat().replace('+00:00', 'Z')}",
+        f"- Report set: `{report_set_hash(groups)}` (`sha256-canonical-json-length-prefixed-v1`)",
+        f"- Build: `{candidate['build_id']}`",
+        f"- Source: `{candidate['source_hash']}`",
+        f"- Bundle: `{candidate['bundle_hash']}` (`{candidate['bundle_hash_algorithm']}`)",
+        f"- Candidate: Bevy `{candidate['bevy']}`, {candidate['renderer']}, `{candidate['wasm_optimization']}`",
+        "- Basis: every required current/minimum browser, cache-state, interaction, lifecycle, audio, startup, frame-rate, memory, thermal, and fallback check passed the final validator.",
+        "- Minimum browser evidence:",
+    ]
+    lines.extend(
+        f"  - {platform} / {browser_family}: {version}"
+        for platform, browser_family, version in browser_minimums
+    )
+    return "\n".join(lines)
+
+
 def main() -> int:
     """Validate reports and print a repeatable Markdown summary."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -793,13 +871,70 @@ def main() -> int:
         action="store_true",
         help="require current/minimum cold, warm, and lifecycle groups for the complete mobile and desktop browser matrix",
     )
+    parser.add_argument(
+        "--expected-bundle",
+        type=Path,
+        help="verify that every report matches the candidate identity in this generated bundle",
+    )
+    parser.add_argument(
+        "--write-decision",
+        type=Path,
+        help="write the explicit acceptance decision after a passing final matrix",
+    )
     args = parser.parse_args()
+    if args.write_decision is not None and not args.require_mobile_matrix:
+        print(
+            "feasibility report error: --write-decision requires --require-mobile-matrix",
+            file=sys.stderr,
+        )
+        return 1
+    if args.require_mobile_matrix and args.expected_bundle is None:
+        print(
+            "feasibility report error: --require-mobile-matrix requires --expected-bundle",
+            file=sys.stderr,
+        )
+        return 1
+
+    expected_candidate: dict[str, str] | None = None
+    if args.expected_bundle is not None:
+        manifest_path = args.expected_bundle / "pwmtf-bundle-manifest.json"
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            print("feasibility report error: expected bundle manifest must be a regular file", file=sys.stderr)
+            return 1
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"feasibility report error: cannot read expected bundle manifest: {error}", file=sys.stderr)
+            return 1
+        candidate = manifest.get("candidate") if isinstance(manifest, dict) else None
+        algorithm = manifest.get("bundle_hash_algorithm") if isinstance(manifest, dict) else None
+        if algorithm != "sha256-length-prefixed-v1":
+            print("feasibility report error: expected bundle hash algorithm is unsupported", file=sys.stderr)
+            return 1
+        if not isinstance(candidate, dict) or any(
+            not isinstance(candidate.get(field), str) or not candidate[field]
+            for field in ("build_id", "source_hash", "bundle_hash", "wasm_optimization")
+        ):
+            print("feasibility report error: expected bundle candidate identity is invalid", file=sys.stderr)
+            return 1
+        expected_candidate = {
+            "build_id": candidate["build_id"],
+            "source_hash": candidate["source_hash"],
+            "bundle_hash": candidate["bundle_hash"],
+            "bundle_hash_algorithm": "sha256-length-prefixed-v1",
+            "wasm_optimization": candidate["wasm_optimization"],
+            "bevy": "0.19.1",
+            "renderer": "WebGL2",
+        }
 
     groups: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
     errors: list[str] = []
     for path in args.reports:
         try:
-            groups[group_key(report := load_report(path))].append(report)
+            report = load_report(path)
+            if expected_candidate is not None and report["candidate"] != expected_candidate:
+                errors.append(f"{path}: candidate identity does not match --expected-bundle")
+            groups[group_key(report)].append(report)
         except ValueError as error:
             errors.append(str(error))
 
@@ -812,26 +947,46 @@ def main() -> int:
         captured_at_values = [report["captured_at"] for report in reports]
         if len(captured_at_values) != len(set(captured_at_values)):
             errors.append(f"{key}: duplicate capture timestamps")
+        if args.require_mobile_matrix:
+            captured_times = [
+                datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+                for value in captured_at_values
+            ]
+            if max(captured_times) - min(captured_times) > timedelta(days=CAPTURE_WINDOW_DAYS):
+                errors.append(
+                    f"{key}: final evidence runs span more than {CAPTURE_WINDOW_DAYS} days"
+                )
 
     if args.require_mobile_matrix:
         if args.allow_incomplete:
             errors.append("--allow-incomplete cannot be combined with --require-mobile-matrix")
-        candidate_identities = {key[:5] for key in groups}
+        candidate_identities = {key[:7] for key in groups}
+        all_capture_times = [
+            datetime.fromisoformat(report["captured_at"].replace("Z", "+00:00")).astimezone(timezone.utc)
+            for reports in groups.values()
+            for report in reports
+        ]
+        if all_capture_times and max(all_capture_times) - min(all_capture_times) > timedelta(
+            days=CAPTURE_WINDOW_DAYS
+        ):
+            errors.append(
+                f"final browser matrix evidence spans more than {CAPTURE_WINDOW_DAYS} days"
+            )
         if len(candidate_identities) != 1:
             errors.append(
-                "final browser matrix must use exactly one build ID, source hash, WASM optimization, Bevy version, and renderer"
+                "final browser matrix must use exactly one build ID, source hash, bundle hash, bundle-hash algorithm, WASM optimization, Bevy version, and renderer"
             )
-        if candidate_identities and any(identity[2] != "wasm-opt-Oz" for identity in candidate_identities):
+        if candidate_identities and any(identity[4] != "wasm-opt-Oz" for identity in candidate_identities):
             errors.append("final browser matrix requires the wasm-opt-Oz candidate")
         mobile_hardware = defaultdict(set)
         platform_operating_systems = defaultdict(set)
         platform_browser_hardware = defaultdict(set)
         for key in groups:
-            platform = key[5]
+            platform = key[7]
             if platform in REQUIRED_PLATFORMS:
-                mobile_hardware[platform].add(key[6])
-            platform_operating_systems[platform].add(key[7])
-            platform_browser_hardware[(platform, key[8])].add(key[6])
+                mobile_hardware[platform].add(key[8])
+            platform_operating_systems[platform].add(key[9])
+            platform_browser_hardware[(platform, key[10])].add(key[8])
         for platform, hardware_models in sorted(mobile_hardware.items()):
             if len(hardware_models) != 1:
                 errors.append(f"final browser matrix must use one hardware model for {platform}")
@@ -843,7 +998,7 @@ def main() -> int:
                 errors.append(
                     f"final browser matrix must use one hardware model for {platform} / {browser_family}"
                 )
-        present = {(key[5], key[8], key[10], key[11]) for key in groups}
+        present = {(key[7], key[10], key[12], key[13]) for key in groups}
         missing = sorted(
             (platform, browser_family, cache_state, version_status)
             for platform, browser_families in REQUIRED_BROWSER_MATRIX.items()
@@ -862,19 +1017,19 @@ def main() -> int:
             for platform, browser_families in REQUIRED_BROWSER_MATRIX.items()
             for browser_family in browser_families
         }
-        present_browsers = {(key[5], key[8]) for key in groups}
+        present_browsers = {(key[7], key[10]) for key in groups}
         for platform, browser_family in sorted(required_browsers - present_browsers):
             errors.append(f"mobile matrix missing browser evidence for {platform} / {browser_family}")
         for platform, browser_family in sorted(required_browsers):
             current_versions = {
-                key[9]
+                key[11]
                 for key in groups
-                if key[5] == platform and key[8] == browser_family and key[11] == "no"
+                if key[7] == platform and key[10] == browser_family and key[13] == "no"
             }
             minimum_versions = {
-                key[9]
+                key[11]
                 for key in groups
-                if key[5] == platform and key[8] == browser_family and key[11] == "yes"
+                if key[7] == platform and key[10] == browser_family and key[13] == "yes"
             }
             if len(current_versions) != 1:
                 errors.append(
@@ -896,8 +1051,8 @@ def main() -> int:
                     f"current and proposed-minimum browser versions overlap for {platform} / {browser_family}"
                 )
         for key in groups:
-            platform = key[5]
-            presentation_tier = key[12]
+            platform = key[7]
+            presentation_tier = key[14]
             if platform == "desktop" and presentation_tier != "default":
                 errors.append("desktop compatibility matrix contains a non-default presentation tier")
         errors.extend(acceptance_errors(groups))
@@ -910,7 +1065,14 @@ def main() -> int:
         print("feasibility report error: no valid reports", file=sys.stderr)
         return 1
 
-    print(markdown_table(groups))
+    summary = markdown_table(groups)
+    print(summary)
+    if args.write_decision is not None:
+        try:
+            args.write_decision.write_text(acceptance_decision(groups) + "\n", encoding="utf-8")
+        except OSError as error:
+            print(f"feasibility report error: cannot write acceptance decision: {error}", file=sys.stderr)
+            return 1
     return 0
 
 

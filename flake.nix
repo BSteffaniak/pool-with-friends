@@ -69,8 +69,10 @@
             cargo-deny
             cargo-machete
             cargo-nextest
+            curl
             llvmPackages.bintools
             nodejs
+            openssl
             pkg-config
             wasmBindgenCli
           ];

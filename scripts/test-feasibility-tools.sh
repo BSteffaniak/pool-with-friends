@@ -5,12 +5,26 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/pwmtf-feasibility-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
-python3 - "$tmp" <<'PY'
+if [ ! -f "$root/dist/pwmtf-bundle-manifest.json" ] || \
+   ! grep -q '^const candidateWasmOptimization = "wasm-opt-Oz";$' "$root/dist/bootstrap.js"; then
+    "$root/scripts/build-wasm.sh"
+fi
+mkdir -p "$tmp/expected-bundle"
+cp -R "$root/dist/." "$tmp/expected-bundle/"
+
+python3 - "$tmp" "$tmp/expected-bundle/pwmtf-bundle-manifest.json" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 output = Path(sys.argv[1])
+manifest = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+candidate = {
+    **manifest["candidate"],
+    "bundle_hash_algorithm": manifest["bundle_hash_algorithm"],
+    "bevy": "0.19.1",
+    "renderer": "WebGL2",
+}
 platforms = {
     "iphone": ("safari",),
     "ipad": ("safari",),
@@ -43,18 +57,12 @@ for platform, browser_families in platforms.items():
                     lifecycle = cache_state == "lifecycle"
                     browser_version = "151" if minimum_version_run == "no" else "150"
                     report = {
-                        "schema_version": 9,
+                        "schema_version": 10,
                         "captured_at": (
                             f"2026-08-{run_number + (10 if minimum_version_run == 'yes' else 0):02d}"
                             f"T00:00:00Z"
                         ),
-                        "candidate": {
-                            "build_id": f"fixture-build-{'0' * 64}",
-                            "source_hash": "0" * 64,
-                            "wasm_optimization": "wasm-opt-Oz",
-                            "bevy": "0.19.1",
-                            "renderer": "WebGL2",
-                        },
+                        "candidate": candidate,
                         "test": {
                             "platform": platform,
                             "hardware_model": f"fixture-{platform}",
@@ -148,19 +156,141 @@ for platform, browser_families in platforms.items():
 PY
 
 reports="$tmp"/*.json
-"$root/scripts/summarize-feasibility.py" --require-mobile-matrix $reports >"$tmp/summary.md"
-grep -q '| iphone / fixture-iphone / fixture-buil / wasm-opt-Oz / Bevy 0.19.1 WebGL2 |' "$tmp/summary.md"
-grep -q '| android-tablet / fixture-android-tablet / fixture-buil / wasm-opt-Oz / Bevy 0.19.1 WebGL2 |' "$tmp/summary.md"
-grep -q '| desktop / fixture-desktop / fixture-buil / wasm-opt-Oz / Bevy 0.19.1 WebGL2 |' "$tmp/summary.md"
+if "$root/scripts/summarize-feasibility.py" --write-decision "$tmp/invalid-decision.md" $reports >"$tmp/decision.out" 2>"$tmp/decision.err"; then
+    printf '%s\n' "feasibility summarizer wrote a decision without final-matrix mode" >&2
+    exit 1
+fi
+grep -q -- '--write-decision requires --require-mobile-matrix' "$tmp/decision.err"
+if [ -e "$tmp/invalid-decision.md" ]; then
+    printf '%s\n' "failed decision validation created an output file" >&2
+    exit 1
+fi
+if PWMTF_FEASIBILITY_REPORTS="$tmp" PWMTF_FEASIBILITY_BUNDLE="$tmp/expected-bundle" \
+    "$root/scripts/validate-feasibility-matrix.sh" unexpected >"$tmp/wrapper.out" 2>"$tmp/wrapper.err"; then
+    printf '%s\n' "final feasibility wrapper accepted positional arguments" >&2
+    exit 1
+fi
+grep -q '^usage:' "$tmp/wrapper.err"
+mkdir -p "$tmp/evidence"
+PWMTF_FEASIBILITY_REPORTS="$tmp" PWMTF_FEASIBILITY_BUNDLE="$tmp/expected-bundle" \
+    PWMTF_FEASIBILITY_DECISION="$tmp/evidence/acceptance-decision.md" \
+    PWMTF_FEASIBILITY_SIZE_EVIDENCE="$tmp/evidence/wasm-size-evidence.json" \
+    "$root/scripts/validate-feasibility-matrix.sh" >"$tmp/wrapper-summary.md"
+grep -q '^\*\*Status: ACCEPT — Bevy/WebGL2 is selected for the production browser client\.\*\*$' "$tmp/evidence/acceptance-decision.md"
+grep -q '^- Evidence completed: 2026-08-13T00:00:00Z$' "$tmp/evidence/acceptance-decision.md"
+grep -Eq '^- Report set: `[0-9a-f]{64}` \(`sha256-canonical-json-length-prefixed-v1`\)$' "$tmp/evidence/acceptance-decision.md"
+grep -q '^  - iphone / safari: 150$' "$tmp/evidence/acceptance-decision.md"
+grep -q '^  - desktop / edge: 150$' "$tmp/evidence/acceptance-decision.md"
+python3 - "$tmp/evidence/wasm-size-evidence.json" "$tmp/expected-bundle/pwmtf-bundle-manifest.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+size = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+manifest = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+assert size["schema_version"] == 1
+assert size["candidate"]["bundle_hash"] == manifest["candidate"]["bundle_hash"]
+assert size["candidate"]["wasm_optimization"] == "wasm-opt-Oz"
+assert size["totals"]["raw_bytes"] > 0
+assert size["totals"]["gzip_bytes"] > 0
+PY
+if PWMTF_FEASIBILITY_REPORTS="$tmp" PWMTF_FEASIBILITY_BUNDLE="$tmp/expected-bundle" \
+    PWMTF_FEASIBILITY_DECISION="$tmp/evidence/acceptance-decision.md" \
+    PWMTF_FEASIBILITY_SIZE_EVIDENCE="$tmp/replacement-size-evidence.json" \
+    "$root/scripts/validate-feasibility-matrix.sh" >"$tmp/existing.out" 2>"$tmp/existing.err"; then
+    printf '%s\n' "final feasibility wrapper overwrote an existing acceptance decision" >&2
+    exit 1
+fi
+grep -q 'acceptance decision already exists' "$tmp/existing.err"
+if "$root/scripts/summarize-feasibility.py" --require-mobile-matrix $reports >"$tmp/unbound.out" 2>"$tmp/unbound.err"; then
+    printf '%s\n' "final feasibility validation accepted reports without --expected-bundle" >&2
+    exit 1
+fi
+grep -q -- '--require-mobile-matrix requires --expected-bundle' "$tmp/unbound.err"
+"$root/scripts/summarize-feasibility.py" --require-mobile-matrix --expected-bundle "$tmp/expected-bundle" $reports >"$tmp/summary.md"
+cmp "$tmp/summary.md" "$tmp/wrapper-summary.md"
+grep -q '| iphone / fixture-iphone / ' "$tmp/summary.md"
+grep -q '| android-tablet / fixture-android-tablet / ' "$tmp/summary.md"
+grep -q '| desktop / fixture-desktop / ' "$tmp/summary.md"
+
+"$root/scripts/summarize-feasibility.py" \
+    --require-mobile-matrix \
+    --expected-bundle "$tmp/expected-bundle" \
+    $reports >"$tmp/bound-summary.md"
+cmp "$tmp/summary.md" "$tmp/bound-summary.md"
+"$root/scripts/summarize-feasibility.py" \
+    --require-mobile-matrix \
+    --expected-bundle "$tmp/expected-bundle" \
+    --write-decision "$tmp/evidence/second-decision.md" \
+    $(printf '%s\n' $reports | sort -r) >"$tmp/reordered-summary.md"
+cmp "$tmp/wrapper-summary.md" "$tmp/reordered-summary.md"
+cmp "$tmp/evidence/acceptance-decision.md" "$tmp/evidence/second-decision.md"
 
 expect_rejected() {
     label=$1
     shift
-    if "$root/scripts/summarize-feasibility.py" --require-mobile-matrix "$@" >"$tmp/rejected.out" 2>"$tmp/rejected.err"; then
+    if "$root/scripts/summarize-feasibility.py" \
+        --require-mobile-matrix \
+        --expected-bundle "$tmp/expected-bundle" \
+        "$@" >"$tmp/rejected.out" 2>"$tmp/rejected.err"; then
         printf '%s\n' "feasibility summarizer accepted $label" >&2
         exit 1
     fi
 }
+
+python3 - "$tmp/expected-bundle/pwmtf-bundle-manifest.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+manifest = json.loads(path.read_text(encoding="utf-8"))
+manifest["candidate"]["bundle_hash"] = "2" * 64
+path.write_text(json.dumps(manifest), encoding="utf-8")
+PY
+expect_rejected "reports from a different generated bundle" $reports
+grep -q 'candidate identity does not match --expected-bundle' "$tmp/rejected.err"
+
+python3 - "$tmp/expected-bundle/pwmtf-bundle-manifest.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+manifest = json.loads(path.read_text(encoding="utf-8"))
+manifest["candidate"]["bundle_hash"] = "1" * 64
+path.write_text(json.dumps(manifest), encoding="utf-8")
+PY
+
+python3 - "$tmp/expected-bundle/pwmtf-bundle-manifest.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+manifest = json.loads(path.read_text(encoding="utf-8"))
+manifest["bundle_hash_algorithm"] = "unknown"
+path.write_text(json.dumps(manifest), encoding="utf-8")
+PY
+expect_rejected "an unsupported expected bundle hash algorithm" $reports
+grep -q 'expected bundle hash algorithm is unsupported' "$tmp/rejected.err"
+python3 - "$tmp/expected-bundle/pwmtf-bundle-manifest.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+manifest = json.loads(path.read_text(encoding="utf-8"))
+manifest["bundle_hash_algorithm"] = "sha256-length-prefixed-v1"
+path.write_text(json.dumps(manifest), encoding="utf-8")
+PY
+
+mv "$tmp/expected-bundle/pwmtf-bundle-manifest.json" "$tmp/expected-bundle/manifest.json"
+ln -s "$tmp/expected-bundle/manifest.json" "$tmp/expected-bundle/pwmtf-bundle-manifest.json"
+expect_rejected "a symlinked expected bundle manifest" $reports
+grep -q 'expected bundle manifest must be a regular file' "$tmp/rejected.err"
+rm "$tmp/expected-bundle/pwmtf-bundle-manifest.json"
+mv "$tmp/expected-bundle/manifest.json" "$tmp/expected-bundle/pwmtf-bundle-manifest.json"
 
 python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
 import json
@@ -182,7 +312,7 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
-report["schema_version"] = 9
+report["schema_version"] = 10
 report["candidate"]["wasm_optimization"] = "not-applied"
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
@@ -202,7 +332,11 @@ PY
 
 expect_rejected "an incomplete matrix" "$tmp"/iphone-*.json "$tmp"/ipad-*.json "$tmp"/android-phone-*.json
 
-if "$root/scripts/summarize-feasibility.py" --allow-incomplete --require-mobile-matrix $reports >"$tmp/rejected.out" 2>"$tmp/rejected.err"; then
+if "$root/scripts/summarize-feasibility.py" \
+    --allow-incomplete \
+    --require-mobile-matrix \
+    --expected-bundle "$tmp/expected-bundle" \
+    $reports >"$tmp/rejected.out" 2>"$tmp/rejected.err"; then
     printf '%s\n' "feasibility summarizer allowed incomplete final-gate mode" >&2
     exit 1
 fi
@@ -229,6 +363,54 @@ from pathlib import Path
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
 report["captured_at"] = "2026-08-02T00:00:00Z"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+
+python3 - "$tmp/iphone-safari-cold-current-2.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["captured_at"] = "2026-06-01T00:00:00Z"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "a final matrix collected over too long a window" $reports
+grep -q 'span more than 30 days' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-2.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["captured_at"] = "2026-08-02T00:00:00Z"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["captured_at"] = "2999-01-01T00:00:00Z"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "a future capture timestamp" $reports
+grep -q 'more than five minutes in the future' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["captured_at"] = "2026-08-01T00:00:00Z"
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
 
@@ -266,6 +448,36 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
+report["candidate"]["source_hash"] = "0" * 64
+report["candidate"]["bundle_hash"] = "not-a-hash"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "an invalid candidate bundle hash" $reports
+grep -q 'invalid candidate.bundle_hash' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["candidate"]["bundle_hash"] = "1" * 64
+report["candidate"]["bundle_hash_algorithm"] = "unknown"
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "an unsupported candidate bundle hash algorithm" $reports
+grep -q 'unsupported candidate.bundle_hash_algorithm' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["candidate"]["bundle_hash_algorithm"] = "sha256-length-prefixed-v1"
+report["candidate"]["bundle_hash"] = "1" * 64
 report["candidate"]["source_hash"] = "0" * 64
 report["candidate"]["build_id"] = "unbound-build"
 path.write_text(json.dumps(report), encoding="utf-8")

@@ -10,8 +10,24 @@ private_key=${PWMTF_TLS_KEY:-}
 bind_address=${PWMTF_FEASIBILITY_BIND:-0.0.0.0}
 port=${PWMTF_FEASIBILITY_PORT:-8443}
 
+for tool in openssl python3; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        printf '%s\n' "physical feasibility serving requires $tool" >&2
+        exit 1
+    fi
+done
 if [ -z "$public_host" ]; then
     printf '%s\n' "PWMTF_FEASIBILITY_HOST must name the host or IP covered by the TLS certificate" >&2
+    exit 1
+fi
+case "$port" in
+    ''|*[!0-9]*)
+        printf '%s\n' "PWMTF_FEASIBILITY_PORT must be an integer from 1 through 65535" >&2
+        exit 1
+        ;;
+esac
+if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+    printf '%s\n' "PWMTF_FEASIBILITY_PORT must be an integer from 1 through 65535" >&2
     exit 1
 fi
 if [ -z "$certificate" ] || [ -z "$private_key" ]; then
@@ -54,6 +70,11 @@ elif [ ! -f dist/index.html ] || [ ! -f dist/bootstrap.js ]; then
     exit 1
 fi
 
+if ! ./scripts/verify-wasm-bundle.py dist; then
+    printf '%s\n' "physical feasibility serving requires a complete untampered WASM bundle" >&2
+    exit 1
+fi
+
 candidate_identity=$(python3 - <<'PY'
 import re
 from pathlib import Path
@@ -77,37 +98,9 @@ PY
 printf '%s\n' "Serving PWMTF candidate $candidate_identity"
 printf '%s\n' "Keep this terminal open while testing; press Ctrl-C to stop."
 
-exec python3 - "$bind_address" "$port" "$root/dist" "$certificate" "$private_key" <<'PY'
-from __future__ import annotations
-
-import http.server
-import os
-import ssl
-import sys
-
-bind_address, port, directory, certificate, private_key = sys.argv[1:]
-
-
-class FeasibilityHandler(http.server.SimpleHTTPRequestHandler):
-    def end_headers(self) -> None:
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Permissions-Policy", "camera=(), geolocation=(), microphone=()")
-        self.send_header("Cache-Control", "no-store")
-        super().end_headers()
-
-
-handler = lambda *args, **kwargs: FeasibilityHandler(  # noqa: E731
-    *args, directory=os.path.realpath(directory), **kwargs
-)
-server = http.server.ThreadingHTTPServer((bind_address, int(port)), handler)
-context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-context.load_cert_chain(certificate, private_key)
-server.socket = context.wrap_socket(server.socket, server_side=True)
-try:
-    server.serve_forever()
-except KeyboardInterrupt:
-    pass
-finally:
-    server.server_close()
-PY
+exec ./scripts/serve-wasm-bundle.py \
+    --bind "$bind_address" \
+    --port "$port" \
+    --directory "$root/dist" \
+    --certificate "$certificate" \
+    --private-key "$private_key"

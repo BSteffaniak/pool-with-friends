@@ -3,93 +3,72 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
+tmp=$(mktemp "${TMPDIR:-/tmp}/pwmtf-wasm-size-evidence.XXXXXX")
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
 
 if [ "${PWMTF_SKIP_BUILD:-0}" != 1 ]; then
     ./scripts/build-wasm.sh
-elif [ ! -f dist/bootstrap.js ]; then
-    printf '%s\n' "PWMTF_SKIP_BUILD=1 requires an existing dist/bootstrap.js" >&2
+elif [ ! -f dist/pwmtf-bundle-manifest.json ]; then
+    printf '%s\n' "PWMTF_SKIP_BUILD=1 requires an existing verified dist bundle" >&2
     exit 1
 fi
 
-build_id=$(python3 - <<'PY'
-import re
+./scripts/write-wasm-size-evidence.py --bundle dist --output "$tmp"
+PWMTF_SIZE_EVIDENCE="$tmp" \
+PWMTF_ALLOW_UNOPTIMIZED_SIZE_REPORT="${PWMTF_ALLOW_UNOPTIMIZED_SIZE_REPORT:-0}" \
+python3 - <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
+from typing import Any
 
-contents = Path("dist/bootstrap.js").read_text(encoding="utf-8")
-match = re.search(r'^const candidateBuildId = "([A-Za-z0-9._-]+)";$', contents, re.MULTILINE)
-if match is None:
-    raise SystemExit("cannot read candidate build ID from dist/bootstrap.js")
-print(match.group(1))
+root = Path.cwd()
+evidence: dict[str, Any] = json.loads(
+    Path(os.environ["PWMTF_SIZE_EVIDENCE"]).read_text(encoding="utf-8")
+)
+candidate = evidence["candidate"]
+if (
+    candidate["wasm_optimization"] != "wasm-opt-Oz"
+    and os.environ["PWMTF_ALLOW_UNOPTIMIZED_SIZE_REPORT"] != "1"
+):
+    raise SystemExit(
+        "size evidence requires a wasm-opt-Oz candidate; "
+        "set PWMTF_ALLOW_UNOPTIMIZED_SIZE_REPORT=1 only for troubleshooting"
+    )
+
+print(f"Candidate build: {candidate['build_id']}")
+print(f"Candidate source: {candidate['source_hash']}")
+print(f"Candidate bundle: {candidate['bundle_hash']}")
+print(f"Candidate bundle algorithm: {candidate['bundle_hash_algorithm']}")
+print(f"Candidate WASM optimization: {candidate['wasm_optimization']}")
+
+brotli = shutil.which("brotli")
+header = f"{'Asset':<36} {'Raw bytes':>12} {'Gzip bytes':>12}"
+if brotli is not None:
+    header += f" {'Brotli bytes':>12}"
+print(header)
+
+brotli_total = 0
+for name, metadata in evidence["assets"].items():
+    line = f"{name:<36} {metadata['raw_bytes']:>12} {metadata['gzip_bytes']:>12}"
+    if brotli is not None:
+        result = subprocess.run(
+            [brotli, "--quality=11", "--stdout", root / "dist" / name],
+            check=True,
+            stdout=subprocess.PIPE,
+        )
+        brotli_bytes = len(result.stdout)
+        brotli_total += brotli_bytes
+        line += f" {brotli_bytes:>12}"
+    print(line)
+
+totals = evidence["totals"]
+line = f"{'TOTAL':<36} {totals['raw_bytes']:>12} {totals['gzip_bytes']:>12}"
+if brotli is not None:
+    line += f" {brotli_total:>12}"
+print(line)
 PY
-)
-source_hash=$(python3 - <<'PY'
-import re
-from pathlib import Path
-
-contents = Path("dist/bootstrap.js").read_text(encoding="utf-8")
-match = re.search(r'^const candidateSourceHash = "([0-9a-f]{64})";$', contents, re.MULTILINE)
-if match is None:
-    raise SystemExit("cannot read candidate source hash from dist/bootstrap.js")
-print(match.group(1))
-PY
-)
-wasm_optimization=$(python3 - <<'PY'
-import re
-from pathlib import Path
-
-contents = Path("dist/bootstrap.js").read_text(encoding="utf-8")
-match = re.search(
-    r'^const candidateWasmOptimization = "(wasm-opt-Oz|not-applied)";$',
-    contents,
-    re.MULTILINE,
-)
-if match is None:
-    raise SystemExit("cannot read candidate WASM optimization from dist/bootstrap.js")
-print(match.group(1))
-PY
-)
-if ! printf '%s' "$build_id" | grep -Fq -- "$source_hash"; then
-    printf '%s\n' "candidate build ID does not include candidate source hash" >&2
-    exit 1
-fi
-if [ "$wasm_optimization" != wasm-opt-Oz ] && [ "${PWMTF_ALLOW_UNOPTIMIZED_SIZE_REPORT:-0}" != 1 ]; then
-    printf '%s\n' "size evidence requires a wasm-opt-Oz candidate; set PWMTF_ALLOW_UNOPTIMIZED_SIZE_REPORT=1 only for troubleshooting" >&2
-    exit 1
-fi
-printf '%s\n' "Candidate build: $build_id"
-printf '%s\n' "Candidate source: $source_hash"
-printf '%s\n' "Candidate WASM optimization: $wasm_optimization"
-
-printf '%-36s %12s %12s' 'Asset' 'Raw bytes' 'Gzip bytes'
-if command -v brotli >/dev/null 2>&1; then
-    printf ' %12s' 'Brotli bytes'
-fi
-printf '\n'
-
-raw_total=0
-gzip_total=0
-brotli_total=0
-for asset in dist/*; do
-    if [ ! -f "$asset" ]; then
-        continue
-    fi
-
-    raw_bytes=$(wc -c < "$asset" | tr -d '[:space:]')
-    gzip_bytes=$(gzip -9 -c "$asset" | wc -c | tr -d '[:space:]')
-    raw_total=$((raw_total + raw_bytes))
-    gzip_total=$((gzip_total + gzip_bytes))
-
-    printf '%-36s %12s %12s' "${asset#dist/}" "$raw_bytes" "$gzip_bytes"
-    if command -v brotli >/dev/null 2>&1; then
-        brotli_bytes=$(brotli --quality=11 --stdout "$asset" | wc -c | tr -d '[:space:]')
-        brotli_total=$((brotli_total + brotli_bytes))
-        printf ' %12s' "$brotli_bytes"
-    fi
-    printf '\n'
-done
-
-printf '%-36s %12s %12s' 'TOTAL' "$raw_total" "$gzip_total"
-if command -v brotli >/dev/null 2>&1; then
-    printf ' %12s' "$brotli_total"
-fi
-printf '\n'

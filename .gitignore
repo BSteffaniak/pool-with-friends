@@ -19,6 +19,7 @@ node_modules/
 *.sqlite
 *.sqlite3
 *.bak
+feasibility-reports/
 pwmtf-feasibility-*.json
 *.trace
 *.har

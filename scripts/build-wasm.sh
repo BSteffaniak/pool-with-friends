@@ -4,26 +4,7 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
-source_hash=$(python3 - <<'PY'
-from __future__ import annotations
-
-import hashlib
-from pathlib import Path
-
-root = Path.cwd()
-inputs = [root / "Cargo.lock", root / "Cargo.toml", root / "rust-toolchain.toml"]
-inputs.extend(path for directory in (root / ".cargo", root / "packages" / "client") for path in directory.rglob("*") if path.is_file())
-digest = hashlib.sha256()
-for path in sorted(inputs, key=lambda candidate: candidate.relative_to(root).as_posix()):
-    relative = path.relative_to(root).as_posix().encode()
-    contents = path.read_bytes()
-    digest.update(len(relative).to_bytes(4, "big"))
-    digest.update(relative)
-    digest.update(len(contents).to_bytes(8, "big"))
-    digest.update(contents)
-print(digest.hexdigest())
-PY
-)
+source_hash=$(./scripts/hash-wasm-source.py)
 
 build_id=${PWMTF_BUILD_ID:-}
 if [ -z "$build_id" ]; then
@@ -38,30 +19,23 @@ case "$build_id" in
 esac
 
 cargo build --package pwmtf_client --target wasm32-unknown-unknown --release
-mkdir -p dist
-find dist -mindepth 1 -maxdepth 1 -type f -delete
+python3 - <<'PY'
+from pathlib import Path
+import shutil
+
+output = Path("dist")
+output.mkdir(exist_ok=True)
+for entry in output.iterdir():
+    if entry.is_dir() and not entry.is_symlink():
+        shutil.rmtree(entry)
+    else:
+        entry.unlink()
+PY
 cp packages/client/web/index.html packages/client/web/styles.css packages/client/web/bootstrap.js dist/
 wasm_optimization=not-applied
 if command -v wasm-opt >/dev/null 2>&1 && [ "${PWMTF_SKIP_WASM_OPT:-0}" != 1 ]; then
     wasm_optimization=wasm-opt-Oz
 fi
-BUILD_ID="$build_id" SOURCE_HASH="$source_hash" WASM_OPTIMIZATION="$wasm_optimization" python3 - <<'PY'
-import os
-from pathlib import Path
-
-path = Path("dist/bootstrap.js")
-contents = path.read_text(encoding="utf-8")
-replacements = {
-    "__PWMTF_BUILD_ID__": os.environ["BUILD_ID"],
-    "__PWMTF_SOURCE_HASH__": os.environ["SOURCE_HASH"],
-    "__PWMTF_WASM_OPTIMIZATION__": os.environ["WASM_OPTIMIZATION"],
-}
-for placeholder, value in replacements.items():
-    if contents.count(placeholder) != 1:
-        raise SystemExit(f"bootstrap placeholder must occur exactly once: {placeholder}")
-    contents = contents.replace(placeholder, value)
-path.write_text(contents, encoding="utf-8")
-PY
 wasm_schema=$(grep -m1 'name = "wasm-bindgen"' -A2 Cargo.lock | grep 'version = ' | cut -d'"' -f2)
 cli_schema=$(wasm-bindgen --version | awk '{print $2}')
 if [ "$wasm_schema" != "$cli_schema" ]; then
@@ -93,5 +67,46 @@ if command -v wasm-opt >/dev/null 2>&1; then
         mv "$optimized" "$root/dist/pwmtf_client_bg.wasm"
     fi
 fi
+
+BUILD_ID="$build_id" SOURCE_HASH="$source_hash" WASM_OPTIMIZATION="$wasm_optimization" python3 - <<'PY'
+import hashlib
+import os
+from pathlib import Path
+
+path = Path("dist/bootstrap.js")
+contents = path.read_text(encoding="utf-8")
+bundle_hash = hashlib.sha256()
+assets = sorted(
+    (
+        "index.html",
+        "styles.css",
+        "pwmtf_client.d.ts",
+        "pwmtf_client.js",
+        "pwmtf_client_bg.wasm",
+        "pwmtf_client_bg.wasm.d.ts",
+    )
+)
+for asset in assets:
+    name = asset.encode()
+    body = Path("dist", asset).read_bytes()
+    bundle_hash.update(len(name).to_bytes(4, "big"))
+    bundle_hash.update(name)
+    bundle_hash.update(len(body).to_bytes(8, "big"))
+    bundle_hash.update(body)
+replacements = {
+    "__PWMTF_BUILD_ID__": os.environ["BUILD_ID"],
+    "__PWMTF_SOURCE_HASH__": os.environ["SOURCE_HASH"],
+    "__PWMTF_BUNDLE_HASH__": bundle_hash.hexdigest(),
+    "__PWMTF_WASM_OPTIMIZATION__": os.environ["WASM_OPTIMIZATION"],
+}
+for placeholder, value in replacements.items():
+    if contents.count(placeholder) != 1:
+        raise SystemExit(f"bootstrap placeholder must occur exactly once: {placeholder}")
+    contents = contents.replace(placeholder, value)
+path.write_text(contents, encoding="utf-8")
+PY
+
+./scripts/verify-wasm-bundle.py --write dist
+./scripts/verify-wasm-bundle.py dist
 
 printf '%s\n' "PWMTF web client built in $root/dist (build $build_id)"
