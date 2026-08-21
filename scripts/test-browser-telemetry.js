@@ -44,7 +44,7 @@ const context = {
 };
 vm.createContext(context);
 vm.runInContext(
-  `${source.slice(start, end)}\nthis.frame = frame; this.resetFrameWindow = resetFrameWindow; this.captureDuration = captureDuration; this.hasRequiredBackgroundIntervals = hasRequiredBackgroundIntervals;`,
+  `${source.slice(start, end)}\nthis.frame = frame; this.resetFrameWindow = resetFrameWindow; this.captureDuration = captureDuration; this.hasRequiredBackgroundIntervals = hasRequiredBackgroundIntervals; this.captureTargets = captureTargets;`,
   context,
 );
 
@@ -90,6 +90,30 @@ if (!context.hasRequiredBackgroundIntervals([30_000, 45_000])) {
 if (context.hasRequiredBackgroundIntervals([30_000, 29_999])) {
   throw new Error("a short background interval was accepted");
 }
+const interactionTargets = context.captureTargets("warm");
+if (
+  interactionTargets.visibilityChanges !== 0 ||
+  interactionTargets.orientationChanges !== 0 ||
+  interactionTargets.pageHides !== 0 ||
+  interactionTargets.pageShows !== 0 ||
+  interactionTargets.backgroundIntervals !== 0 ||
+  interactionTargets.backgroundSuspensions !== 0 ||
+  interactionTargets.explicitResumes !== 0
+) {
+  throw new Error("interaction metrics expose lifecycle evidence targets");
+}
+const lifecycleTargets = context.captureTargets("lifecycle");
+if (
+  lifecycleTargets.visibilityChanges !== 4 ||
+  lifecycleTargets.orientationChanges !== 2 ||
+  lifecycleTargets.pageHides !== 2 ||
+  lifecycleTargets.pageShows !== 2 ||
+  lifecycleTargets.backgroundIntervals !== 2 ||
+  lifecycleTargets.backgroundSuspensions !== 2 ||
+  lifecycleTargets.explicitResumes !== 2
+) {
+  throw new Error("lifecycle metrics do not expose exact required evidence targets");
+}
 
 const observationsStart = source.indexOf("function externalObservations() {");
 const observationsEnd = source.indexOf("function physicalCheckResults() {", observationsStart);
@@ -111,7 +135,19 @@ const observationsContext = {
   peakMemoryInput: observationInput("180"),
   thermalResultInput: observationInput("no-warning"),
   reloadObservedInput: observationInput("no"),
-  telemetry: { clientReadyMs: 1000, firstCanvasContactMs: 1200 },
+  platformInput: observationInput("iphone"),
+  cacheStateInput: observationInput("cold"),
+  telemetry: {
+    captureStartedAt: 0,
+    captureStoppedAt: 65_000,
+    hiddenStartedAt: null,
+    hiddenDurationMs: 0,
+    clientReadyMs: 1000,
+    firstCanvasContactMs: 1200,
+  },
+  captureActive: false,
+  captureButton: { focus() {} },
+  performance: { now: () => 65_000 },
   showStatus(message) {
     observationsContext.status = message;
   },
@@ -120,7 +156,7 @@ const observationsContext = {
 };
 vm.createContext(observationsContext);
 vm.runInContext(
-  `${source.slice(observationsStart, observationsEnd)}\nthis.requireExternalObservations = requireExternalObservations;`,
+  `${source.slice(start, end)}\n${source.slice(observationsStart, observationsEnd)}\nthis.requireExternalObservations = requireExternalObservations;`,
   observationsContext,
 );
 observationsContext.firstVisibleInput.value = "not-a-number";
@@ -130,11 +166,64 @@ if (observationsContext.requireExternalObservations()) {
 if (!observationsContext.status.includes("valid finite values")) {
   throw new Error("invalid external observation lacked actionable guidance");
 }
+observationsContext.firstVisibleInput.value = "4000ms";
+if (observationsContext.requireExternalObservations()) {
+  throw new Error("external observations accepted a numeric prefix with trailing text");
+}
 observationsContext.firstVisibleInput.value = "4000";
+observationsContext.cacheStateInput.value = "warm";
+if (observationsContext.requireExternalObservations()) {
+  throw new Error("external observations accepted a mobile warm-start budget overrun");
+}
+if (!observationsContext.status.includes("3-second warm budget")) {
+  throw new Error("warm-start budget overrun lacked actionable guidance");
+}
+observationsContext.cacheStateInput.value = "cold";
 observationsContext.telemetry.clientReadyMs = null;
 if (observationsContext.requireExternalObservations()) {
   throw new Error("external observations accepted missing client timing evidence");
 }
+observationsContext.telemetry.clientReadyMs = 1_000;
+observationsContext.firstVisibleInput.value = "66000";
+if (observationsContext.requireExternalObservations()) {
+  throw new Error("navigation-relative visible-table timing after capture stop was accepted");
+}
+if (!observationsContext.status.includes("before capture stop")) {
+  throw new Error("visible-table timing after capture stop lacked actionable guidance");
+}
+observationsContext.firstVisibleInput.value = "4000";
+observationsContext.firstInputInput.value = "66000";
+if (observationsContext.requireExternalObservations()) {
+  throw new Error("navigation-relative accepted-input timing after capture stop was accepted");
+}
+if (!observationsContext.status.includes("before capture stop")) {
+  throw new Error("accepted-input timing after capture stop lacked actionable guidance");
+}
+observationsContext.firstInputInput.value = "4200";
+observationsContext.thermalResultInput.value = "warning";
+if (observationsContext.requireExternalObservations()) {
+  throw new Error("external observations accepted a thermal warning");
+}
+if (!observationsContext.status.includes("invalidates this run")) {
+  throw new Error("thermal warning lacked invalid-run guidance");
+}
+observationsContext.thermalResultInput.value = "no-warning";
+observationsContext.reloadObservedInput.value = "yes";
+if (observationsContext.requireExternalObservations()) {
+  throw new Error("external observations accepted reload or eviction evidence");
+}
+if (!observationsContext.status.includes("reload or eviction invalidates")) {
+  throw new Error("reload or eviction lacked invalid-run guidance");
+}
+observationsContext.reloadObservedInput.value = "no";
+observationsContext.captureActive = true;
+if (observationsContext.requireExternalObservations()) {
+  throw new Error("external observations were validated during an active capture");
+}
+if (!observationsContext.status.includes("Stop the capture")) {
+  throw new Error("active-capture observation validation lacked stop guidance");
+}
+observationsContext.captureActive = false;
 
 const metadataStart = source.indexOf("function detectBrowserVersion(userAgent, family) {");
 const metadataEnd = source.indexOf("const captureLockedInputs = [", metadataStart);
@@ -163,6 +252,22 @@ const metadataContext = {
   runNumberInput: input("1"),
   detectedBrowserFamily: "chrome",
   detectedPlatform: "desktop",
+  candidateWasmOptimization: "wasm-opt-Oz",
+  candidateSourceHash: "a".repeat(64),
+  candidateBuildId: `fixture-${"a".repeat(64)}`,
+  candidateBundleHash: "b".repeat(64),
+  candidateBundleHashAlgorithm: "sha256-length-prefixed-v1",
+  candidateBevyVersion: "0.19.1",
+  candidateRenderer: "WebGL2",
+  allowedBrowserFamilies(platform) {
+    return {
+      iphone: ["safari"],
+      ipad: ["safari"],
+      "android-phone": ["chrome", "firefox", "samsung-internet"],
+      "android-tablet": ["chrome"],
+      desktop: ["safari", "chrome", "firefox", "edge"],
+    }[platform] ?? [];
+  },
   navigator: {
     userAgent:
       "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.7922.138 Safari/537.36",
@@ -191,6 +296,18 @@ if (!metadataContext.statusOutput.textContent.includes("platform")) {
   throw new Error("platform mismatch did not produce an actionable error");
 }
 metadataContext.platformInput.value = "desktop";
+metadataContext.detectedPlatform = "iphone";
+metadataContext.detectedBrowserFamily = "chrome";
+metadataContext.browserFamilyInput.value = "chrome";
+metadataContext.platformInput.value = "iphone";
+if (metadataContext.requireTestMetadata()) {
+  throw new Error("capture metadata accepted an unsupported platform/browser pair");
+}
+if (!metadataContext.statusOutput.textContent.includes("not supported")) {
+  throw new Error("unsupported platform/browser pair lacked actionable guidance");
+}
+metadataContext.platformInput.value = "desktop";
+metadataContext.detectedPlatform = "desktop";
 metadataContext.browserFamilyInput.value = "firefox";
 if (metadataContext.requireTestMetadata()) {
   throw new Error("mismatched declared/detected browser was accepted");
@@ -228,6 +345,26 @@ metadataContext.runNumberInput.value = "1";
 if (metadataContext.testMetadata().run_number !== 1) {
   throw new Error("test metadata did not preserve the validated integer run number");
 }
+metadataContext.candidateWasmOptimization = "not-applied";
+if (metadataContext.requireTestMetadata()) {
+  throw new Error("capture metadata accepted an unoptimized candidate");
+}
+metadataContext.candidateWasmOptimization = "wasm-opt-Oz";
+metadataContext.candidateBuildId = `fixture-${"a".repeat(129)}`;
+if (metadataContext.requireTestMetadata()) {
+  throw new Error("capture metadata accepted an oversized build ID");
+}
+metadataContext.candidateBuildId = `fixture-${"a".repeat(64)}`;
+metadataContext.candidateBundleHashAlgorithm = "unknown";
+if (metadataContext.requireTestMetadata()) {
+  throw new Error("capture metadata accepted an unsupported bundle-hash algorithm");
+}
+metadataContext.candidateBundleHashAlgorithm = "sha256-length-prefixed-v1";
+metadataContext.candidateRenderer = "WebGPU";
+if (metadataContext.requireTestMetadata()) {
+  throw new Error("capture metadata accepted an unexpected renderer");
+}
+metadataContext.candidateRenderer = "WebGL2";
 metadataContext.detectedBrowserFamily = "unknown";
 if (metadataContext.requireTestMetadata()) {
   throw new Error("unknown detected browser was accepted");
@@ -530,6 +667,9 @@ const resetLifecycleContext = {
   reloadObservedInput: { value: "no" },
   eventLabelInput: { value: "fixture" },
   rejectForAudioLifecycle: () => false,
+  setCaptureMetadataLocked() {
+    resetLifecycleContext.metadataUnlocked = true;
+  },
   showStatus(message) {
     resetLifecycleContext.status = message;
   },
@@ -538,6 +678,10 @@ const resetLifecycleContext = {
   stoppedCaptureNeedsAudioResume: () => false,
   Promise,
   Error,
+};
+resetLifecycleContext.clearCaptureEvidence = () => {
+  resetLifecycleContext.evidenceCleared = true;
+  resetLifecycleContext.telemetry.audio.transitionFailures = 0;
 };
 let resolveAudioClose;
 const closingAudioContext = {
@@ -562,6 +706,7 @@ vm.runInContext(
 resetLifecycleContext.resetReportForm();
 if (
   closingAudioContext.closeCalls !== 1 ||
+  !resetLifecycleContext.metadataUnlocked ||
   resetLifecycleContext.audioLifecycleOperations !== 1 ||
   resetLifecycleContext.audioContextPendingClose !== closingAudioContext ||
   resetLifecycleContext.telemetry.audio.state !== "running"
@@ -680,6 +825,15 @@ startGuardContext.startCapture();
 if (!startGuardContext.status.includes("reusing an existing audio context")) {
   throw new Error("capture start reused setup audio without explicit reset");
 }
+startGuardContext.audioContext = null;
+startGuardContext.telemetry = { clientReadyMs: null, audio: { transitionFailures: 0 } };
+startGuardContext.document = { hidden: false };
+startGuardContext.shell = { dataset: { clientState: "loading" } };
+startGuardContext.captureButton = { focus() {} };
+startGuardContext.startCapture();
+if (!startGuardContext.status.includes("finish loading")) {
+  throw new Error("capture start accepted a client that was not ready");
+}
 
 const captureGuardStart = source.indexOf("function stopCapture() {");
 const captureGuardEnd = source.indexOf("function updateAudioControls() {", captureGuardStart);
@@ -778,8 +932,8 @@ if (!resetGuardContext.status.includes("audio operations")) {
   throw new Error("report reset did not reject an in-flight audio operation");
 }
 
-const markEventStart = source.indexOf("function markEvent() {");
-const markEventEnd = source.indexOf("function report() {", markEventStart);
+const markEventStart = source.indexOf("function appendVisibleCaptureEvent(");
+const markEventEnd = source.indexOf("function report(", markEventStart);
 if (markEventStart < 0 || markEventEnd < 0) {
   throw new Error("cannot locate event-marker capture guard in bootstrap.js");
 }
@@ -826,6 +980,8 @@ if (captureEvidenceStart < 0 || captureEvidenceEnd < 0) {
 const captureEvidenceContext = {
   audioButton: { focus() {} },
   cacheStateInput: { value: "warm" },
+  platformInput: { value: "desktop" },
+  presentationTierInput: { value: "default" },
   captureButton: { focus() {} },
   canvas: { focus() {} },
   document: { hidden: false },
@@ -843,6 +999,8 @@ const captureEvidenceContext = {
     },
     frameCount: 1,
     fpsSamples: [60],
+    minimumFps: 60,
+    maximumFps: 60,
     frameGapSamplesMs: [16],
     pointerContacts: 1,
     captureStartedAt: 0,
@@ -884,6 +1042,134 @@ if (!captureEvidenceContext.status.includes("exactly zero")) {
 }
 captureEvidenceContext.telemetry.audio.backgroundSuspensions = 0;
 captureEvidenceContext.telemetry.audio.explicitResumes = 0;
+captureEvidenceContext.telemetry.captureStoppedAt = 1_800_001;
+if (captureEvidenceContext.requireCaptureEvidence()) {
+  throw new Error("capture export accepted an unbounded capture duration");
+}
+if (!captureEvidenceContext.status.includes("cannot exceed 30")) {
+  throw new Error("unbounded capture duration lacked restart guidance");
+}
+captureEvidenceContext.telemetry.captureStoppedAt = 61_000;
+captureEvidenceContext.telemetry.hiddenDurationMs = 2;
+if (captureEvidenceContext.requireCaptureEvidence()) {
+  throw new Error("capture export accepted an inconsistent hidden-duration sum");
+}
+if (!captureEvidenceContext.status.includes("Hidden interval timing is inconsistent")) {
+  throw new Error("inconsistent hidden duration lacked restart guidance");
+}
+captureEvidenceContext.telemetry.hiddenDurationMs = 0;
+captureEvidenceContext.telemetry.fpsSamples = [Number.NaN];
+if (captureEvidenceContext.requireCaptureEvidence()) {
+  throw new Error("capture export accepted non-finite frame-rate evidence");
+}
+if (!captureEvidenceContext.status.includes("consistent finite frame-rate samples")) {
+  throw new Error("non-finite frame-rate evidence lacked actionable guidance");
+}
+captureEvidenceContext.telemetry.fpsSamples = [60];
+captureEvidenceContext.platformInput.value = "iphone";
+captureEvidenceContext.telemetry.minimumFps = 29;
+if (captureEvidenceContext.requireCaptureEvidence()) {
+  throw new Error("capture export accepted frame rate below the mobile floor");
+}
+if (!captureEvidenceContext.status.includes("30 FPS mobile floor")) {
+  throw new Error("mobile frame floor failure lacked actionable guidance");
+}
+captureEvidenceContext.telemetry.minimumFps = 54;
+if (captureEvidenceContext.requireCaptureEvidence()) {
+  throw new Error("capture export accepted default tier below the full-quality threshold");
+}
+if (!captureEvidenceContext.status.includes("reduced presentation tier")) {
+  throw new Error("quality-fallback requirement lacked actionable guidance");
+}
+captureEvidenceContext.platformInput.value = "desktop";
+captureEvidenceContext.telemetry.minimumFps = 60;
+
+const clearCaptureStart = source.indexOf("function clearCaptureEvidence() {");
+const clearCaptureEnd = source.indexOf("function feasibilityFilename(", clearCaptureStart);
+if (clearCaptureStart < 0 || clearCaptureEnd < 0) {
+  throw new Error("cannot locate capture evidence reset in bootstrap.js");
+}
+const clearCaptureContext = {
+  captureActive: true,
+  telemetry: {
+    captureStartedAt: 1,
+    captureStoppedAt: 2,
+    hiddenStartedAt: 3,
+    hiddenDurationMs: 4,
+    hiddenDurationsMs: [4],
+    frameCount: 5,
+    minimumFps: 6,
+    maximumFps: 7,
+    fpsSamples: [6],
+    frameGapSamplesMs: [8],
+    maximumFrameGapMs: 8,
+    currentFps: 6,
+    currentJsHeapBytes: 9,
+    peakJsHeapBytes: 10,
+    pointerContacts: 11,
+    visibilityChanges: 12,
+    orientationChanges: 13,
+    orientationStates: ["portrait-primary"],
+    initialOrientation: "landscape-primary",
+    finalOrientation: "landscape-secondary",
+    pageHideCount: 14,
+    pageShowCount: 15,
+    restoredFromPageCache: true,
+    events: [{ label: "fixture" }],
+    audio: {
+      gestureStarts: 16,
+      backgroundSuspensions: 17,
+      explicitResumes: 18,
+      muteChanges: 19,
+      mutedPlaybackAttempts: 20,
+      audiblePlaybackAttempts: 21,
+      transitionFailures: 22,
+      muted: true,
+    },
+  },
+  captureButton: { textContent: "Stop capture" },
+  updateCaptureControls() {
+    clearCaptureContext.controlsUpdated = true;
+  },
+};
+vm.createContext(clearCaptureContext);
+vm.runInContext(
+  `${source.slice(clearCaptureStart, clearCaptureEnd)}\nthis.clearCaptureEvidence = clearCaptureEvidence;`,
+  clearCaptureContext,
+);
+clearCaptureContext.clearCaptureEvidence();
+if (
+  clearCaptureContext.captureActive ||
+  clearCaptureContext.telemetry.captureStartedAt !== null ||
+  clearCaptureContext.telemetry.captureStoppedAt !== null ||
+  clearCaptureContext.telemetry.hiddenStartedAt !== null ||
+  clearCaptureContext.telemetry.hiddenDurationMs !== 0 ||
+  clearCaptureContext.telemetry.hiddenDurationsMs.length !== 0 ||
+  clearCaptureContext.telemetry.frameCount !== 0 ||
+  clearCaptureContext.telemetry.minimumFps !== null ||
+  clearCaptureContext.telemetry.maximumFps !== null ||
+  clearCaptureContext.telemetry.fpsSamples.length !== 0 ||
+  clearCaptureContext.telemetry.frameGapSamplesMs.length !== 0 ||
+  clearCaptureContext.telemetry.maximumFrameGapMs !== 0 ||
+  clearCaptureContext.telemetry.currentFps !== null ||
+  clearCaptureContext.telemetry.currentJsHeapBytes !== null ||
+  clearCaptureContext.telemetry.peakJsHeapBytes !== null ||
+  clearCaptureContext.telemetry.pointerContacts !== 0 ||
+  clearCaptureContext.telemetry.visibilityChanges !== 0 ||
+  clearCaptureContext.telemetry.orientationChanges !== 0 ||
+  clearCaptureContext.telemetry.orientationStates.length !== 0 ||
+  clearCaptureContext.telemetry.initialOrientation !== null ||
+  clearCaptureContext.telemetry.finalOrientation !== null ||
+  clearCaptureContext.telemetry.pageHideCount !== 0 ||
+  clearCaptureContext.telemetry.pageShowCount !== 0 ||
+  clearCaptureContext.telemetry.restoredFromPageCache ||
+  clearCaptureContext.telemetry.events.length !== 0 ||
+  Object.values(clearCaptureContext.telemetry.audio).some((value) => value !== 0 && value !== false) ||
+  clearCaptureContext.captureButton.textContent !== "Start capture" ||
+  !clearCaptureContext.controlsUpdated
+) {
+  throw new Error("capture evidence reset retained data from the completed run");
+}
 
 const captureControlsStart = source.indexOf("function updateCaptureControls() {");
 const stoppedCaptureStart = source.indexOf("function stoppedCaptureNeedsAudioResume() {", captureControlsStart);
@@ -894,9 +1180,12 @@ if (captureControlsStart < 0 || stoppedCaptureStart < 0 || captureControlsEnd < 
 const captureControlsContext = {
   captureActive: false,
   telemetry: {
+    clientReadyMs: 1_000,
     captureStoppedAt: 61_000,
     audio: { transitionFailures: 0 },
   },
+  shell: { dataset: { clientState: "ready" } },
+  captureButton: {},
   markEventButton: {},
   resetButton: {},
   downloadButton: {},
@@ -924,6 +1213,198 @@ captureControlsContext.telemetry.audio.transitionFailures = 1;
 captureControlsContext.updateCaptureControls();
 if (!captureControlsContext.downloadButton.disabled) {
   throw new Error("download control enabled with a failed audio transition");
+}
+captureControlsContext.telemetry.audio.transitionFailures = 0;
+captureControlsContext.telemetry.clientReadyMs = null;
+captureControlsContext.shell.dataset.clientState = "loading";
+captureControlsContext.updateCaptureControls();
+if (!captureControlsContext.captureButton.disabled) {
+  throw new Error("capture control enabled before client readiness");
+}
+captureControlsContext.captureActive = true;
+captureControlsContext.updateCaptureControls();
+if (captureControlsContext.captureButton.disabled) {
+  throw new Error("active capture could not be stopped after client readiness state changed");
+}
+
+const downloadStart = source.indexOf("function downloadReport() {");
+const downloadEnd = source.indexOf("function resetReportForm() {", downloadStart);
+if (downloadStart < 0 || downloadEnd < 0) {
+  throw new Error("cannot locate report download transaction in bootstrap.js");
+}
+const downloadFunction = `${source.slice(downloadStart, downloadEnd)}\nthis.downloadReport = downloadReport;`;
+function runDownloadScenario({
+  stringify = JSON.stringify,
+  createObjectURL = () => "blob:fixture",
+  revokeObjectURL,
+  createElement,
+  filename = () => "fixture.json",
+} = {}) {
+  const state = {
+    cleared: false,
+    clicked: false,
+    consoleErrors: 0,
+    refreshed: false,
+    revoked: false,
+    status: "",
+    unlocked: false,
+  };
+  const context = {
+    requireTestMetadata: () => true,
+    requirePhysicalChecks: () => true,
+    requireExternalObservations: () => true,
+    requireStoppedCapture: () => true,
+    requireCaptureEvidence: () => true,
+    testMetadata: () => ({ platform: "desktop" }),
+    report: () => ({ evidence: 1 }),
+    feasibilityFilename: filename,
+    setCaptureMetadataLocked() {
+      state.unlocked = true;
+    },
+    clearCaptureEvidence() {
+      state.cleared = true;
+    },
+    refreshMetrics() {
+      state.refreshed = true;
+    },
+    showStatus(message) {
+      state.status = message;
+    },
+    document: {
+      createElement:
+        createElement ??
+        (() => ({
+          click() {
+            state.clicked = true;
+          },
+        })),
+    },
+    console: {
+      error() {
+        state.consoleErrors += 1;
+      },
+    },
+    Date,
+    JSON: { stringify },
+    Blob,
+    URL: {
+      createObjectURL,
+      revokeObjectURL:
+        revokeObjectURL ??
+        (() => {
+          state.revoked = true;
+        }),
+    },
+    Error,
+  };
+  vm.createContext(context);
+  vm.runInContext(downloadFunction, context);
+  context.downloadReport();
+  return state;
+}
+
+let downloadState = runDownloadScenario({
+  stringify() {
+    throw new Error("fixture serialization failure");
+  },
+});
+if (
+  !downloadState.status.includes("serialization failed") ||
+  downloadState.unlocked ||
+  downloadState.cleared ||
+  downloadState.clicked ||
+  downloadState.revoked
+) {
+  throw new Error("failed report serialization altered completed evidence");
+}
+
+downloadState = runDownloadScenario({
+  createObjectURL() {
+    throw new Error("fixture object URL failure");
+  },
+});
+if (
+  !downloadState.status.includes("preparation failed") ||
+  downloadState.unlocked ||
+  downloadState.cleared ||
+  downloadState.clicked ||
+  downloadState.revoked
+) {
+  throw new Error("failed report preparation altered completed evidence");
+}
+
+downloadState = runDownloadScenario({
+  createElement() {
+    throw new Error("fixture anchor failure");
+  },
+});
+if (
+  !downloadState.status.includes("download failed") ||
+  downloadState.unlocked ||
+  downloadState.cleared ||
+  downloadState.clicked ||
+  !downloadState.revoked
+) {
+  throw new Error("failed anchor preparation did not preserve evidence and revoke its URL");
+}
+
+downloadState = runDownloadScenario({
+  filename() {
+    throw new Error("fixture filename failure");
+  },
+});
+if (
+  !downloadState.status.includes("download failed") ||
+  downloadState.unlocked ||
+  downloadState.cleared ||
+  downloadState.clicked ||
+  !downloadState.revoked
+) {
+  throw new Error("failed filename construction did not preserve evidence and revoke its URL");
+}
+
+downloadState = runDownloadScenario({
+  createElement: () => ({
+    click() {
+      throw new Error("fixture click failure");
+    },
+  }),
+});
+if (
+  !downloadState.status.includes("download failed") ||
+  downloadState.unlocked ||
+  downloadState.cleared ||
+  !downloadState.revoked
+) {
+  throw new Error("failed download dispatch did not preserve evidence and revoke its URL");
+}
+
+downloadState = runDownloadScenario();
+if (
+  downloadState.status !== "Downloaded fixture.json" ||
+  !downloadState.unlocked ||
+  !downloadState.cleared ||
+  !downloadState.clicked ||
+  !downloadState.revoked ||
+  !downloadState.refreshed
+) {
+  throw new Error("successful report dispatch did not clear evidence transactionally");
+}
+
+downloadState = runDownloadScenario({
+  revokeObjectURL() {
+    throw new Error("fixture cleanup failure");
+  },
+});
+if (
+  downloadState.status !== "Downloaded fixture.json" ||
+  !downloadState.unlocked ||
+  !downloadState.cleared ||
+  !downloadState.clicked ||
+  !downloadState.refreshed ||
+  downloadState.consoleErrors !== 1
+) {
+  throw new Error("URL cleanup failure prevented successful report finalization");
 }
 
 const lifecycleOrder = [];

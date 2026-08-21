@@ -62,7 +62,7 @@ for platform, browser_families in platforms.items():
                     lifecycle = cache_state == "lifecycle"
                     browser_version = "151" if minimum_version_run == "no" else "150"
                     report = {
-                        "schema_version": 11,
+                        "schema_version": 12,
                         "captured_at": (
                             f"2026-08-{run_number + (10 if minimum_version_run == 'yes' else 0):02d}"
                             f"T00:00:00.000Z"
@@ -111,6 +111,8 @@ for platform, browser_families in platforms.items():
                             "client_ready": 1_000,
                             "first_canvas_contact": 1_200,
                             "capture_duration": 610_000 if lifecycle else 65_000,
+                            "capture_started_at": 10_000,
+                            "capture_stopped_at": 680_000 if lifecycle else 75_000,
                             "hidden_duration": 60_000 if lifecycle else 0,
                             "hidden_durations": [30_000, 30_000] if lifecycle else [],
                         },
@@ -333,12 +335,12 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
-report["schema_version"] = 11
+report["schema_version"] = 12
 report["candidate"]["wasm_optimization"] = "not-applied"
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
 expect_rejected "a final matrix without Binaryen optimization" $reports
-grep -q 'requires the wasm-opt-Oz candidate' "$tmp/rejected.err"
+grep -q 'candidate.wasm_optimization must be wasm-opt-Oz' "$tmp/rejected.err"
 
 python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
 import json
@@ -556,6 +558,72 @@ path.write_text(json.dumps(report), encoding="utf-8")
 PY
 expect_rejected "a zero-duration capture" $reports
 grep -q 'capture_duration must be greater than zero' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["timing_ms"]["capture_duration"] = 1_800_001
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "an unbounded capture duration" $reports
+grep -q 'capture_duration must not exceed 30 minutes' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["timing_ms"]["capture_duration"] = 1_800_000
+report["timing_ms"]["hidden_duration"] = 1_800_001
+report["timing_ms"]["hidden_durations"] = [1_800_001]
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "an unbounded hidden duration" $reports
+grep -q 'hidden_duration must not exceed 30 minutes' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["timing_ms"]["capture_duration"] = 65_000
+report["timing_ms"]["hidden_duration"] = 0
+report["timing_ms"]["hidden_durations"] = []
+report["timing_ms"]["capture_stopped_at"] = report["timing_ms"]["capture_started_at"] + 65_002
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "inconsistent capture timestamps and durations" $reports
+grep -q 'capture timestamps, hidden duration, and active duration are inconsistent' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["timing_ms"]["capture_stopped_at"] = report["timing_ms"]["capture_started_at"] + 65_000
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["timing_ms"]["capture_duration"] = 65_000
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
 
 python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
 import json
@@ -783,6 +851,34 @@ from pathlib import Path
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
 report["browser"]["language"] = "en-US"
+report["browser"]["hardware_concurrency"] = 1025
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "unbounded hardware concurrency" $reports
+grep -q 'hardware_concurrency must be null or an integer from 1 through 1024' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["browser"]["hardware_concurrency"] = 8
+report["browser"]["device_memory_gib"] = 1025
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "unbounded device memory" $reports
+grep -q 'device_memory_gib must be null or finite from 0 through 1024' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["browser"]["device_memory_gib"] = 8
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
 
@@ -854,6 +950,30 @@ path.write_text(json.dumps(report), encoding="utf-8")
 PY
 expect_rejected "input timing before visible table" $reports
 grep -q 'first accepted input cannot precede' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["external_observations"]["first_accepted_input_ms"] = 76_000
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
+expect_rejected "accepted input after capture stop" $reports
+grep -q 'first accepted input cannot occur after capture stop' "$tmp/rejected.err"
+
+python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+report["external_observations"]["first_accepted_input_ms"] = 4_200
+path.write_text(json.dumps(report), encoding="utf-8")
+PY
 
 python3 - "$tmp/iphone-safari-cold-current-1.json" <<'PY'
 import json
@@ -1115,10 +1235,11 @@ path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
 report["timing_ms"]["hidden_duration"] = 30_000
 report["timing_ms"]["hidden_durations"] = [30_000]
+report["timing_ms"]["capture_stopped_at"] += 30_000
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
 expect_rejected "backgrounded interaction capture" $reports
-grep -q 'non-lifecycle capture contains background intervals' "$tmp/rejected.err"
+grep -q 'non-lifecycle capture contains lifecycle transitions' "$tmp/rejected.err"
 
 python3 - "$tmp/iphone-safari-warm-current-1.json" <<'PY'
 import json
@@ -1129,12 +1250,13 @@ path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
 report["timing_ms"]["hidden_duration"] = 0
 report["timing_ms"]["hidden_durations"] = []
+report["timing_ms"]["capture_stopped_at"] -= 30_000
 report["interaction"]["orientation_changes"] = 1
 report["interaction"]["orientation_states"] = ["portrait-primary"]
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
 expect_rejected "rotated interaction capture" $reports
-grep -q 'non-lifecycle capture contains orientation changes' "$tmp/rejected.err"
+grep -q 'non-lifecycle capture contains lifecycle transitions' "$tmp/rejected.err"
 
 python3 - "$tmp/iphone-safari-warm-current-1.json" <<'PY'
 import json
@@ -1186,7 +1308,6 @@ path.write_text(json.dumps(report), encoding="utf-8")
 PY
 expect_rejected "warm startup over budget" $reports
 grep -q 'first-visible 3001.00ms exceeds 3000ms' "$tmp/rejected.err"
-grep -q 'first accepted input 3200.00ms exceeds 3000ms' "$tmp/rejected.err"
 
 python3 - "$tmp/iphone-safari-warm-current-1.json" <<'PY'
 import json
@@ -1216,6 +1337,11 @@ warm.write_text(json.dumps(warm_report), encoding="utf-8")
 lifecycle = Path(sys.argv[2])
 lifecycle_report = json.loads(lifecycle.read_text(encoding="utf-8"))
 lifecycle_report["timing_ms"]["capture_duration"] = 599_999
+lifecycle_report["timing_ms"]["capture_stopped_at"] = (
+    lifecycle_report["timing_ms"]["capture_started_at"]
+    + lifecycle_report["timing_ms"]["hidden_duration"]
+    + lifecycle_report["timing_ms"]["capture_duration"]
+)
 lifecycle.write_text(json.dumps(lifecycle_report), encoding="utf-8")
 PY
 expect_rejected "short lifecycle capture" $reports
@@ -1229,6 +1355,11 @@ from pathlib import Path
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
 report["timing_ms"]["capture_duration"] = 610_000
+report["timing_ms"]["capture_stopped_at"] = (
+    report["timing_ms"]["capture_started_at"]
+    + report["timing_ms"]["hidden_duration"]
+    + report["timing_ms"]["capture_duration"]
+)
 report["interaction"]["orientation_states"] = ["landscape-primary", "portrait-primary"]
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
@@ -1249,8 +1380,7 @@ report["interaction"]["page_show_count"] = 1
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
 expect_rejected "incomplete page lifecycle evidence" $reports
-grep -q 'lifecycle capture must contain exactly two page-hide events' "$tmp/rejected.err"
-grep -q 'lifecycle capture must contain exactly two page-show events' "$tmp/rejected.err"
+grep -q 'lifecycle capture must contain exactly two page-hide and page-show events' "$tmp/rejected.err"
 
 python3 - "$tmp/ipad-safari-lifecycle-current-1.json" <<'PY'
 import json
@@ -1263,10 +1393,15 @@ report["interaction"]["page_hide_count"] = 2
 report["interaction"]["page_show_count"] = 2
 report["timing_ms"]["hidden_duration"] = 59_999
 report["timing_ms"]["hidden_durations"] = [30_000, 29_999]
+report["timing_ms"]["capture_stopped_at"] = (
+    report["timing_ms"]["capture_started_at"]
+    + report["timing_ms"]["hidden_duration"]
+    + report["timing_ms"]["capture_duration"]
+)
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
 expect_rejected "short background intervals" $reports
-grep -q 'fewer than two 30-second background intervals' "$tmp/rejected.err"
+grep -q 'lifecycle capture must contain exactly two 30-second background intervals' "$tmp/rejected.err"
 
 python3 - "$tmp/ipad-safari-lifecycle-current-1.json" <<'PY'
 import json
@@ -1277,6 +1412,11 @@ path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
 report["timing_ms"]["hidden_duration"] = 60_000
 report["timing_ms"]["hidden_durations"] = [30_000, 30_000]
+report["timing_ms"]["capture_stopped_at"] = (
+    report["timing_ms"]["capture_started_at"]
+    + report["timing_ms"]["hidden_duration"]
+    + report["timing_ms"]["capture_duration"]
+)
 report["audio"]["backgroundSuspensions"] = 3
 report["audio"]["explicitResumes"] = 2
 path.write_text(json.dumps(report), encoding="utf-8")
@@ -1296,6 +1436,11 @@ short_report["interaction"]["page_hide_count"] = 2
 short_report["interaction"]["page_show_count"] = 2
 short_report["timing_ms"]["hidden_duration"] = 60_000
 short_report["timing_ms"]["hidden_durations"] = [30_000, 30_000]
+short_report["timing_ms"]["capture_stopped_at"] = (
+    short_report["timing_ms"]["capture_started_at"]
+    + short_report["timing_ms"]["hidden_duration"]
+    + short_report["timing_ms"]["capture_duration"]
+)
 short_report["audio"]["backgroundSuspensions"] = 2
 short_report["audio"]["explicitResumes"] = 2
 short.write_text(json.dumps(short_report), encoding="utf-8")
@@ -1413,6 +1558,8 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 report = json.loads(path.read_text(encoding="utf-8"))
+report["audio"]["gestureStarts"] = 2
+report["audio"]["audiblePlaybackAttempts"] = 1
 report["audio"]["muteChanges"] = 4
 path.write_text(json.dumps(report), encoding="utf-8")
 PY
@@ -1449,6 +1596,11 @@ mute.write_text(json.dumps(mute_report), encoding="utf-8")
 duration = Path(sys.argv[2])
 duration_report = json.loads(duration.read_text(encoding="utf-8"))
 duration_report["timing_ms"]["capture_duration"] = 59_999
+duration_report["timing_ms"]["capture_stopped_at"] = (
+    duration_report["timing_ms"]["capture_started_at"]
+    + duration_report["timing_ms"]["hidden_duration"]
+    + duration_report["timing_ms"]["capture_duration"]
+)
 duration.write_text(json.dumps(duration_report), encoding="utf-8")
 PY
 expect_rejected "short interaction capture" $reports

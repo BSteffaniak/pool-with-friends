@@ -57,6 +57,7 @@ MINIMUM_FPS_FLOOR = 30
 FULL_QUALITY_FPS_THRESHOLD = 55
 MINIMUM_AIM_CAPTURE_MS = 60 * 1_000
 LIFECYCLE_DURATION_MS = 10 * 60 * 1_000
+MAX_CAPTURE_DURATION_MS = 30 * 60 * 1_000
 CAPTURE_WINDOW_DAYS = 30
 REQUIRED_TEST_FIELDS = (
     "platform",
@@ -141,7 +142,7 @@ def load_report(path: Path) -> dict[str, Any]:
     }
     if set(report) != expected_report_keys:
         raise ValueError(f"{path}: report root keys are invalid")
-    if report.get("schema_version") != 11:
+    if report.get("schema_version") != 12:
         raise ValueError(f"{path}: unsupported schema_version")
 
     candidate = report.get("candidate")
@@ -170,8 +171,8 @@ def load_report(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path}: unsupported candidate.bundle_hash_algorithm")
     if candidate["source_hash"] not in candidate["build_id"]:
         raise ValueError(f"{path}: candidate.build_id must include candidate.source_hash")
-    if candidate["wasm_optimization"] not in {"wasm-opt-Oz", "not-applied"}:
-        raise ValueError(f"{path}: invalid candidate.wasm_optimization")
+    if candidate["wasm_optimization"] != "wasm-opt-Oz":
+        raise ValueError(f"{path}: candidate.wasm_optimization must be wasm-opt-Oz")
     if candidate["bevy"] != "0.19.1":
         raise ValueError(f"{path}: unexpected candidate.bevy")
     if candidate["renderer"] != "WebGL2":
@@ -283,12 +284,14 @@ def load_report(path: Path) -> dict[str, Any]:
     if hardware_concurrency is not None and (
         not isinstance(hardware_concurrency, int)
         or isinstance(hardware_concurrency, bool)
-        or hardware_concurrency <= 0
+        or not 1 <= hardware_concurrency <= 1_024
     ):
-        raise ValueError(f"{path}: browser.hardware_concurrency must be null or a positive integer")
+        raise ValueError(f"{path}: browser.hardware_concurrency must be null or an integer from 1 through 1024")
     device_memory = browser["device_memory_gib"]
-    if device_memory is not None and (number(device_memory) is None or device_memory <= 0):
-        raise ValueError(f"{path}: browser.device_memory_gib must be null or positive and finite")
+    if device_memory is not None and (
+        number(device_memory) is None or not 0 < device_memory <= 1_024
+    ):
+        raise ValueError(f"{path}: browser.device_memory_gib must be null or finite from 0 through 1024")
 
     display = report["display"]
     expected_display_keys = {
@@ -314,6 +317,8 @@ def load_report(path: Path) -> dict[str, Any]:
         "client_ready",
         "first_canvas_contact",
         "capture_duration",
+        "capture_started_at",
+        "capture_stopped_at",
         "hidden_duration",
         "hidden_durations",
     }
@@ -340,8 +345,26 @@ def load_report(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path}: timing_ms.hidden_durations do not sum to hidden_duration")
     if timing["capture_duration"] == 0:
         raise ValueError(f"{path}: timing_ms.capture_duration must be greater than zero")
-    if timing["hidden_duration"] > timing["capture_duration"]:
-        raise ValueError(f"{path}: timing_ms.hidden_duration cannot exceed active capture duration")
+    if timing["capture_stopped_at"] <= timing["capture_started_at"]:
+        raise ValueError(f"{path}: timing_ms.capture_stopped_at must follow capture_started_at")
+    if timing["capture_duration"] > MAX_CAPTURE_DURATION_MS:
+        raise ValueError(f"{path}: timing_ms.capture_duration must not exceed 30 minutes")
+    if timing["hidden_duration"] > MAX_CAPTURE_DURATION_MS:
+        raise ValueError(f"{path}: timing_ms.hidden_duration must not exceed 30 minutes")
+    if any(duration > MAX_CAPTURE_DURATION_MS for duration in hidden_durations):
+        raise ValueError(f"{path}: each hidden duration must not exceed 30 minutes")
+    elapsed_capture_time = timing["capture_stopped_at"] - timing["capture_started_at"]
+    if abs(elapsed_capture_time - timing["hidden_duration"] - timing["capture_duration"]) > 1:
+        raise ValueError(f"{path}: capture timestamps, hidden duration, and active duration are inconsistent")
+    minimum_capture_duration = (
+        LIFECYCLE_DURATION_MS if test["cache_state"] == "lifecycle" else MINIMUM_AIM_CAPTURE_MS
+    )
+    if timing["capture_duration"] < minimum_capture_duration:
+        minimum_label = "10 minutes" if test["cache_state"] == "lifecycle" else "1 minute"
+        capture_label = "lifecycle" if test["cache_state"] == "lifecycle" else "interaction"
+        raise ValueError(
+            f"{path}: {capture_label} capture {timing['capture_duration']:.2f}ms is shorter than {minimum_label}"
+        )
 
     performance = report["performance"]
     expected_performance_keys = {
@@ -374,8 +397,21 @@ def load_report(path: Path) -> dict[str, Any]:
         value = number(performance.get(name))
         if value is None or value < 0:
             raise ValueError(f"{path}: performance.{name} must be non-negative and finite")
-    if report["interaction"]["canvas_contacts"] <= 0:
-        raise ValueError(f"{path}: interaction.canvas_contacts must be greater than zero")
+    if (
+        is_mobile_platform(test["platform"])
+        and performance["minimum_one_second_fps"] < MINIMUM_FPS_FLOOR
+    ):
+        raise ValueError(
+            f"{path}: minimum FPS {performance['minimum_one_second_fps']:.2f} is below {MINIMUM_FPS_FLOOR}"
+        )
+    if (
+        is_mobile_platform(test["platform"])
+        and performance["minimum_one_second_fps"] < FULL_QUALITY_FPS_THRESHOLD
+        and test["presentation_tier"] != "reduced"
+    ):
+        raise ValueError(
+            f"{path}: minimum FPS {performance['minimum_one_second_fps']:.2f} requires a measured quality fallback"
+        )
     if performance["minimum_one_second_fps"] > performance["median_one_second_fps"]:
         raise ValueError(f"{path}: minimum FPS cannot exceed median FPS")
     if performance["median_one_second_fps"] > performance["maximum_one_second_fps"]:
@@ -424,6 +460,8 @@ def load_report(path: Path) -> dict[str, Any]:
         value = interaction[name]
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValueError(f"{path}: interaction.{name} must be a non-negative integer")
+    if interaction["canvas_contacts"] <= 0:
+        raise ValueError(f"{path}: interaction.canvas_contacts must be greater than zero")
     initial_orientation = interaction["initial_orientation"]
     final_orientation = interaction["final_orientation"]
     for name, value in (("initial_orientation", initial_orientation), ("final_orientation", final_orientation)):
@@ -455,6 +493,37 @@ def load_report(path: Path) -> dict[str, Any]:
             raise ValueError(f"{path}: interaction.{name} must be boolean")
     if not interaction["capture_started_visible"] or not interaction["capture_stopped_visible"]:
         raise ValueError(f"{path}: capture must start and stop while visible")
+    cache_state = report["test"]["cache_state"]
+    if cache_state == "lifecycle":
+        if interaction["visibility_changes"] != 4:
+            raise ValueError(f"{path}: lifecycle capture must contain exactly four visibility changes")
+        if interaction["page_hide_count"] != 2 or interaction["page_show_count"] != 2:
+            raise ValueError(f"{path}: lifecycle capture must contain exactly two page-hide and page-show events")
+        if len(hidden_durations) != 2 or any(duration < 30_000 for duration in hidden_durations):
+            raise ValueError(f"{path}: lifecycle capture must contain exactly two 30-second background intervals")
+        if interaction["orientation_changes"] != 2:
+            raise ValueError(f"{path}: lifecycle capture must contain exactly two orientation changes")
+        if not isinstance(initial_orientation, str) or not initial_orientation.startswith("landscape"):
+            raise ValueError(f"{path}: lifecycle capture did not start in landscape")
+        if not isinstance(final_orientation, str) or not final_orientation.startswith("landscape"):
+            raise ValueError(f"{path}: lifecycle capture did not stop in landscape")
+        if not (
+            len(orientation_states) == 2
+            and isinstance(orientation_states[0], str)
+            and orientation_states[0].startswith("portrait")
+            and isinstance(orientation_states[1], str)
+            and orientation_states[1].startswith("landscape")
+        ):
+            raise ValueError(f"{path}: exact portrait-to-landscape transition was not observed")
+    elif (
+        interaction["restored_from_page_cache"]
+        or interaction["visibility_changes"] != 0
+        or interaction["orientation_changes"] != 0
+        or interaction["page_hide_count"] != 0
+        or interaction["page_show_count"] != 0
+        or hidden_durations
+    ):
+        raise ValueError(f"{path}: non-lifecycle capture contains lifecycle transitions")
     events = interaction["marked_events"]
     if not isinstance(events, list) or len(events) > 100:
         raise ValueError(f"{path}: interaction.marked_events must be a bounded list")
@@ -537,6 +606,35 @@ def load_report(path: Path) -> dict[str, Any]:
     if not audio["muted"] and audio["muteChanges"] % 2 != 0:
         raise ValueError(f"{path}: audio unmuted state is inconsistent with mute changes")
 
+    cache_state = report["test"]["cache_state"]
+    if not audio["supported"]:
+        raise ValueError(f"{path}: feasibility evidence requires supported audio")
+    if audio["state"] != "running":
+        raise ValueError(f"{path}: audio context was not running when exported")
+    if audio["muted"]:
+        raise ValueError(f"{path}: audio remained muted when exported")
+    if audio["gestureStarts"] != 2:
+        raise ValueError(f"{path}: audio probe must contain exactly two plays")
+    if audio["muteChanges"] != 2:
+        raise ValueError(f"{path}: audio must contain exactly one mute/unmute cycle")
+    if audio["mutedPlaybackAttempts"] != 1:
+        raise ValueError(f"{path}: audio must contain exactly one muted probe")
+    if audio["audiblePlaybackAttempts"] != 1:
+        raise ValueError(f"{path}: audio must contain exactly one audible probe")
+    if cache_state == "lifecycle":
+        if audio["backgroundSuspensions"] != 2:
+            raise ValueError(f"{path}: lifecycle capture must contain exactly two audio suspensions")
+        if audio["explicitResumes"] != 2:
+            raise ValueError(f"{path}: lifecycle capture must contain exactly two explicit audio resumes")
+        if audio["backgroundSuspensions"] != len(hidden_durations):
+            raise ValueError(f"{path}: audio suspensions must match recorded background intervals")
+        if audio["explicitResumes"] != audio["backgroundSuspensions"]:
+            raise ValueError(f"{path}: audio resumes must match background suspensions")
+    elif audio["backgroundSuspensions"] != 0:
+        raise ValueError(f"{path}: non-lifecycle capture must contain zero audio suspensions")
+    elif audio["explicitResumes"] != 0:
+        raise ValueError(f"{path}: non-lifecycle capture must contain zero audio resumes")
+
     checks = report["physical_checks"]
     if set(checks) != REQUIRED_PHYSICAL_CHECKS:
         missing = sorted(REQUIRED_PHYSICAL_CHECKS - set(checks))
@@ -573,8 +671,12 @@ def load_report(path: Path) -> dict[str, Any]:
             raise ValueError(f"{path}: external_observations.{name} must be non-negative and finite")
     if observations["first_visible_table_ms"] < timing["client_ready"]:
         raise ValueError(f"{path}: first visible table cannot precede client readiness")
+    if observations["first_visible_table_ms"] > timing["capture_stopped_at"]:
+        raise ValueError(f"{path}: first visible table cannot occur after capture stop")
     if observations["first_accepted_input_ms"] < timing["first_canvas_contact"]:
         raise ValueError(f"{path}: first accepted input cannot precede first canvas contact")
+    if observations["first_accepted_input_ms"] > timing["capture_stopped_at"]:
+        raise ValueError(f"{path}: first accepted input cannot occur after capture stop")
     if observations["first_accepted_input_ms"] < observations["first_visible_table_ms"]:
         raise ValueError(f"{path}: first accepted input cannot precede the visible table")
     if observations.get("thermal_result") not in ("no-warning", "warning"):
@@ -583,6 +685,27 @@ def load_report(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path}: invalid external_observations.reload_or_eviction_observed")
     if observations["peak_memory_mib"] < observations["steady_memory_mib"]:
         raise ValueError(f"{path}: peak memory cannot be lower than steady memory")
+    if observations["steady_memory_mib"] <= 0 or observations["peak_memory_mib"] <= 0:
+        raise ValueError(f"{path}: memory observations must be greater than zero")
+    visible_budget = (
+        COLD_VISIBLE_BUDGET_MS if test["cache_state"] == "cold" else WARM_VISIBLE_BUDGET_MS
+    )
+    if is_mobile_platform(test["platform"]) and test["cache_state"] != "lifecycle":
+        if observations["first_visible_table_ms"] > visible_budget:
+            raise ValueError(
+                f"{path}: first-visible {observations['first_visible_table_ms']:.2f}ms exceeds {visible_budget}ms"
+            )
+        if observations["first_accepted_input_ms"] > visible_budget:
+            raise ValueError(
+                f"{path}: first accepted input {observations['first_accepted_input_ms']:.2f}ms exceeds {visible_budget}ms"
+            )
+    if observations["thermal_result"] == "warning":
+        raise ValueError(f"{path}: thermal warning or severe throttling")
+    if observations["reload_or_eviction_observed"] == "yes":
+        raise ValueError(f"{path}: reload or eviction observed")
+    failed_checks = sorted(name for name, result in report["physical_checks"].items() if result == "fail")
+    if failed_checks:
+        raise ValueError(f"{path}: failed checks: {', '.join(failed_checks)}")
 
     captured_at = report.get("captured_at")
     if not isinstance(captured_at, str) or not captured_at:
@@ -712,152 +835,6 @@ def is_mobile_platform(platform: str) -> bool:
     """Return whether a platform requires mobile performance acceptance budgets."""
     return platform in REQUIRED_PLATFORMS
 
-
-def acceptance_errors(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> list[str]:
-    """Return objective budget and lifecycle failures in final-gate reports."""
-    errors: list[str] = []
-    for key, reports in groups.items():
-        cache_state = key[12]
-        platform = key[7]
-        presentation_tier = key[14]
-        for report in reports:
-            run = report["test"]["run_number"]
-            observations = report["external_observations"]
-            failed_checks = sorted(
-                name for name, result in report["physical_checks"].items() if result == "fail"
-            )
-            if failed_checks:
-                errors.append(f"{key} run {run}: failed checks: {', '.join(failed_checks)}")
-            if observations["thermal_result"] == "warning":
-                errors.append(f"{key} run {run}: thermal warning or severe throttling")
-            if observations["reload_or_eviction_observed"] == "yes":
-                errors.append(f"{key} run {run}: reload or eviction observed")
-
-            if observations["peak_memory_mib"] < observations["steady_memory_mib"]:
-                errors.append(f"{key} run {run}: peak memory is below steady memory")
-            if observations["steady_memory_mib"] <= 0 or observations["peak_memory_mib"] <= 0:
-                errors.append(f"{key} run {run}: memory observations must be greater than zero")
-
-            visible = number(observations["first_visible_table_ms"])
-            accepted_input = number(observations["first_accepted_input_ms"])
-            visible_budget = COLD_VISIBLE_BUDGET_MS if cache_state == "cold" else WARM_VISIBLE_BUDGET_MS
-            if cache_state == "lifecycle":
-                visible_budget = None
-            if (
-                is_mobile_platform(platform)
-                and visible_budget is not None
-                and visible is not None
-                and visible > visible_budget
-            ):
-                errors.append(f"{key} run {run}: first-visible {visible:.2f}ms exceeds {visible_budget}ms")
-            if (
-                is_mobile_platform(platform)
-                and visible_budget is not None
-                and accepted_input is not None
-                and accepted_input > visible_budget
-            ):
-                errors.append(
-                    f"{key} run {run}: first accepted input {accepted_input:.2f}ms exceeds {visible_budget}ms"
-                )
-
-            duration = metric(report, "timing_ms", "capture_duration")
-            if duration is None:
-                errors.append(f"{key} run {run}: capture duration is unavailable")
-            elif cache_state != "lifecycle" and duration < MINIMUM_AIM_CAPTURE_MS:
-                errors.append(f"{key} run {run}: interaction capture {duration:.2f}ms is shorter than 1 minute")
-
-            minimum_fps = metric(report, "performance", "minimum_one_second_fps")
-            if minimum_fps is None:
-                errors.append(f"{key} run {run}: minimum FPS is unavailable")
-            elif is_mobile_platform(platform) and minimum_fps < MINIMUM_FPS_FLOOR:
-                errors.append(f"{key} run {run}: minimum FPS {minimum_fps:.2f} is below {MINIMUM_FPS_FLOOR}")
-            elif (
-                is_mobile_platform(platform)
-                and minimum_fps < FULL_QUALITY_FPS_THRESHOLD
-                and presentation_tier != "reduced"
-            ):
-                errors.append(
-                    f"{key} run {run}: minimum FPS {minimum_fps:.2f} requires a measured quality fallback"
-                )
-
-            p95_frame = metric(report, "performance", "p95_frame_time_ms")
-            if p95_frame is None:
-                errors.append(f"{key} run {run}: p95 frame time is unavailable")
-
-            hidden_durations = report["timing_ms"]["hidden_durations"]
-            if cache_state != "lifecycle" and report["interaction"]["restored_from_page_cache"]:
-                errors.append(f"{key} run {run}: non-lifecycle capture restored from page cache")
-            if cache_state != "lifecycle" and report["interaction"]["page_hide_count"] > 0:
-                errors.append(f"{key} run {run}: non-lifecycle capture contains page-hide events")
-            if cache_state != "lifecycle" and report["interaction"]["page_show_count"] > 0:
-                errors.append(f"{key} run {run}: non-lifecycle capture contains page-show events")
-            if cache_state != "lifecycle" and report["interaction"]["visibility_changes"] > 0:
-                errors.append(f"{key} run {run}: non-lifecycle capture contains visibility changes")
-            if cache_state != "lifecycle" and report["interaction"]["orientation_changes"] > 0:
-                errors.append(f"{key} run {run}: non-lifecycle capture contains orientation changes")
-            if cache_state != "lifecycle" and hidden_durations:
-                errors.append(f"{key} run {run}: non-lifecycle capture contains background intervals")
-            if cache_state == "lifecycle":
-                if duration is None or duration < LIFECYCLE_DURATION_MS:
-                    actual = "unavailable" if duration is None else f"{duration:.2f}ms"
-                    errors.append(f"{key} run {run}: lifecycle capture {actual} is shorter than 10 minutes")
-
-            audio = report["audio"]
-            if cache_state != "lifecycle" and audio.get("backgroundSuspensions", 0) != 0:
-                errors.append(f"{key} run {run}: non-lifecycle capture must contain zero audio suspensions")
-            if cache_state != "lifecycle" and audio.get("explicitResumes", 0) != 0:
-                errors.append(f"{key} run {run}: non-lifecycle capture must contain zero audio resumes")
-            if audio.get("state") != "running":
-                errors.append(f"{key} run {run}: audio context was not running when exported")
-            if audio.get("muted") is not False:
-                errors.append(f"{key} run {run}: audio remained muted when exported")
-            if audio.get("gestureStarts", 0) != 2:
-                errors.append(f"{key} run {run}: audio probe must contain exactly two plays")
-            if audio.get("muteChanges", 0) != 2:
-                errors.append(f"{key} run {run}: audio must contain exactly one mute/unmute cycle")
-            if audio.get("mutedPlaybackAttempts", 0) != 1:
-                errors.append(f"{key} run {run}: audio must contain exactly one muted probe")
-            if audio.get("audiblePlaybackAttempts", 0) != 1:
-                errors.append(f"{key} run {run}: audio must contain exactly one audible probe")
-            if cache_state == "lifecycle":
-                if audio.get("backgroundSuspensions", 0) != 2:
-                    errors.append(f"{key} run {run}: lifecycle capture must contain exactly two audio suspensions")
-                if audio.get("explicitResumes", 0) != 2:
-                    errors.append(f"{key} run {run}: lifecycle capture must contain exactly two explicit audio resumes")
-                if report["interaction"].get("visibility_changes", 0) != 4:
-                    errors.append(f"{key} run {run}: lifecycle capture must contain exactly four visibility changes")
-                if report["interaction"].get("page_hide_count", 0) != 2:
-                    errors.append(f"{key} run {run}: lifecycle capture must contain exactly two page-hide events")
-                if report["interaction"].get("page_show_count", 0) != 2:
-                    errors.append(f"{key} run {run}: lifecycle capture must contain exactly two page-show events")
-                hidden_durations = report["timing_ms"]["hidden_durations"]
-                if len(hidden_durations) < 2 or sum(duration >= 30_000 for duration in hidden_durations) < 2:
-                    errors.append(f"{key} run {run}: fewer than two 30-second background intervals")
-                if audio.get("backgroundSuspensions", 0) > len(hidden_durations):
-                    errors.append(f"{key} run {run}: audio suspensions exceed recorded background intervals")
-                if audio.get("explicitResumes", 0) > audio.get("backgroundSuspensions", 0):
-                    errors.append(f"{key} run {run}: audio resumes exceed background suspensions")
-                if report["interaction"].get("orientation_changes", 0) < 2:
-                    errors.append(f"{key} run {run}: fewer than two orientation changes")
-                orientation_states = report["interaction"]["orientation_states"]
-                if not (
-                    isinstance(report["interaction"]["initial_orientation"], str)
-                    and report["interaction"]["initial_orientation"].startswith("landscape")
-                ):
-                    errors.append(f"{key} run {run}: lifecycle capture did not start in landscape")
-                if not (
-                    isinstance(report["interaction"]["final_orientation"], str)
-                    and report["interaction"]["final_orientation"].startswith("landscape")
-                ):
-                    errors.append(f"{key} run {run}: lifecycle capture did not stop in landscape")
-                if len(orientation_states) != 2 or not (
-                    isinstance(orientation_states[0], str)
-                    and orientation_states[0].startswith("portrait")
-                    and isinstance(orientation_states[-1], str)
-                    and orientation_states[-1].startswith("landscape")
-                ):
-                    errors.append(f"{key} run {run}: exact portrait-to-landscape transition was not observed")
-    return errors
 
 
 def report_set_hash(groups: dict[tuple[str, ...], list[dict[str, Any]]]) -> str:
@@ -1133,7 +1110,6 @@ def main() -> int:
             presentation_tier = key[14]
             if platform == "desktop" and presentation_tier != "default":
                 errors.append("desktop compatibility matrix contains a non-default presentation tier")
-        errors.extend(acceptance_errors(groups))
 
     if errors:
         for error in errors:

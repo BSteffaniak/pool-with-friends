@@ -39,6 +39,8 @@ const candidateSourceHash = "__PWMTF_SOURCE_HASH__";
 const candidateBundleHash = "__PWMTF_BUNDLE_HASH__";
 const candidateBundleHashAlgorithm = "sha256-length-prefixed-v1";
 const candidateWasmOptimization = "__PWMTF_WASM_OPTIMIZATION__";
+const candidateBevyVersion = "0.19.1";
+const candidateRenderer = "WebGL2";
 const navigationStartedAt = performance.now();
 const detectedBrowserFamily = detectBrowserFamily(navigator.userAgent);
 const detectedPlatform = detectPlatform(navigator.userAgent, navigator.maxTouchPoints);
@@ -59,7 +61,7 @@ const PHYSICAL_CHECKS = [
 ];
 
 const telemetry = {
-  schemaVersion: 11,
+  schemaVersion: 12,
   clientReadyMs: null,
   firstCanvasContactMs: null,
   pointerContacts: 0,
@@ -231,12 +233,35 @@ function captureDuration() {
   return endedAt - telemetry.captureStartedAt - telemetry.hiddenDurationMs - currentHiddenDuration;
 }
 
+function captureTargets(cacheState = cacheStateInput.value) {
+  return cacheState === "lifecycle"
+    ? {
+        visibilityChanges: 4,
+        orientationChanges: 2,
+        pageHides: 2,
+        pageShows: 2,
+        backgroundIntervals: 2,
+        backgroundSuspensions: 2,
+        explicitResumes: 2,
+      }
+    : {
+        visibilityChanges: 0,
+        orientationChanges: 0,
+        pageHides: 0,
+        pageShows: 0,
+        backgroundIntervals: 0,
+        backgroundSuspensions: 0,
+        explicitResumes: 0,
+      };
+}
+
 function refreshMetrics() {
   if (!feasibilityEnabled) {
     return;
   }
 
   const duration = captureDuration();
+  const targets = captureTargets();
   metricsOutput.textContent = [
     `build: ${candidateBuildId}`,
     `tier: ${activePresentationTier}`,
@@ -249,11 +274,12 @@ function refreshMetrics() {
     `JS heap: ${formatBytes(telemetry.currentJsHeapBytes)} (peak ${formatBytes(telemetry.peakJsHeapBytes)})`,
     `canvas contacts/events: ${telemetry.pointerContacts}/${telemetry.events.length}`,
     `visibility/orientation changes: ${telemetry.visibilityChanges}/${telemetry.orientationChanges}`,
-    `lifecycle target: ${telemetry.visibilityChanges}/4 visibility · ${telemetry.orientationChanges}/2 orientation`,
-    `page hide/show: ${telemetry.pageHideCount}/${telemetry.pageShowCount}`,
+    `capture target: ${telemetry.visibilityChanges}/${targets.visibilityChanges} visibility · ${telemetry.orientationChanges}/${targets.orientationChanges} orientation`,
+    `page hide/show: ${telemetry.pageHideCount}/${targets.pageHides} · ${telemetry.pageShowCount}/${targets.pageShows}`,
+    `background intervals: ${telemetry.hiddenDurationsMs.length}/${targets.backgroundIntervals}`,
     `restored from page cache: ${telemetry.restoredFromPageCache ? "yes" : "no"}`,
     `audio: ${telemetry.audio.state}${telemetry.audio.muted ? " (muted)" : ""}`,
-    `audio evidence: ${telemetry.audio.audiblePlaybackAttempts}/1 audible · ${telemetry.audio.mutedPlaybackAttempts}/1 muted · ${telemetry.audio.muteChanges}/2 mute changes · ${telemetry.audio.backgroundSuspensions}/1 suspend · ${telemetry.audio.explicitResumes}/1 resume · ${telemetry.audio.transitionFailures} failures`,
+    `audio evidence: ${telemetry.audio.audiblePlaybackAttempts}/1 audible · ${telemetry.audio.mutedPlaybackAttempts}/1 muted · ${telemetry.audio.muteChanges}/2 mute changes · ${telemetry.audio.backgroundSuspensions}/${targets.backgroundSuspensions} suspend · ${telemetry.audio.explicitResumes}/${targets.explicitResumes} resume · ${telemetry.audio.transitionFailures} failures`,
     `viewport: ${window.innerWidth}×${window.innerHeight} @ ${window.devicePixelRatio.toFixed(2)}x`,
   ].join("\n");
 }
@@ -305,7 +331,11 @@ function frame(timestamp) {
 
 function externalObservations() {
   const numericValue = (input) => {
-    const value = Number.parseFloat(input.value);
+    const text = input.value.trim();
+    if (text === "") {
+      return null;
+    }
+    const value = Number(text);
     return Number.isFinite(value) ? value : null;
   };
   return {
@@ -338,8 +368,22 @@ function requireExternalObservations() {
     showStatus("All external observations must be valid finite values or selected outcomes.");
     return false;
   }
+  if (
+    telemetry.captureStartedAt === null ||
+    telemetry.captureStoppedAt === null ||
+    captureActive
+  ) {
+    showStatus("Stop the capture before validating external observations.");
+    captureButton.focus();
+    return false;
+  }
   if (telemetry.clientReadyMs === null || telemetry.firstCanvasContactMs === null) {
     showStatus("Client readiness and the first canvas contact must be recorded before export.");
+    return false;
+  }
+  const duration = captureDuration();
+  if (duration === null || duration <= 0) {
+    showStatus("Capture duration must be available before validating external observations.");
     return false;
   }
   if (observations.first_visible_table_ms < telemetry.clientReadyMs) {
@@ -347,8 +391,18 @@ function requireExternalObservations() {
     firstVisibleInput.focus();
     return false;
   }
+  if (observations.first_visible_table_ms > telemetry.captureStoppedAt) {
+    showStatus("First visible table must occur before capture stop.");
+    firstVisibleInput.focus();
+    return false;
+  }
   if (observations.first_accepted_input_ms < telemetry.firstCanvasContactMs) {
     showStatus("First accepted input cannot precede the first canvas contact.");
+    firstInputInput.focus();
+    return false;
+  }
+  if (observations.first_accepted_input_ms > telemetry.captureStoppedAt) {
+    showStatus("First accepted input must occur before capture stop.");
     firstInputInput.focus();
     return false;
   }
@@ -365,6 +419,29 @@ function requireExternalObservations() {
   if (observations.peak_memory_mib < observations.steady_memory_mib) {
     showStatus("Peak memory cannot be lower than steady memory.");
     peakMemoryInput.focus();
+    return false;
+  }
+  const visibleBudget = cacheStateInput.value === "cold" ? 8_000 : 3_000;
+  if (platformInput.value !== "desktop" && cacheStateInput.value !== "lifecycle") {
+    if (observations.first_visible_table_ms > visibleBudget) {
+      showStatus(`First visible table exceeds the ${visibleBudget / 1000}-second ${cacheStateInput.value} budget.`);
+      firstVisibleInput.focus();
+      return false;
+    }
+    if (observations.first_accepted_input_ms > visibleBudget) {
+      showStatus(`First accepted input exceeds the ${visibleBudget / 1000}-second ${cacheStateInput.value} budget.`);
+      firstInputInput.focus();
+      return false;
+    }
+  }
+  if (observations.thermal_result === "warning") {
+    showStatus("Thermal warning or severe throttling invalidates this run.");
+    thermalResultInput.focus();
+    return false;
+  }
+  if (observations.reload_or_eviction_observed === "yes") {
+    showStatus("A reload or eviction invalidates this run.");
+    reloadObservedInput.focus();
     return false;
   }
   return true;
@@ -385,6 +462,12 @@ function showStatus(message) {
 
 function requirePhysicalChecks() {
   const results = physicalCheckResults();
+  const failed = PHYSICAL_CHECKS.find(([id]) => results[id] === "fail");
+  if (failed !== undefined) {
+    showStatus(`Failed physical check invalidates this run: ${failed[1]}`);
+    document.querySelector(`input[name="check-${failed[0]}"]:checked`)?.focus();
+    return false;
+  }
   const missing = PHYSICAL_CHECKS.find(([id]) => results[id] === null);
   if (missing === undefined) {
     return true;
@@ -460,6 +543,11 @@ function requireTestMetadata() {
     browserFamilyInput.focus();
     return false;
   }
+  if (!allowedBrowserFamilies(platformInput.value).includes(browserFamilyInput.value)) {
+    showStatus(`Browser ${browserFamilyInput.value} is not supported for ${platformInput.value}.`);
+    browserFamilyInput.focus();
+    return false;
+  }
   const detectedBrowserVersion = detectBrowserVersion(navigator.userAgent, detectedBrowserFamily);
   if (detectedBrowserVersion === null) {
     showStatus("This browser version could not be identified; verify the exact version before capturing.");
@@ -478,6 +566,23 @@ function requireTestMetadata() {
       `Declared browser version ${browserVersionInput.value} does not match detected ${detectedBrowserVersion}.`,
     );
     browserVersionInput.focus();
+    return false;
+  }
+  if (candidateWasmOptimization !== "wasm-opt-Oz") {
+    showStatus("Physical capture requires the wasm-opt-Oz candidate.");
+    return false;
+  }
+  if (
+    !/^[A-Za-z0-9._-]+$/u.test(candidateBuildId) ||
+    candidateBuildId.length > 128 ||
+    !/^[0-9a-f]{64}$/u.test(candidateSourceHash) ||
+    !candidateBuildId.includes(candidateSourceHash) ||
+    !/^[0-9a-f]{64}$/u.test(candidateBundleHash) ||
+    candidateBundleHashAlgorithm !== "sha256-length-prefixed-v1" ||
+    candidateBevyVersion !== "0.19.1" ||
+    candidateRenderer !== "WebGL2"
+  ) {
+    showStatus("Generated candidate identity is invalid; rebuild before capturing.");
     return false;
   }
   return true;
@@ -522,6 +627,11 @@ function startCapture() {
   }
   if (document.hidden) {
     showStatus("Return this page to the foreground before starting a capture.");
+    captureButton.focus();
+    return;
+  }
+  if (telemetry.clientReadyMs === null || shell.dataset.clientState !== "ready") {
+    showStatus("Wait for the client to finish loading before starting a capture.");
     captureButton.focus();
     return;
   }
@@ -609,6 +719,8 @@ function stopCapture() {
 
 function updateCaptureControls() {
   const busy = audioLifecycleBusy();
+  const clientReady = telemetry.clientReadyMs !== null && shell.dataset.clientState === "ready";
+  captureButton.disabled = busy || (!captureActive && !clientReady);
   markEventButton.disabled = !captureActive || busy;
   resetButton.disabled = captureActive || busy;
   downloadButton.disabled =
@@ -825,6 +937,27 @@ function toggleMute() {
   updateAudioControls();
 }
 
+function appendVisibleCaptureEvent(label) {
+  const elapsedMs = captureDuration();
+  const orientation = window.screen.orientation?.type ?? null;
+  if (
+    !captureActive ||
+    elapsedMs === null ||
+    elapsedMs < 0 ||
+    document.visibilityState !== "visible" ||
+    orientation === null
+  ) {
+    return false;
+  }
+  telemetry.events.push({
+    elapsed_ms: elapsedMs,
+    label: label.slice(0, 120),
+    visibility: "visible",
+    orientation,
+  });
+  return true;
+}
+
 function markEvent() {
   if (!captureActive || audioLifecycleBusy()) {
     showStatus(
@@ -846,24 +979,16 @@ function markEvent() {
     eventLabelInput.focus();
     return;
   }
-  const elapsedMs = captureDuration();
-  const orientation = window.screen.orientation?.type ?? null;
-  if (elapsedMs === null || elapsedMs < 0 || document.visibilityState !== "visible" || orientation === null) {
+  if (!appendVisibleCaptureEvent(label)) {
     showStatus("Event markers require visible capture timing and a known orientation.");
     return;
   }
-  telemetry.events.push({
-    elapsed_ms: elapsedMs,
-    label: label.slice(0, 120),
-    visibility: document.visibilityState,
-    orientation,
-  });
   eventLabelInput.value = "";
   showStatus(`Marked event: ${label.slice(0, 120)}`);
   refreshMetrics();
 }
 
-function report() {
+function report(test = testMetadata()) {
   sampleMemory();
   return {
     schema_version: telemetry.schemaVersion,
@@ -874,10 +999,10 @@ function report() {
       bundle_hash: candidateBundleHash,
       bundle_hash_algorithm: candidateBundleHashAlgorithm,
       wasm_optimization: candidateWasmOptimization,
-      bevy: "0.19.1",
-      renderer: "WebGL2",
+      bevy: candidateBevyVersion,
+      renderer: candidateRenderer,
     },
-    test: testMetadata(),
+    test,
     physical_checks: physicalCheckResults(),
     external_observations: externalObservations(),
     browser: {
@@ -903,6 +1028,8 @@ function report() {
       client_ready: telemetry.clientReadyMs,
       first_canvas_contact: telemetry.firstCanvasContactMs,
       capture_duration: captureDuration(),
+      capture_started_at: telemetry.captureStartedAt,
+      capture_stopped_at: telemetry.captureStoppedAt,
       hidden_duration: telemetry.hiddenDurationMs,
       hidden_durations: telemetry.hiddenDurationsMs,
     },
@@ -951,8 +1078,20 @@ function requireCaptureEvidence() {
     return false;
   }
   const duration = captureDuration();
-  if (telemetry.frameCount <= 0 || telemetry.fpsSamples.length === 0 || telemetry.frameGapSamplesMs.length === 0) {
-    showStatus("Capture must include frame-rate samples before export.");
+  if (
+    telemetry.frameCount <= 0 ||
+    telemetry.fpsSamples.length === 0 ||
+    telemetry.frameGapSamplesMs.length === 0 ||
+    telemetry.minimumFps === null ||
+    telemetry.maximumFps === null ||
+    !Number.isFinite(telemetry.minimumFps) ||
+    !Number.isFinite(telemetry.maximumFps) ||
+    telemetry.minimumFps < 0 ||
+    telemetry.maximumFps < telemetry.minimumFps ||
+    telemetry.frameGapSamplesMs.some((frameGap) => !Number.isFinite(frameGap) || frameGap < 0) ||
+    telemetry.fpsSamples.some((fps) => !Number.isFinite(fps) || fps < 0)
+  ) {
+    showStatus("Capture must include internally consistent finite frame-rate samples before export.");
     captureButton.focus();
     return false;
   }
@@ -961,8 +1100,39 @@ function requireCaptureEvidence() {
     canvas.focus({ preventScroll: true });
     return false;
   }
+  if (platformInput.value !== "desktop") {
+    if (telemetry.minimumFps < 30) {
+      showStatus("Minimum frame rate is below the 30 FPS mobile floor; this run fails.");
+      return false;
+    }
+    if (telemetry.minimumFps < 55 && presentationTierInput.value !== "reduced") {
+      showStatus("Minimum frame rate is below 55 FPS; repeat this run with the reduced presentation tier.");
+      return false;
+    }
+  }
   if (duration === null || duration <= 0) {
     showStatus("Capture duration must be greater than zero.");
+    return false;
+  }
+  if (duration > 30 * 60 * 1000) {
+    showStatus("Capture duration cannot exceed 30 active foreground minutes; restart this run.");
+    return false;
+  }
+  if (telemetry.hiddenDurationMs > 30 * 60 * 1000) {
+    showStatus("Total hidden duration cannot exceed 30 minutes; restart this run.");
+    return false;
+  }
+  if (telemetry.hiddenDurationsMs.some((hiddenDuration) => hiddenDuration > 30 * 60 * 1000)) {
+    showStatus("A hidden interval cannot exceed 30 minutes; restart this run.");
+    return false;
+  }
+  if (Math.abs(telemetry.hiddenDurationsMs.reduce((total, value) => total + value, 0) - telemetry.hiddenDurationMs) > 1) {
+    showStatus("Hidden interval timing is inconsistent; restart this run.");
+    return false;
+  }
+  const elapsedCaptureTime = telemetry.captureStoppedAt - telemetry.captureStartedAt;
+  if (Math.abs(elapsedCaptureTime - telemetry.hiddenDurationMs - duration) > 1) {
+    showStatus("Capture timestamps and durations are inconsistent; restart this run.");
     return false;
   }
   const minimumDuration = cacheStateInput.value === "lifecycle" ? 10 * 60 * 1000 : 60 * 1000;
@@ -1060,6 +1230,7 @@ function requireCaptureEvidence() {
 }
 
 function clearCaptureEvidence() {
+  captureActive = false;
   telemetry.captureStartedAt = null;
   telemetry.captureStoppedAt = null;
   telemetry.hiddenStartedAt = null;
@@ -1072,7 +1243,26 @@ function clearCaptureEvidence() {
   telemetry.frameGapSamplesMs = [];
   telemetry.maximumFrameGapMs = 0;
   telemetry.currentFps = null;
+  telemetry.currentJsHeapBytes = null;
+  telemetry.peakJsHeapBytes = null;
   telemetry.pointerContacts = 0;
+  telemetry.visibilityChanges = 0;
+  telemetry.orientationChanges = 0;
+  telemetry.orientationStates = [];
+  telemetry.initialOrientation = null;
+  telemetry.finalOrientation = null;
+  telemetry.pageHideCount = 0;
+  telemetry.pageShowCount = 0;
+  telemetry.restoredFromPageCache = false;
+  telemetry.events = [];
+  telemetry.audio.gestureStarts = 0;
+  telemetry.audio.backgroundSuspensions = 0;
+  telemetry.audio.explicitResumes = 0;
+  telemetry.audio.muteChanges = 0;
+  telemetry.audio.mutedPlaybackAttempts = 0;
+  telemetry.audio.audiblePlaybackAttempts = 0;
+  telemetry.audio.transitionFailures = 0;
+  telemetry.audio.muted = false;
   captureButton.textContent = "Start capture";
   updateCaptureControls();
 }
@@ -1080,11 +1270,11 @@ function clearCaptureEvidence() {
 function feasibilityFilename(test, capturedAt) {
   const platform = test.platform || "unknown-device";
   const browser = test.browser_family || "unknown-browser";
-  const version = (test.browser_version || "unknown-version").replaceAll(".", "_");
+  const browserVersion = (test.browser_version || "unknown-version").replaceAll(".", "_");
   const build = candidateBuildId.slice(0, 20);
   const bundle = candidateBundleHash.slice(0, 20);
   const run = test.run_number === null ? "unknown-run" : `run-${test.run_number}`;
-  return `pwmtf-feasibility-${build}-${bundle}-${platform}-${browser}-${version}-${test.cache_state || "unknown-cache"}-${test.minimum_version_run === "yes" ? "minimum" : "current"}-${test.presentation_tier || "unknown-tier"}-${run}-${capturedAt.replaceAll(":", "-")}.json`;
+  return `pwmtf-feasibility-${build}-${bundle}-${platform}-${browser}-${browserVersion}-${test.cache_state || "unknown-cache"}-${test.minimum_version_run === "yes" ? "minimum" : "current"}-${test.presentation_tier || "unknown-tier"}-${run}-${capturedAt.replaceAll(":", "-")}.json`;
 }
 
 function downloadReport() {
@@ -1092,21 +1282,44 @@ function downloadReport() {
   if (
     !requireTestMetadata() ||
     !requirePhysicalChecks() ||
-    !requireExternalObservations() ||
     !requireStoppedCapture() ||
+    !requireExternalObservations() ||
     !requireCaptureEvidence()
   ) {
     return;
   }
-  const capturedAt = new Date().toISOString();
-  const contents = JSON.stringify({ ...report(), captured_at: capturedAt }, null, 2);
-  const url = URL.createObjectURL(new Blob([contents], { type: "application/json" }));
-  const link = document.createElement("a");
-  link.href = url;
   const test = testMetadata();
-  link.download = feasibilityFilename(test, capturedAt);
-  link.click();
-  URL.revokeObjectURL(url);
+  const capturedAt = new Date().toISOString();
+  let contents;
+  try {
+    contents = JSON.stringify({ ...report(test), captured_at: capturedAt }, null, 2);
+  } catch (error) {
+    showStatus(`Report serialization failed: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  let url;
+  try {
+    url = URL.createObjectURL(new Blob([contents], { type: "application/json" }));
+  } catch (error) {
+    showStatus(`Report preparation failed: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  let link;
+  try {
+    link = document.createElement("a");
+    link.href = url;
+    link.download = feasibilityFilename(test, capturedAt);
+    link.click();
+  } catch (error) {
+    showStatus(`Report download failed: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  } finally {
+    try {
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("PWMTF report URL cleanup failed", error);
+    }
+  }
   showStatus(`Downloaded ${link.download}`);
   setCaptureMetadataLocked(false);
   clearCaptureEvidence();
@@ -1122,6 +1335,8 @@ function resetReportForm() {
   if (rejectForAudioLifecycle("resetting the report form")) {
     return;
   }
+  setCaptureMetadataLocked(false);
+  clearCaptureEvidence();
   for (const input of [
     platformInput,
     hardwareModelInput,
@@ -1190,6 +1405,7 @@ function toggleTools() {
 
 reload.addEventListener("click", () => window.location.reload());
 platformInput.addEventListener("change", updateBrowserFamilyOptions);
+cacheStateInput.addEventListener("change", refreshMetrics);
 captureButton.addEventListener("click", () => (captureActive ? stopCapture() : startCapture()));
 audioButton.addEventListener("click", () => void playAudioProbe());
 muteButton.addEventListener("click", toggleMute);
@@ -1223,12 +1439,7 @@ window.addEventListener("pageshow", (event) => {
   }
   if (captureActive && event.persisted) {
     telemetry.restoredFromPageCache = true;
-    telemetry.events.push({
-      elapsed_ms: captureDuration(),
-      label: "restored from page cache",
-      visibility: document.visibilityState,
-      orientation: window.screen.orientation?.type ?? null,
-    });
+    appendVisibleCaptureEvent("restored from page cache");
   }
   refreshMetrics();
 });
