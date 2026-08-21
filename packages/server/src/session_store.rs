@@ -1,6 +1,6 @@
 //! Switchy query adapters for hash-only sessions.
 
-use crate::{AccountId, Session, SessionTokenHash};
+use crate::{AccountId, Session, SessionToken, SessionTokenHash, TokenError};
 use switchy_database::{Database, query::FilterableQuery as _};
 use thiserror::Error;
 
@@ -23,6 +23,46 @@ pub async fn insert_session(
         .execute(db)
         .await?;
     Ok(())
+}
+
+/// Generates and inserts a hash-only session, returning its raw token exactly
+/// once to the authenticated transport boundary.
+///
+/// # Errors
+///
+/// Returns [`SessionStoreError`] when secure generation or persistence fails.
+pub async fn create_session(
+    db: &dyn Database,
+    session: Session,
+) -> Result<SessionToken, SessionStoreError> {
+    let token = SessionToken::generate()?;
+    insert_session(db, token.hash(), session).await?;
+    Ok(token)
+}
+
+/// Resolves an unexpired raw session token through its hash.
+///
+/// # Errors
+///
+/// Returns [`SessionStoreError`] for malformed tokens, stored values, or
+/// database failures.
+pub async fn resolve_token(
+    db: &dyn Database,
+    token: &str,
+    now: u64,
+) -> Result<Option<AccountId>, SessionStoreError> {
+    let token = SessionToken::parse(token)?;
+    resolve_session(db, token.hash(), now).await
+}
+
+/// Revokes a raw session token through its hash.
+///
+/// # Errors
+///
+/// Returns [`SessionStoreError`] for malformed tokens or database failures.
+pub async fn revoke_token(db: &dyn Database, token: &str) -> Result<(), SessionStoreError> {
+    let token = SessionToken::parse(token)?;
+    revoke_session(db, token.hash()).await
 }
 
 /// Resolves an unexpired session hash from Switchy storage.
@@ -81,6 +121,9 @@ pub enum SessionStoreError {
     /// Switchy query failed.
     #[error(transparent)]
     Database(#[from] switchy_database::DatabaseError),
+    /// Token generation or canonical parsing failed.
+    #[error(transparent)]
+    Token(#[from] TokenError),
     /// Numeric value cannot be represented by the portable schema.
     #[error("session value exceeds portable schema bounds")]
     Overflow,
@@ -107,6 +150,45 @@ mod tests {
     use futures_lite::future::block_on;
 
     use super::*;
+
+    #[test]
+    fn generated_session_persists_only_hash_and_resolves_raw_token() {
+        block_on(async {
+            let db = switchy_database_connection::builder()
+                .turso()
+                .with_in_memory()
+                .build()
+                .await
+                .expect("in-memory Turso opens");
+            crate::migrate(&*db).await.expect("schema migrates");
+            let token = create_session(
+                &*db,
+                Session {
+                    account: AccountId::new(9),
+                    expires_at: 100,
+                    last_used_at: 0,
+                },
+            )
+            .await
+            .unwrap();
+            let stored = db
+                .select("sessions")
+                .execute(&*db)
+                .await
+                .unwrap()
+                .remove(0)
+                .get("session_hash")
+                .and_then(|value| value.as_str().map(ToOwned::to_owned))
+                .unwrap();
+            assert_ne!(stored, token.expose());
+            assert_eq!(
+                resolve_token(&*db, token.expose(), 50).await.unwrap(),
+                Some(AccountId::new(9))
+            );
+            revoke_token(&*db, token.expose()).await.unwrap();
+            assert_eq!(resolve_token(&*db, token.expose(), 50).await.unwrap(), None);
+        });
+    }
 
     #[test]
     fn switchy_session_round_trip_and_revocation() {

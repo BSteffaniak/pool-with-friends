@@ -2,6 +2,13 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
 #![allow(clippy::multiple_crate_versions)]
 
+#[cfg(target_arch = "wasm32")]
+pub mod browser_transport;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::wasm_bindgen;
+pub mod prediction;
+pub mod transport;
+
 use bevy::{
     camera::{OrthographicProjection, Projection, ScalingMode},
     color::palettes::css::{BLACK, WHITE},
@@ -16,9 +23,21 @@ const CUSHION: f32 = 34.0;
 const BALL_RADIUS: f32 = 13.0;
 const POWER_BAR_HEIGHT: f32 = 300.0;
 const POWER_ZONE_START: f32 = 0.82;
+const SPIN_ZONE_CENTER: Vec2 = Vec2::new(105.0, 105.0);
+const SPIN_ZONE_RADIUS: f32 = 58.0;
+const POCKET_SELECTION_RADIUS: f32 = 44.0;
+#[cfg(not(target_arch = "wasm32"))]
+const _: (f32, f32, f32) = (
+    SPIN_ZONE_CENTER.x,
+    SPIN_ZONE_RADIUS,
+    POCKET_SELECTION_RADIUS,
+);
 const MIN_POWER: f32 = 0.05;
 const DEFAULT_POWER: f32 = 0.55;
 const MINIMUM_VIEWPORT_WIDTH: f32 = 1.0;
+
+#[derive(Component)]
+struct CanonicalBall(u8);
 
 #[derive(Component)]
 struct Cue;
@@ -32,6 +51,13 @@ struct PowerFill;
 #[derive(Component)]
 struct OrientationNotice;
 
+#[derive(Resource, Default)]
+struct CanonicalPresentation {
+    checksum: Option<u64>,
+    target: std::collections::BTreeMap<u8, Vec2>,
+    pocketed: std::collections::BTreeSet<u8>,
+}
+
 #[derive(Resource)]
 struct PresentationTier(&'static str);
 
@@ -39,6 +65,14 @@ struct PresentationTier(&'static str);
 struct PrototypeInput {
     aim_angle: f32,
     power: f32,
+    #[cfg(target_arch = "wasm32")]
+    spin: Vec2,
+    #[cfg(target_arch = "wasm32")]
+    called_pocket: Option<pwmtf_game_domain::PocketId>,
+    #[cfg(target_arch = "wasm32")]
+    placing_cue_ball: bool,
+    #[cfg(target_arch = "wasm32")]
+    placement_sent_during_contact: bool,
     active_touch: Option<u64>,
     touch_rearm_blocked: bool,
 }
@@ -59,6 +93,14 @@ impl Default for PrototypeInput {
         Self {
             aim_angle: 0.25,
             power: DEFAULT_POWER,
+            #[cfg(target_arch = "wasm32")]
+            spin: Vec2::ZERO,
+            #[cfg(target_arch = "wasm32")]
+            called_pocket: None,
+            #[cfg(target_arch = "wasm32")]
+            placing_cue_ball: false,
+            #[cfg(target_arch = "wasm32")]
+            placement_sent_during_contact: false,
             active_touch: None,
             touch_rearm_blocked: false,
         }
@@ -84,12 +126,121 @@ fn presentation_tier() -> &'static str {
     "default"
 }
 
+#[cfg(target_arch = "wasm32")]
+fn browser_match_requested() -> bool {
+    web_sys::window()
+        .and_then(|window| window.location().search().ok())
+        .is_some_and(|search| {
+            search
+                .trim_start_matches('?')
+                .split('&')
+                .filter_map(|pair| pair.split_once('='))
+                .any(|(key, value)| key == "match" && !value.is_empty())
+        })
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Connects the browser to an authorized same-origin match subscription.
+///
+/// # Errors
+///
+/// Returns a JavaScript exception when socket construction fails.
+pub fn connect_match_socket(url: &str) -> Result<(), wasm_bindgen::JsValue> {
+    browser_transport::connect(url)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn disconnect_match_socket() {
+    browser_transport::disconnect();
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Returns whether the match socket completed negotiation and initialization.
+#[must_use]
+pub fn match_socket_ready() -> bool {
+    browser_transport::is_ready()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Predicts and sends a quantized cue-ball placement.
+///
+/// # Errors
+///
+/// Returns a JavaScript exception unless the socket is ready, prediction is
+/// valid, secure identifier generation succeeds, and transmission succeeds.
+pub fn send_cue_ball_placement(x_micros: i64, y_micros: i64) -> Result<(), wasm_bindgen::JsValue> {
+    browser_transport::predict_and_send_cue_ball_placement(
+        random_command_id()?,
+        pwmtf_game_domain::Vector::from_micros(x_micros, y_micros),
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Predicts and sends a bounded canonical shot.
+///
+/// # Errors
+///
+/// Returns a JavaScript exception for invalid bounded input, unavailable socket
+/// state, rejected local prediction, identifier generation, or transmission.
+pub fn send_shot_command(
+    aim_steps: u16,
+    power_units: u16,
+    spin_side: i16,
+    spin_vertical: i16,
+    called_pocket: u8,
+) -> Result<(), wasm_bindgen::JsValue> {
+    let aim = pwmtf_game_domain::Aim::new(aim_steps)
+        .map_err(|_| wasm_bindgen::JsValue::from_str("invalid aim"))?;
+    let power = pwmtf_game_domain::ShotPower::new(power_units)
+        .map_err(|_| wasm_bindgen::JsValue::from_str("invalid power"))?;
+    let spin = pwmtf_game_domain::Spin::new(spin_side, spin_vertical)
+        .map_err(|_| wasm_bindgen::JsValue::from_str("invalid spin"))?;
+    let called_pocket = decode_called_pocket(called_pocket)?;
+    browser_transport::predict_and_send_shot(
+        random_command_id()?,
+        pwmtf_game_domain::VersionedShotCommand::new(aim, power, spin),
+        called_pocket,
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn decode_called_pocket(
+    value: u8,
+) -> Result<Option<pwmtf_game_domain::PocketId>, wasm_bindgen::JsValue> {
+    Ok(match value {
+        0 => None,
+        1 => Some(pwmtf_game_domain::PocketId::TopLeft),
+        2 => Some(pwmtf_game_domain::PocketId::TopCenter),
+        3 => Some(pwmtf_game_domain::PocketId::TopRight),
+        4 => Some(pwmtf_game_domain::PocketId::BottomLeft),
+        5 => Some(pwmtf_game_domain::PocketId::BottomCenter),
+        6 => Some(pwmtf_game_domain::PocketId::BottomRight),
+        _ => return Err(wasm_bindgen::JsValue::from_str("invalid called pocket")),
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn random_command_id() -> Result<pwmtf_protocol::CommandId, wasm_bindgen::JsValue> {
+    let crypto = web_sys::window()
+        .ok_or_else(|| wasm_bindgen::JsValue::from_str("window is unavailable"))?
+        .crypto()?;
+    let mut bytes = [0_u8; 16];
+    crypto.get_random_values_with_u8_array(&mut bytes)?;
+    Ok(pwmtf_protocol::CommandId::new(bytes))
+}
+
 fn main() {
     let presentation_tier = presentation_tier();
     App::new()
         .insert_resource(ClearColor(Color::srgb(0.025, 0.075, 0.055)))
         .insert_resource(PresentationTier(presentation_tier))
         .init_resource::<PrototypeInput>()
+        .init_resource::<CanonicalPresentation>()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: format!("Pool with More Than Friends · {presentation_tier} tier"),
@@ -112,6 +263,9 @@ fn main() {
                 rearm_input_after_valid_landscape,
                 update_input,
                 update_aim,
+                #[cfg(target_arch = "wasm32")]
+                synchronize_canonical_presentation,
+                interpolate_canonical_balls,
             )
                 .chain(),
         )
@@ -119,7 +273,25 @@ fn main() {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn setup(mut commands: Commands, presentation_tier: Res<PresentationTier>) {
+fn setup(
+    mut commands: Commands,
+    presentation_tier: Res<PresentationTier>,
+    mut presentation: ResMut<CanonicalPresentation>,
+) {
+    let initial = pwmtf_game_domain::MatchState::new(
+        pwmtf_game_domain::RulesProfile::standard(),
+        pwmtf_game_domain::PhysicsProfile::standard(),
+        pwmtf_game_domain::TableGeometry::standard(),
+        pwmtf_game_domain::RackSeed::new(42),
+        pwmtf_game_domain::Player::One,
+    )
+    .expect("built-in canonical match configuration is valid");
+    #[cfg(target_arch = "wasm32")]
+    if !browser_match_requested() {
+        presentation.project(&initial);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    presentation.project(&initial);
     commands.spawn((
         Camera2d,
         Projection::Orthographic(OrthographicProjection {
@@ -159,6 +331,7 @@ fn setup(mut commands: Commands, presentation_tier: Res<PresentationTier>) {
     commands.spawn((
         Sprite::from_color(WHITE, Vec2::splat(BALL_RADIUS * 2.0)),
         Transform::from_xyz(-330.0, 0.0, 4.0),
+        CanonicalBall(0),
     ));
     commands.spawn((
         Sprite::from_color(Color::srgba(0.95, 0.95, 0.85, 0.68), Vec2::new(370.0, 3.0)),
@@ -240,6 +413,76 @@ fn spawn_rectangle(commands: &mut Commands, size: Vec2, color: Color, translatio
     ));
 }
 
+#[allow(clippy::cast_precision_loss)]
+fn canonical_to_world(position: pwmtf_game_domain::Vector) -> Vec2 {
+    let geometry = pwmtf_game_domain::TableGeometry::standard();
+    Vec2::new(
+        (position.x.micros() as f32 / geometry.half_width().micros() as f32)
+            .mul_add(TABLE_SIZE.x / 2.0, TABLE_CENTER_X),
+        position.y.micros() as f32 / geometry.half_height().micros() as f32 * (TABLE_SIZE.y / 2.0),
+    )
+}
+
+impl CanonicalPresentation {
+    fn project(&mut self, state: &pwmtf_game_domain::MatchState) {
+        self.checksum = Some(state.checksum());
+        self.target.clear();
+        self.pocketed.clear();
+        for ball in state.table().balls() {
+            if ball.pocketed {
+                self.pocketed.insert(ball.id.number());
+            } else {
+                self.target
+                    .insert(ball.id.number(), canonical_to_world(ball.position));
+            }
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[cfg(target_arch = "wasm32")]
+fn synchronize_canonical_presentation(mut presentation: ResMut<CanonicalPresentation>) {
+    let Some(checksum) = browser_transport::predicted_checksum() else {
+        return;
+    };
+    if presentation.checksum == Some(checksum) {
+        return;
+    }
+    presentation.checksum = Some(checksum);
+    presentation.target.clear();
+    presentation.pocketed.clear();
+    for number in 0_u8..=15 {
+        let Some((position, pocketed)) = browser_transport::predicted_ball(number) else {
+            continue;
+        };
+        if pocketed {
+            presentation.pocketed.insert(number);
+        } else {
+            presentation
+                .target
+                .insert(number, canonical_to_world(position));
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn interpolate_canonical_balls(
+    time: Res<Time>,
+    presentation: Res<CanonicalPresentation>,
+    mut balls: Query<(&CanonicalBall, &mut Transform, &mut Visibility)>,
+) {
+    let blend = (time.delta_secs() * 18.0).clamp(0.0, 1.0);
+    for (ball, mut transform, mut visibility) in &mut balls {
+        if presentation.pocketed.contains(&ball.0) {
+            *visibility = Visibility::Hidden;
+        } else if let Some(target) = presentation.target.get(&ball.0) {
+            *visibility = Visibility::Inherited;
+            let current = transform.translation.truncate();
+            transform.translation = current.lerp(*target, blend).extend(transform.translation.z);
+        }
+    }
+}
+
 fn pocket_positions() -> [Vec2; 6] {
     let half = TABLE_SIZE / 2.0;
     [
@@ -281,6 +524,7 @@ fn spawn_rack(commands: &mut Commands) {
             commands.spawn((
                 Sprite::from_color(COLORS[index], Vec2::splat(BALL_RADIUS * 2.0)),
                 Transform::from_xyz(x, y, 4.0),
+                CanonicalBall(u8::try_from(index + 1).expect("rack has fifteen balls")),
             ));
             index += 1;
         }
@@ -312,7 +556,15 @@ fn input_position(
     mouse_is_pressed.then(|| window.cursor_position()).flatten()
 }
 
-fn update_from_pointer(input: &mut PrototypeInput, cursor: Vec2, window_size: Vec2) {
+#[allow(clippy::needless_pass_by_ref_mut)]
+fn update_from_pointer(
+    input: &mut PrototypeInput,
+    cursor: Vec2,
+    window_size: Vec2,
+    placement_sent_during_contact: &mut bool,
+) {
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = placement_sent_during_contact;
     if window_size.min_element() <= 0.0 {
         return;
     }
@@ -320,11 +572,95 @@ fn update_from_pointer(input: &mut PrototypeInput, cursor: Vec2, window_size: Ve
     if cursor.x > window_size.x * POWER_ZONE_START {
         input.power = (1.0 - cursor.y / window_size.y).clamp(MIN_POWER, 1.0);
     } else {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if input.placing_cue_ball
+                && let Some(position) = screen_to_canonical(cursor, window_size)
+            {
+                if send_cue_ball_placement(position.x.micros(), position.y.micros()).is_ok() {
+                    *placement_sent_during_contact = true;
+                }
+                return;
+            }
+            let spin_offset = (cursor - SPIN_ZONE_CENTER) / SPIN_ZONE_RADIUS;
+            if spin_offset.length_squared() <= 1.0 {
+                input.spin = Vec2::new(spin_offset.x, -spin_offset.y);
+                return;
+            }
+            if let Some(pocket) = selected_pocket(cursor, window_size) {
+                input.called_pocket = Some(pocket);
+                return;
+            }
+        }
         let centered = cursor - window_size / 2.0;
         if centered.length_squared() > 16.0 {
             input.aim_angle = (-centered.y).atan2(centered.x);
         }
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn screen_to_canonical(cursor: Vec2, window_size: Vec2) -> Option<pwmtf_game_domain::Vector> {
+    let scale = (window_size / DESIGN_SIZE).min_element();
+    if scale <= 0.0 {
+        return None;
+    }
+    let offset = (window_size - DESIGN_SIZE * scale) / 2.0;
+    let design = (cursor - offset) / scale;
+    let table_left = TABLE_CENTER_X + DESIGN_SIZE.x / 2.0 - TABLE_SIZE.x / 2.0;
+    let table_top = DESIGN_SIZE.y / 2.0 - TABLE_SIZE.y / 2.0;
+    if design.x < table_left
+        || design.x > table_left + TABLE_SIZE.x
+        || design.y < table_top
+        || design.y > table_top + TABLE_SIZE.y
+    {
+        return None;
+    }
+    let normalized_x = ((design.x - table_left) / TABLE_SIZE.x).mul_add(2.0, -1.0);
+    let normalized_y = (1.0 - (design.y - table_top) / TABLE_SIZE.y).mul_add(2.0, -1.0);
+    let geometry = pwmtf_game_domain::TableGeometry::standard();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    let x = (normalized_x * geometry.half_width().micros() as f32).round() as i64;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    let y = (normalized_y * geometry.half_height().micros() as f32).round() as i64;
+    Some(pwmtf_game_domain::Vector::from_micros(x, y))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn selected_pocket(cursor: Vec2, window_size: Vec2) -> Option<pwmtf_game_domain::PocketId> {
+    let scale = (window_size / DESIGN_SIZE).min_element();
+    let offset = (window_size - DESIGN_SIZE * scale) / 2.0;
+    let design_cursor = (cursor - offset) / scale;
+    let screen_pockets = [
+        (
+            pwmtf_game_domain::PocketId::TopLeft,
+            Vec2::new(145.0, 600.0),
+        ),
+        (
+            pwmtf_game_domain::PocketId::TopCenter,
+            Vec2::new(625.0, 600.0),
+        ),
+        (
+            pwmtf_game_domain::PocketId::TopRight,
+            Vec2::new(1_105.0, 600.0),
+        ),
+        (
+            pwmtf_game_domain::PocketId::BottomLeft,
+            Vec2::new(145.0, 120.0),
+        ),
+        (
+            pwmtf_game_domain::PocketId::BottomCenter,
+            Vec2::new(625.0, 120.0),
+        ),
+        (
+            pwmtf_game_domain::PocketId::BottomRight,
+            Vec2::new(1_105.0, 120.0),
+        ),
+    ];
+    screen_pockets
+        .into_iter()
+        .find(|(_, position)| design_cursor.distance(*position) <= POCKET_SELECTION_RADIUS)
+        .map(|(pocket, _)| pocket)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -343,9 +679,21 @@ fn update_input(
     mouse: Res<ButtonInput<MouseButton>>,
     touches: Res<Touches>,
     mut input: ResMut<PrototypeInput>,
+    mut was_pressed: Local<bool>,
 ) {
     let mouse_is_pressed = mouse.pressed(MouseButton::Left);
-    if !mouse_is_pressed && touches.iter().next().is_none() {
+    let any_pressed = mouse_is_pressed || touches.iter().next().is_some();
+    if *was_pressed && !any_pressed {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if !input.placement_sent_during_contact {
+                let _ = release_shot(&input);
+            }
+            input.placement_sent_during_contact = false;
+        }
+    }
+    *was_pressed = any_pressed;
+    if !any_pressed {
         input.active_touch = None;
         return;
     }
@@ -353,11 +701,43 @@ fn update_input(
     let Some(cursor) = input_position(&window, mouse_is_pressed, &touches, &mut input) else {
         return;
     };
+    let mut placement_sent_during_contact = false;
     update_from_pointer(
         &mut input,
         cursor,
         Vec2::new(window.width(), window.height()),
+        &mut placement_sent_during_contact,
     );
+    #[cfg(target_arch = "wasm32")]
+    {
+        input.placement_sent_during_contact |= placement_sent_during_contact;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = placement_sent_during_contact;
+}
+
+#[cfg(target_arch = "wasm32")]
+fn release_shot(input: &PrototypeInput) -> Result<(), wasm_bindgen::JsValue> {
+    let turns = input.aim_angle.rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let aim = (turns * f32::from(pwmtf_game_domain::Aim::STEPS_PER_TURN)).round() as u16
+        % pwmtf_game_domain::Aim::STEPS_PER_TURN;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let power =
+        (input.power.clamp(0.0, 1.0) * f32::from(pwmtf_game_domain::ShotPower::MAX)).round() as u16;
+    #[allow(clippy::cast_possible_truncation)]
+    let spin_side = (input.spin.x.clamp(-1.0, 1.0) * 10_000.0).round() as i16;
+    #[allow(clippy::cast_possible_truncation)]
+    let spin_vertical = (input.spin.y.clamp(-1.0, 1.0) * 10_000.0).round() as i16;
+    let called_pocket = input.called_pocket.map_or(0, |pocket| match pocket {
+        pwmtf_game_domain::PocketId::TopLeft => 1,
+        pwmtf_game_domain::PocketId::TopCenter => 2,
+        pwmtf_game_domain::PocketId::TopRight => 3,
+        pwmtf_game_domain::PocketId::BottomLeft => 4,
+        pwmtf_game_domain::PocketId::BottomCenter => 5,
+        pwmtf_game_domain::PocketId::BottomRight => 6,
+    });
+    send_shot_command(aim, power, spin_side, spin_vertical, called_pocket)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -391,6 +771,10 @@ fn update_orientation(
     } else {
         Display::None
     };
+    #[cfg(target_arch = "wasm32")]
+    {
+        input.placing_cue_ball = browser_transport::ball_in_hand();
+    }
     if is_portrait || window.width() < MINIMUM_VIEWPORT_WIDTH {
         input.release_active_touch(true);
     }
@@ -429,6 +813,30 @@ fn rearm_input_after_valid_landscape(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_projection_drives_ball_targets_and_pockets() {
+        use pwmtf_game_domain::{
+            MatchState, PhysicsProfile, Player, RackSeed, RulesProfile, TableGeometry,
+        };
+        let state = MatchState::new(
+            RulesProfile::standard(),
+            PhysicsProfile::standard(),
+            TableGeometry::standard(),
+            RackSeed::new(42),
+            Player::One,
+        )
+        .unwrap();
+        let mut presentation = CanonicalPresentation::default();
+        presentation.project(&state);
+        assert_eq!(presentation.target.len(), 16);
+        assert!(presentation.target.contains_key(&0));
+        assert!(presentation.pocketed.is_empty());
+        assert_eq!(
+            canonical_to_world(pwmtf_game_domain::Vector::ZERO),
+            Vec2::new(TABLE_CENTER_X, 0.0)
+        );
+    }
 
     #[test]
     fn pockets_cover_four_corners_and_two_side_centers() {
@@ -519,10 +927,11 @@ mod tests {
         let mut input = PrototypeInput::default();
         let size = Vec2::new(1_000.0, 500.0);
 
-        update_from_pointer(&mut input, Vec2::new(900.0, -100.0), size);
+        let mut placed = false;
+        update_from_pointer(&mut input, Vec2::new(900.0, -100.0), size, &mut placed);
         assert!((input.power - 1.0).abs() < f32::EPSILON);
 
-        update_from_pointer(&mut input, Vec2::new(900.0, 1_000.0), size);
+        update_from_pointer(&mut input, Vec2::new(900.0, 1_000.0), size, &mut placed);
         assert!((input.power - MIN_POWER).abs() < f32::EPSILON);
     }
 
@@ -531,10 +940,11 @@ mod tests {
         let mut input = PrototypeInput::default();
         let size = Vec2::new(1_000.0, 500.0);
 
-        update_from_pointer(&mut input, Vec2::new(750.0, 250.0), size);
+        let mut placed = false;
+        update_from_pointer(&mut input, Vec2::new(750.0, 250.0), size, &mut placed);
         assert!(input.aim_angle.abs() < f32::EPSILON);
 
-        update_from_pointer(&mut input, Vec2::new(500.0, 125.0), size);
+        update_from_pointer(&mut input, Vec2::new(500.0, 125.0), size, &mut placed);
         assert!((input.aim_angle - std::f32::consts::FRAC_PI_2).abs() < f32::EPSILON);
     }
 }

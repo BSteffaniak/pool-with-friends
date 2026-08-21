@@ -2,6 +2,22 @@ const shell = document.querySelector("#game-shell");
 const canvas = document.querySelector("#pwmtf-canvas");
 const loading = document.querySelector("#loading");
 const loadError = document.querySelector("#load-error");
+const accountPanel = document.querySelector("#account-panel");
+const accountLabel = document.querySelector("#account-label");
+const googleSignIn = document.querySelector("#google-sign-in");
+const signOut = document.querySelector("#sign-out");
+const socialPanel = document.querySelector("#social-panel");
+const handleForm = document.querySelector("#handle-form");
+const handleInput = document.querySelector("#handle-input");
+const challengeForm = document.querySelector("#challenge-form");
+const challengeHandle = document.querySelector("#challenge-handle");
+const challengeList = document.querySelector("#challenge-list");
+const createInvitationButton = document.querySelector("#create-invitation");
+const lobbyPanel = document.querySelector("#lobby-panel");
+const lobbyLabel = document.querySelector("#lobby-label");
+const lobbyState = document.querySelector("#lobby-state");
+const cancelLobbyButton = document.querySelector("#cancel-lobby");
+const socialStatus = document.querySelector("#social-status");
 const reload = loadError.querySelector("button");
 const tools = document.querySelector("#feasibility-tools");
 const platformInput = document.querySelector("#test-platform");
@@ -1494,12 +1510,351 @@ if (feasibilityEnabled) {
   refreshMetrics();
 }
 
+let matchSocketActive = false;
+let matchReconnectTimer = null;
+let matchSubscriptionUrl = null;
+let matchReconnectAttempt = 0;
+let matchConnectStartedAt = null;
+let activeLobbyId = null;
+let lobbyPollTimer = null;
+let wasmModule = null;
+
+function startMatchSocket(module) {
+  const parameters = new URLSearchParams(window.location.search);
+  const matchId = parameters.get("match");
+  const playerOne = parameters.get("player_one");
+  const playerTwo = parameters.get("player_two");
+  if (![matchId, playerOne, playerTwo].every((value) => /^\d{1,39}$/.test(value ?? ""))) {
+    return;
+  }
+  const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+  matchSubscriptionUrl = `${scheme}//${window.location.host}/ws?match_id=${matchId}&player_one=${playerOne}&player_two=${playerTwo}`;
+  const connect = () => {
+    if (!matchSubscriptionUrl || document.visibilityState === "hidden" || !navigator.onLine) {
+      return;
+    }
+    if (matchReconnectTimer !== null) {
+      window.clearTimeout(matchReconnectTimer);
+      matchReconnectTimer = null;
+    }
+    try {
+      module.connect_match_socket(matchSubscriptionUrl);
+      matchSocketActive = true;
+      matchConnectStartedAt = performance.now();
+    } catch (error) {
+      console.error("PWMTF match socket failed", error);
+      matchSocketActive = false;
+      scheduleReconnect();
+    }
+  };
+  const scheduleReconnect = () => {
+    if (
+      matchReconnectTimer !== null ||
+      !matchSubscriptionUrl ||
+      document.visibilityState === "hidden" ||
+      !navigator.onLine
+    ) {
+      return;
+    }
+    const delay = Math.min(30_000, 250 * 2 ** Math.min(7, matchReconnectAttempt + 1));
+    matchReconnectAttempt = Math.min(8, matchReconnectAttempt + 1);
+    matchReconnectTimer = window.setTimeout(() => {
+      matchReconnectTimer = null;
+      connect();
+    }, delay);
+  };
+  const monitor = window.setInterval(() => {
+    if (module.match_socket_ready()) {
+      matchSocketActive = true;
+      matchReconnectAttempt = 0;
+      matchConnectStartedAt = null;
+      return;
+    }
+    if (
+      matchSocketActive &&
+      matchConnectStartedAt !== null &&
+      performance.now() - matchConnectStartedAt >= 10_000
+    ) {
+      matchSocketActive = false;
+      matchConnectStartedAt = null;
+      module.disconnect_match_socket();
+      scheduleReconnect();
+    }
+  }, 500);
+  window.addEventListener("online", connect);
+  window.addEventListener("offline", () => {
+    module.disconnect_match_socket();
+    matchSocketActive = false;
+    matchConnectStartedAt = null;
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      module.disconnect_match_socket();
+      matchSocketActive = false;
+      matchConnectStartedAt = null;
+    } else if (!matchSocketActive) {
+      matchReconnectAttempt = 0;
+      connect();
+    }
+  });
+  window.addEventListener("pagehide", () => {
+    window.clearInterval(monitor);
+    stopLobbyPolling();
+    if (matchReconnectTimer !== null) {
+      window.clearTimeout(matchReconnectTimer);
+    }
+    module.disconnect_match_socket();
+  });
+  connect();
+}
+
+async function refreshSession() {
+  const response = await fetch("/api/session", {
+    credentials: "same-origin",
+    headers: { Accept: "application/json" },
+  });
+  accountPanel.hidden = false;
+  if (response.status === 401) {
+    accountLabel.textContent = "Play online with friends";
+    googleSignIn.hidden = false;
+    signOut.hidden = true;
+    socialPanel.hidden = true;
+    return;
+  }
+  if (!response.ok) {
+    throw new Error(`session request failed with ${response.status}`);
+  }
+  const session = await response.json();
+  accountLabel.textContent = session.handle ? `Signed in as @${session.handle}` : "Signed in";
+  handleInput.value = session.handle ?? "";
+  googleSignIn.hidden = true;
+  signOut.hidden = false;
+  socialPanel.hidden = false;
+  await refreshChallenges();
+  return session;
+}
+
+function apiRequest(path, options = {}) {
+  const requestHeaders = {
+    Accept: "application/json",
+    "X-PWMTF-Origin": window.location.origin,
+  };
+  if (options.body !== undefined) {
+    requestHeaders["Content-Type"] = "application/json";
+  }
+  return fetch(path, {
+    credentials: "same-origin",
+    ...options,
+    headers: requestHeaders,
+  }).then(async (response) => {
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(message || `request failed with ${response.status}`);
+    }
+    return response.status === 204 ? null : response.json();
+  });
+}
+
+function socialFailure(error) {
+  console.error("PWMTF social operation failed", error);
+  socialStatus.textContent = error instanceof Error ? error.message : "Operation failed";
+}
+
+function stopLobbyPolling() {
+  if (lobbyPollTimer !== null) {
+    window.clearTimeout(lobbyPollTimer);
+    lobbyPollTimer = null;
+  }
+}
+
+async function pollLobby() {
+  if (activeLobbyId === null || document.visibilityState === "hidden") {
+    return;
+  }
+  try {
+    const lobby = await apiRequest(`/api/lobbies/${activeLobbyId}`);
+    lobbyState.textContent = lobby.status === "waiting" ? "Waiting for both players" : lobby.status;
+    if (lobby.status === "started" && lobby.match_id !== null) {
+      stopLobbyPolling();
+      const url = new URL(window.location.href);
+      url.searchParams.set("match", lobby.match_id);
+      url.searchParams.set("player_one", lobby.player_one);
+      url.searchParams.set("player_two", lobby.player_two);
+      window.location.assign(url);
+      return;
+    }
+    if (lobby.status === "cancelled") {
+      stopLobbyPolling();
+      activeLobbyId = null;
+      cancelLobbyButton.hidden = true;
+    }
+  } catch (error) {
+    socialFailure(error);
+  }
+  if (activeLobbyId !== null) {
+    lobbyPollTimer = window.setTimeout(() => void pollLobby(), 1_000);
+  }
+}
+
+function enterLobby(lobby) {
+  stopLobbyPolling();
+  activeLobbyId = lobby.lobby_id;
+  lobbyPanel.hidden = false;
+  lobbyLabel.textContent = `Lobby ${lobby.lobby_id}`;
+  lobbyState.textContent = "Waiting for both players";
+  cancelLobbyButton.hidden = false;
+  socialStatus.textContent = `Joined waiting lobby ${lobby.lobby_id}.`;
+  void pollLobby();
+}
+
+cancelLobbyButton.addEventListener("click", async () => {
+  if (activeLobbyId === null) {
+    return;
+  }
+  try {
+    const lobby = await apiRequest(`/api/lobbies/${activeLobbyId}`, { method: "DELETE" });
+    lobbyState.textContent = lobby.status;
+    activeLobbyId = null;
+    stopLobbyPolling();
+    cancelLobbyButton.hidden = true;
+  } catch (error) {
+    socialFailure(error);
+  }
+});
+
+async function acceptChallenge(challengeId) {
+  socialStatus.textContent = "Accepting challenge…";
+  try {
+    const lobby = await apiRequest(`/api/challenges/${challengeId}/accept`, { method: "POST" });
+    enterLobby(lobby);
+    await refreshChallenges();
+  } catch (error) {
+    socialFailure(error);
+  }
+}
+
+async function refreshChallenges() {
+  const challenges = await apiRequest("/api/challenges");
+  challengeList.replaceChildren();
+  if (challenges.length === 0) {
+    challengeList.textContent = "No incoming challenges.";
+    return;
+  }
+  for (const challenge of challenges) {
+    const row = document.createElement("div");
+    const label = document.createElement("span");
+    label.textContent = `@${challenge.from_handle}`;
+    const accept = document.createElement("button");
+    accept.type = "button";
+    accept.textContent = "Accept";
+    accept.addEventListener("click", () => void acceptChallenge(challenge.challenge_id));
+    row.append(label, accept);
+    challengeList.append(row);
+  }
+}
+
+handleForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  socialStatus.textContent = "Saving handle…";
+  try {
+    const profile = await apiRequest("/api/profile/handle", {
+      method: "PUT",
+      body: JSON.stringify({ handle: handleInput.value.trim() }),
+    });
+    accountLabel.textContent = `Signed in as @${profile.handle}`;
+    socialStatus.textContent = `Handle @${profile.handle} saved.`;
+  } catch (error) {
+    socialFailure(error);
+  }
+});
+
+challengeForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  socialStatus.textContent = "Creating challenge…";
+  try {
+    const challenge = await apiRequest("/api/challenges", {
+      method: "POST",
+      body: JSON.stringify({ handle: challengeHandle.value.trim() }),
+    });
+    socialStatus.textContent = `Challenge ${challenge.challenge_id} is waiting for acceptance.`;
+  } catch (error) {
+    socialFailure(error);
+  }
+});
+
+async function copyInvitation(value) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return "Private invitation copied to the clipboard.";
+  }
+  return `Private invitation: ${value}`;
+}
+
+createInvitationButton.addEventListener("click", async () => {
+  socialStatus.textContent = "Creating invitation…";
+  try {
+    const invitation = await apiRequest("/api/invitations", { method: "POST" });
+    socialStatus.textContent = await copyInvitation(invitation.invitation_url);
+  } catch (error) {
+    socialFailure(error);
+  }
+});
+
+async function redeemInvitationFromUrl() {
+  const token = new URLSearchParams(window.location.search).get("invite");
+  if (token === null) {
+    return;
+  }
+  try {
+    const lobby = await apiRequest("/api/invitations/redeem", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    });
+    const url = new URL(window.location.href);
+    url.searchParams.delete("invite");
+    window.history.replaceState(null, "", url);
+    enterLobby(lobby);
+  } catch (error) {
+    socialFailure(error);
+  }
+}
+
+signOut.addEventListener("click", async () => {
+  signOut.disabled = true;
+  try {
+    const response = await fetch("/api/session", {
+      method: "DELETE",
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) {
+      throw new Error(`sign out failed with ${response.status}`);
+    }
+    await refreshSession();
+  } catch (error) {
+    console.error("PWMTF sign out failed", error);
+    accountLabel.textContent = "Sign out failed. Try again.";
+  } finally {
+    signOut.disabled = false;
+  }
+});
+
+void refreshSession()
+  .then(() => redeemInvitationFromUrl())
+  .catch((error) => {
+    console.error("PWMTF session lookup failed", error);
+    accountPanel.hidden = false;
+    accountLabel.textContent = "Account status unavailable";
+    googleSignIn.hidden = false;
+  });
+
 try {
   if (!document.createElement("canvas").getContext("webgl2")) {
     throw new Error("WebGL 2 is unavailable");
   }
-  const { default: init } = await import("./pwmtf_client.js");
-  await init();
+  wasmModule = await import("./pwmtf_client.js");
+  await wasmModule.default();
+  startMatchSocket(wasmModule);
   await new Promise((resolve) => window.requestAnimationFrame(resolve));
   await new Promise((resolve) => window.requestAnimationFrame(resolve));
   telemetry.clientReadyMs = performance.now() - navigationStartedAt;

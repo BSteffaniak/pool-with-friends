@@ -15,6 +15,12 @@ impl LobbyId {
     pub const fn new(value: u128) -> Self {
         Self(value)
     }
+
+    /// Returns the stable numeric identifier.
+    #[must_use]
+    pub const fn value(self) -> u128 {
+        self.0
+    }
 }
 
 /// Durable waiting-lobby lifecycle.

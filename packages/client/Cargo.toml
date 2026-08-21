@@ -15,10 +15,24 @@ name = "pwmtf-client"
 path = "src/main.rs"
 
 [dependencies]
-bevy = { workspace = true }
+bevy              = { workspace = true }
+pwmtf_game_domain = { path = "../game_domain", version = "0.1.0" }
+pwmtf_protocol    = { path = "../protocol", version = "0.1.0" }
+thiserror         = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-web-sys = { workspace = true }
+js-sys = { version = "0.3.104", default-features = false }
+wasm-bindgen = { version = "0.2.127", default-features = false }
+web-sys = { workspace = true, features = [
+    "BinaryType",
+    "CloseEvent",
+    "Crypto",
+    "ErrorEvent",
+    "Event",
+    "MessageEvent",
+    "WebSocket",
+    "Window",
+] }
 
 [features]
 default          = []

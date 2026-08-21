@@ -16,6 +16,13 @@ repository = "https://github.com/BSteffaniak/pool-with-friends"
 version    = "0.1.0"
 
 [workspace.dependencies]
+axum = { version = "0.8.9", default-features = false, features = [
+    "http1",
+    "json",
+    "query",
+    "tokio",
+    "ws",
+] }
 bevy = { version = "0.19.1", default-features = false, features = [
     "2d",
     "ui",
@@ -25,6 +32,17 @@ bevy = { version = "0.19.1", default-features = false, features = [
 futures-lite = { version = "2.6.1", default-features = false, features = [
     "std",
 ] }
+getrandom = { version = "0.4.3", default-features = false }
+js-sys = { version = "0.3.104", default-features = false }
+openidconnect = { version = "4.0.1", default-features = false, features = [
+    "reqwest",
+    "rustls-tls",
+] }
+serde = { version = "1.0.229", default-features = false, features = [
+    "derive",
+    "std",
+] }
+sha2 = { version = "0.11.0", default-features = false }
 switchy_database = { version = "0.4.0", default-features = false, features = [
     "schema",
     "simulator",
@@ -36,6 +54,19 @@ switchy_schema = { version = "0.4.0", default-features = false, features = [
     "code",
 ] }
 thiserror = { version = "2.0.20", default-features = false }
+tokio = { version = "1.53.1", default-features = false, features = [
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+tower-http = { version = "0.6.11", default-features = false, features = [
+    "fs",
+    "set-header",
+] }
+wasm-bindgen = { version = "0.2.127", default-features = false }
 web-sys = { version = "0.3.104", default-features = false, features = [
     "Location",
     "Window",

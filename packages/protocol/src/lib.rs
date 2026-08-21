@@ -163,10 +163,62 @@ impl SnapshotEnvelope {
             })
         }
     }
+
+    /// Encodes the bounded snapshot envelope into the stable version-one wire format.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(22 + self.snapshot.len());
+        bytes.extend_from_slice(&self.protocol_version.to_be_bytes());
+        bytes.extend_from_slice(&self.revision.to_be_bytes());
+        bytes.extend_from_slice(&self.checksum.to_be_bytes());
+        bytes.extend_from_slice(
+            &u32::try_from(self.snapshot.len())
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
+        bytes.extend_from_slice(&self.snapshot);
+        bytes
+    }
+
+    /// Decodes and validates a bounded version-one snapshot envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError`] for oversized, truncated, trailing, or unknown
+    /// protocol-version payloads.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        if bytes.len() > MAX_SNAPSHOT_FRAME_BYTES {
+            return Err(ProtocolError::FrameTooLarge(bytes.len()));
+        }
+        let mut reader = Reader::new(bytes);
+        let protocol_version = reader.u16()?;
+        if protocol_version != PROTOCOL_VERSION {
+            return Err(ProtocolError::UnsupportedProtocol(protocol_version));
+        }
+        let revision = reader.u64()?;
+        let checksum = reader.u64()?;
+        let size = usize::try_from(reader.u32()?)
+            .map_err(|_| ProtocolError::FrameTooLarge(bytes.len()))?;
+        if size > MAX_SNAPSHOT_BYTES {
+            return Err(ProtocolError::FrameTooLarge(size));
+        }
+        let snapshot = reader.bytes(size)?.to_vec();
+        if !reader.finished() {
+            return Err(ProtocolError::TrailingBytes(reader.remaining()));
+        }
+        Ok(Self {
+            protocol_version,
+            revision,
+            checksum,
+            snapshot,
+        })
+    }
 }
 
 /// Maximum complete canonical snapshot payload.
 pub const MAX_SNAPSHOT_BYTES: usize = 4_096;
+/// Maximum encoded snapshot-envelope frame.
+pub const MAX_SNAPSHOT_FRAME_BYTES: usize = MAX_SNAPSHOT_BYTES + 22;
 
 /// Protocol decoding failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -343,6 +395,21 @@ impl<'a> Reader<'a> {
     fn u64(&mut self) -> Result<u64, ProtocolError> {
         Ok(u64::from_be_bytes(self.array()?))
     }
+    fn u32(&mut self) -> Result<u32, ProtocolError> {
+        Ok(u32::from_be_bytes(self.array()?))
+    }
+    fn bytes(&mut self, size: usize) -> Result<&'a [u8], ProtocolError> {
+        let end = self
+            .offset
+            .checked_add(size)
+            .ok_or(ProtocolError::Truncated)?;
+        let bytes = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or(ProtocolError::Truncated)?;
+        self.offset = end;
+        Ok(bytes)
+    }
     fn i16(&mut self) -> Result<i16, ProtocolError> {
         Ok(i16::from_be_bytes(self.array()?))
     }
@@ -369,6 +436,23 @@ mod tests {
             CommandId::new([7; 16]),
             VersionedMatchCommand::new(command),
         )
+    }
+
+    #[test]
+    fn snapshot_envelopes_round_trip_and_fail_closed() {
+        let envelope = SnapshotEnvelope::new(7, 9, vec![1, 2, 3]).unwrap();
+        let bytes = envelope.to_bytes();
+        assert_eq!(SnapshotEnvelope::from_bytes(&bytes), Ok(envelope));
+        assert_eq!(
+            SnapshotEnvelope::from_bytes(&bytes[..bytes.len() - 1]),
+            Err(ProtocolError::Truncated)
+        );
+        let mut unknown = bytes;
+        unknown[1] = 2;
+        assert_eq!(
+            SnapshotEnvelope::from_bytes(&unknown),
+            Err(ProtocolError::UnsupportedProtocol(2))
+        );
     }
 
     #[test]

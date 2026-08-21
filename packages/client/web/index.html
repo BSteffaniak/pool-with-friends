@@ -9,6 +9,39 @@
   </head>
   <body>
     <main id="game-shell" aria-label="Pool with More Than Friends" data-client-state="loading">
+      <section id="account-panel" hidden>
+        <span id="account-label"></span>
+        <a id="google-sign-in" href="/auth/google/start">Sign in with Google</a>
+        <button id="sign-out" type="button" hidden>Sign out</button>
+      </section>
+      <section id="social-panel" hidden>
+        <strong>Play with friends</strong>
+        <form id="handle-form">
+          <label>
+            Your handle
+            <input id="handle-input" type="text" minlength="3" maxlength="24" autocomplete="off" />
+          </label>
+          <button type="submit">Save handle</button>
+        </form>
+        <form id="challenge-form">
+          <label>
+            Friend's exact handle
+            <input id="challenge-handle" type="text" minlength="3" maxlength="24" autocomplete="off" />
+          </label>
+          <button type="submit">Challenge</button>
+        </form>
+        <section id="incoming-challenges">
+          <strong>Incoming challenges</strong>
+          <div id="challenge-list"></div>
+        </section>
+        <button id="create-invitation" type="button">Create private invitation</button>
+        <section id="lobby-panel" hidden>
+          <strong id="lobby-label"></strong>
+          <span id="lobby-state"></span>
+          <button id="cancel-lobby" type="button">Cancel lobby</button>
+        </section>
+        <output id="social-status" role="status" aria-live="polite"></output>
+      </section>
       <canvas id="pwmtf-canvas" tabindex="0"></canvas>
       <section id="rotate-device" role="status" aria-live="polite">
         <strong>Rotate your device</strong>

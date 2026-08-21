@@ -3,20 +3,38 @@
 #![allow(clippy::multiple_crate_versions)]
 //! Authoritative match command processing and recovery boundaries.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+};
 
 use pwmtf_game_domain::{MatchCommandResult, MatchState, Player};
 use pwmtf_protocol::{CommandEnvelope, CommandId, SnapshotEnvelope};
 use thiserror::Error;
 
+mod command_store;
+mod cookie;
+mod http;
 mod identity;
 mod identity_store;
 mod lobby;
+mod lobby_store;
 mod migrations;
+mod oidc;
+mod oidc_store;
 mod profile_store;
+mod projection_store;
+mod rematch_store;
 mod session_store;
 mod social;
+mod social_store;
+mod token;
 
+pub use command_store::SwitchyCommandJournal;
+pub use cookie::{CookieError, SESSION_COOKIE_NAME, SameSite, SessionCookiePolicy};
+pub use http::{
+    CANONICAL_ORIGIN, HttpState, OIDC_CALLBACK_PATH, TransportError, router as http_router,
+};
 pub use identity::{
     GoogleIdentity, IdentityError, IdentityJournal, IdentityJournalError, IdentityService,
     IdentityTransition, Session, SessionTokenHash,
@@ -27,16 +45,31 @@ pub use lobby::{
     LobbyError, LobbyId, LobbyJournal, LobbyJournalError, LobbyRecord, LobbyService, LobbyStatus,
     LobbyTransition,
 };
+pub use lobby_store::{LobbyStoreError, cancel_lobby, load_lobby, start_lobby};
 pub use migrations::{migrate, migrations};
+pub use oidc::{GOOGLE_ISSUER, GoogleOidcClient, GoogleOidcError, OidcAttempt};
+pub use oidc_store::{
+    ClaimedOidcAttempt, NewOidcAttempt, OidcAttemptStoreError, claim_oidc_attempt,
+    cleanup_oidc_attempts, create_oidc_attempt,
+};
 pub use profile_store::{ProfileStoreError, account_for_handle, assign_handle, handle_for_account};
+pub use projection_store::{MatchSummary, ProjectionError, match_summary, rebuild_match_summaries};
+pub use rematch_store::{RematchStoreError, accept_rematch, offer_rematch};
 pub use session_store::{
-    SessionStoreError, insert_session, resolve_session as resolve_stored_session,
-    revoke_session as revoke_stored_session,
+    SessionStoreError, create_session as create_stored_session, insert_session,
+    resolve_session as resolve_stored_session, resolve_token as resolve_session_token,
+    revoke_session as revoke_stored_session, revoke_token as revoke_session_token,
 };
 pub use social::{
     Challenge, ChallengeId, Handle, Invitation, InvitationId, InvitationTokenHash, SocialError,
     SocialJournal, SocialJournalError, SocialService, SocialTransition,
 };
+pub use social_store::{
+    SocialStoreError, accept_challenge_into_lobby, create_challenge, create_invitation,
+    generate_invitation, pending_challenges_for, redeem_invitation_into_lobby,
+    redeem_invitation_token_into_lobby, revoke_invitation,
+};
+pub use token::{InvitationToken, SessionToken, TOKEN_BYTES, TOKEN_CHARACTERS, TokenError};
 
 /// Stable authenticated account identifier supplied by the identity boundary.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -197,6 +230,12 @@ impl MatchId {
     pub const fn new(value: u128) -> Self {
         Self(value)
     }
+
+    /// Returns the stable numeric identifier.
+    #[must_use]
+    pub const fn value(self) -> u128 {
+        self.0
+    }
 }
 
 /// Authorized match participant mapping.
@@ -252,7 +291,10 @@ pub trait CommandJournal {
     /// # Errors
     ///
     /// Returns an adapter-defined error when durability cannot be established.
-    fn commit(&mut self, command: AcceptedCommand) -> Result<(), JournalError>;
+    fn commit(
+        &mut self,
+        command: AcceptedCommand,
+    ) -> impl Future<Output = Result<(), JournalError>> + Send;
 
     /// Loads durable accepted commands for one match in ascending revision order.
     ///
@@ -260,7 +302,10 @@ pub trait CommandJournal {
     ///
     /// Returns an adapter-defined error when durable records cannot be read or
     /// validated.
-    fn load(&self, match_id: MatchId) -> Result<Vec<AcceptedCommand>, JournalError>;
+    fn load(
+        &self,
+        match_id: MatchId,
+    ) -> impl Future<Output = Result<Vec<AcceptedCommand>, JournalError>> + Send;
 }
 
 /// Durable journal failure without backend-sensitive details.
@@ -391,6 +436,40 @@ impl<J: CommandJournal> MatchService<J> {
             .map(|runtime| runtime.state)
     }
 
+    /// Returns the authorized participants for one in-process match.
+    #[must_use]
+    pub fn participants(&self, match_id: MatchId) -> Option<Participants> {
+        self.matches
+            .get(&match_id)
+            .map(|runtime| runtime.participants)
+    }
+
+    /// Restores an already-validated durable deadline for a loaded match.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError`] for missing matches or a deadline that does not
+    /// identify the current revision and active player.
+    #[doc(hidden)]
+    pub fn set_deadline(
+        &mut self,
+        match_id: MatchId,
+        deadline: Option<ScheduledDeadline>,
+    ) -> Result<(), RecoveryError> {
+        let runtime = self
+            .matches
+            .get_mut(&match_id)
+            .ok_or(RecoveryError::InvalidSnapshot)?;
+        if let Some(deadline) = deadline
+            && (deadline.id.revision != runtime.revision
+                || deadline.id.player != runtime.state.active_player())
+        {
+            return Err(RecoveryError::InvalidRevision);
+        }
+        runtime.deadline = deadline;
+        Ok(())
+    }
+
     /// Returns the current canonical revision and state.
     #[must_use]
     pub fn match_state(&self, match_id: MatchId) -> Option<(u64, &MatchState)> {
@@ -426,6 +505,55 @@ impl<J: CommandJournal> MatchService<J> {
             .and_then(|runtime| runtime.deadline)
     }
 
+    /// Returns current deadlines in stable match-identifier order.
+    #[must_use]
+    pub fn scheduled_deadlines(&self) -> Vec<(MatchId, ScheduledDeadline)> {
+        self.matches
+            .iter()
+            .filter_map(|(match_id, runtime)| {
+                runtime.deadline.map(|deadline| (*match_id, deadline))
+            })
+            .collect()
+    }
+
+    /// Returns the earliest current deadline with stable match-id tie breaking.
+    #[must_use]
+    pub fn next_deadline(&self) -> Option<(MatchId, ScheduledDeadline)> {
+        self.scheduled_deadlines()
+            .into_iter()
+            .min_by_key(|(match_id, deadline)| (deadline.due_at, *match_id))
+    }
+
+    /// Applies every deadline due at or before authoritative time in stable
+    /// deadline/match order.
+    ///
+    /// Each timeout passes through normal durable command acceptance. Stale or
+    /// already-applied identities are harmless and omitted from the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommandError`] when a due timeout cannot be durably accepted.
+    /// Previously accepted timeouts remain committed and later deadlines remain
+    /// available for a subsequent poll.
+    pub async fn poll_due_deadlines(
+        &mut self,
+        now: DeadlineMillis,
+    ) -> Result<Vec<(MatchId, CommandAcknowledgement)>, CommandError> {
+        let mut due = self
+            .scheduled_deadlines()
+            .into_iter()
+            .filter(|(_, deadline)| deadline.due_at <= now)
+            .collect::<Vec<_>>();
+        due.sort_by_key(|(match_id, deadline)| (deadline.due_at, *match_id));
+        let mut accepted = Vec::with_capacity(due.len());
+        for (match_id, deadline) in due {
+            if let Some(acknowledgement) = self.apply_due_deadline(match_id, deadline, now).await? {
+                accepted.push((match_id, acknowledgement));
+            }
+        }
+        Ok(accepted)
+    }
+
     /// Applies a due deadline exactly once when its revision/player identity is current.
     ///
     /// Stale or already-applied deadline identities are harmless no-ops.
@@ -433,7 +561,7 @@ impl<J: CommandJournal> MatchService<J> {
     /// # Errors
     ///
     /// Returns [`CommandError`] if the synthetic timeout cannot be durably accepted.
-    pub fn apply_due_deadline(
+    pub async fn apply_due_deadline(
         &mut self,
         match_id: MatchId,
         deadline: ScheduledDeadline,
@@ -465,7 +593,9 @@ impl<J: CommandJournal> MatchService<J> {
             CommandId::new(id),
             pwmtf_game_domain::VersionedMatchCommand::new(pwmtf_game_domain::MatchCommand::Timeout),
         );
-        self.apply_at(match_id, actor, envelope, now).map(Some)
+        self.apply_at(match_id, actor, envelope, now)
+            .await
+            .map(Some)
     }
 
     /// Restores one match from its durable canonical command records.
@@ -478,12 +608,12 @@ impl<J: CommandJournal> MatchService<J> {
     ///
     /// Returns [`RecoveryError`] when durable records cannot be loaded or fail
     /// canonical integrity checks.
-    pub fn recover_match(
+    pub async fn recover_match(
         &mut self,
         match_id: MatchId,
         participants: Participants,
     ) -> Result<Option<u64>, RecoveryError> {
-        let records = self.journal.load(match_id)?;
+        let records = self.journal.load(match_id).await?;
         if records.is_empty() {
             return Ok(None);
         }
@@ -546,13 +676,14 @@ impl<J: CommandJournal> MatchService<J> {
     /// stale revisions, conflicting idempotency reuse, domain rejection, or a
     /// journal failure. Journal failure leaves in-memory canonical state and
     /// revision unchanged.
-    pub fn apply(
+    pub async fn apply(
         &mut self,
         match_id: MatchId,
         actor: AccountId,
         envelope: CommandEnvelope,
     ) -> Result<CommandAcknowledgement, CommandError> {
         self.apply_at(match_id, actor, envelope, DeadlineMillis::new(0))
+            .await
     }
 
     /// Applies a command and schedules the next turn deadline from authoritative time.
@@ -560,7 +691,7 @@ impl<J: CommandJournal> MatchService<J> {
     /// # Errors
     ///
     /// Returns the same errors as [`Self::apply`].
-    pub fn apply_at(
+    pub async fn apply_at(
         &mut self,
         match_id: MatchId,
         actor: AccountId,
@@ -630,17 +761,19 @@ impl<J: CommandJournal> MatchService<J> {
             duplicate: false,
             deadline,
         };
-        self.journal.commit(AcceptedCommand {
-            match_id,
-            revision,
-            command_id: envelope.command_id,
-            actor,
-            frame: frame.clone(),
-            result,
-            snapshot: candidate.to_bytes(),
-            checksum,
-            deadline,
-        })?;
+        self.journal
+            .commit(AcceptedCommand {
+                match_id,
+                revision,
+                command_id: envelope.command_id,
+                actor,
+                frame: frame.clone(),
+                result,
+                snapshot: candidate.to_bytes(),
+                checksum,
+                deadline,
+            })
+            .await?;
         runtime.state = candidate;
         runtime.revision = revision;
         runtime.deadline = deadline;
@@ -666,6 +799,7 @@ const fn command_requires_active_player(command: pwmtf_game_domain::MatchCommand
 
 #[cfg(test)]
 mod tests {
+    use futures_lite::future::block_on;
     use pwmtf_game_domain::{
         MatchCommand, PhysicsProfile, RackSeed, RulesProfile, TableGeometry, VersionedMatchCommand,
     };
@@ -679,7 +813,7 @@ mod tests {
     }
 
     impl CommandJournal for MemoryJournal {
-        fn commit(&mut self, command: AcceptedCommand) -> Result<(), JournalError> {
+        async fn commit(&mut self, command: AcceptedCommand) -> Result<(), JournalError> {
             if self.fail {
                 Err(JournalError)
             } else {
@@ -688,7 +822,7 @@ mod tests {
             }
         }
 
-        fn load(&self, match_id: MatchId) -> Result<Vec<AcceptedCommand>, JournalError> {
+        async fn load(&self, match_id: MatchId) -> Result<Vec<AcceptedCommand>, JournalError> {
             if self.fail {
                 Err(JournalError)
             } else {
@@ -732,302 +866,411 @@ mod tests {
 
     #[test]
     fn snapshots_support_initial_load_and_reconnect_convergence() {
-        let mut service = service();
-        let initial = service.snapshot(MatchId::new(9)).unwrap();
-        assert_eq!(initial.revision, 0);
-        assert_eq!(
-            pwmtf_game_domain::MatchState::from_bytes(&initial.snapshot)
-                .unwrap()
-                .checksum(),
-            initial.checksum
-        );
-        service
-            .apply(
-                MatchId::new(9),
-                AccountId::new(1),
-                envelope(0, 7, MatchCommand::Timeout),
-            )
-            .unwrap();
-        let reconnect = service.snapshot(MatchId::new(9)).unwrap();
-        assert_eq!(reconnect.revision, 1);
-        assert_ne!(reconnect.checksum, initial.checksum);
-        let restored = pwmtf_game_domain::MatchState::from_bytes(&reconnect.snapshot).unwrap();
-        assert_eq!(restored.active_player(), Player::Two);
-        assert_eq!(restored.checksum(), reconnect.checksum);
+        block_on(async {
+            let mut service = service();
+            let initial = service.snapshot(MatchId::new(9)).unwrap();
+            assert_eq!(initial.revision, 0);
+            assert_eq!(
+                pwmtf_game_domain::MatchState::from_bytes(&initial.snapshot)
+                    .unwrap()
+                    .checksum(),
+                initial.checksum
+            );
+            service
+                .apply(
+                    MatchId::new(9),
+                    AccountId::new(1),
+                    envelope(0, 7, MatchCommand::Timeout),
+                )
+                .await
+                .unwrap();
+            let reconnect = service.snapshot(MatchId::new(9)).unwrap();
+            assert_eq!(reconnect.revision, 1);
+            assert_ne!(reconnect.checksum, initial.checksum);
+            let restored = pwmtf_game_domain::MatchState::from_bytes(&reconnect.snapshot).unwrap();
+            assert_eq!(restored.active_player(), Player::Two);
+            assert_eq!(restored.checksum(), reconnect.checksum);
+        });
     }
 
     #[test]
     fn subscriptions_require_authenticated_participants_and_allow_multiple_connections() {
-        let participants = Participants {
-            player_one: AccountId::new(1),
-            player_two: AccountId::new(2),
-        };
-        let mut registry = SubscriptionRegistry::default();
-        assert_eq!(
-            registry.subscribe(ConnectionId::new(1), MatchId::new(9), participants),
-            Err(SubscriptionError::Unauthenticated)
-        );
-        registry.connect(ConnectionId::new(1), AccountId::new(1));
-        registry.connect(ConnectionId::new(2), AccountId::new(1));
-        registry.connect(ConnectionId::new(3), AccountId::new(3));
-        registry
-            .subscribe(ConnectionId::new(1), MatchId::new(9), participants)
-            .unwrap();
-        registry
-            .subscribe(ConnectionId::new(2), MatchId::new(9), participants)
-            .unwrap();
-        assert_eq!(
-            registry.subscribe(ConnectionId::new(3), MatchId::new(9), participants),
-            Err(SubscriptionError::Unauthorized)
-        );
-        assert_eq!(
-            registry.subscribers(MatchId::new(9)),
-            vec![ConnectionId::new(1), ConnectionId::new(2)]
-        );
-        registry.disconnect(ConnectionId::new(1));
-        assert_eq!(
-            registry.subscribers(MatchId::new(9)),
-            vec![ConnectionId::new(2)]
-        );
+        block_on(async {
+            let participants = Participants {
+                player_one: AccountId::new(1),
+                player_two: AccountId::new(2),
+            };
+            let mut registry = SubscriptionRegistry::default();
+            assert_eq!(
+                registry.subscribe(ConnectionId::new(1), MatchId::new(9), participants),
+                Err(SubscriptionError::Unauthenticated)
+            );
+            registry.connect(ConnectionId::new(1), AccountId::new(1));
+            registry.connect(ConnectionId::new(2), AccountId::new(1));
+            registry.connect(ConnectionId::new(3), AccountId::new(3));
+            registry
+                .subscribe(ConnectionId::new(1), MatchId::new(9), participants)
+                .unwrap();
+            registry
+                .subscribe(ConnectionId::new(2), MatchId::new(9), participants)
+                .unwrap();
+            assert_eq!(
+                registry.subscribe(ConnectionId::new(3), MatchId::new(9), participants),
+                Err(SubscriptionError::Unauthorized)
+            );
+            assert_eq!(
+                registry.subscribers(MatchId::new(9)),
+                vec![ConnectionId::new(1), ConnectionId::new(2)]
+            );
+            registry.disconnect(ConnectionId::new(1));
+            assert_eq!(
+                registry.subscribers(MatchId::new(9)),
+                vec![ConnectionId::new(2)]
+            );
+        });
+    }
+
+    #[test]
+    fn scheduler_polls_all_due_matches_in_stable_order() {
+        block_on(async {
+            let mut service = service();
+            service.insert_match(
+                MatchId::new(10),
+                Participants {
+                    player_one: AccountId::new(3),
+                    player_two: AccountId::new(4),
+                },
+                MatchState::new(
+                    RulesProfile::standard(),
+                    PhysicsProfile::standard(),
+                    TableGeometry::standard(),
+                    RackSeed::new(43),
+                    Player::One,
+                )
+                .unwrap(),
+            );
+            service
+                .apply_at(
+                    MatchId::new(10),
+                    AccountId::new(3),
+                    envelope(0, 11, MatchCommand::Timeout),
+                    DeadlineMillis::new(10),
+                )
+                .await
+                .unwrap();
+            service
+                .apply_at(
+                    MatchId::new(9),
+                    AccountId::new(1),
+                    envelope(0, 12, MatchCommand::Timeout),
+                    DeadlineMillis::new(10),
+                )
+                .await
+                .unwrap();
+            assert_eq!(service.next_deadline().unwrap().0, MatchId::new(9));
+            assert!(
+                service
+                    .poll_due_deadlines(DeadlineMillis::new(30_009))
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let applied = service
+                .poll_due_deadlines(DeadlineMillis::new(30_010))
+                .await
+                .unwrap();
+            assert_eq!(
+                applied
+                    .iter()
+                    .map(|(match_id, _)| *match_id)
+                    .collect::<Vec<_>>(),
+                vec![MatchId::new(9), MatchId::new(10)]
+            );
+            assert_eq!(service.match_state(MatchId::new(9)).unwrap().0, 2);
+            assert_eq!(service.match_state(MatchId::new(10)).unwrap().0, 2);
+        });
     }
 
     #[test]
     fn deadline_is_durable_and_applies_exactly_once() {
-        let mut service = service();
-        let first = service
-            .apply_at(
-                MatchId::new(9),
-                AccountId::new(1),
-                envelope(0, 5, MatchCommand::Timeout),
-                DeadlineMillis::new(1_000),
-            )
-            .unwrap();
-        let deadline = first.deadline.unwrap();
-        assert_eq!(deadline.due_at, DeadlineMillis::new(31_000));
-        assert_eq!(service.journal.records[0].deadline, Some(deadline));
-        assert_eq!(
-            service
-                .apply_due_deadline(MatchId::new(9), deadline, DeadlineMillis::new(30_999))
-                .unwrap(),
-            None
-        );
-        let applied = service
-            .apply_due_deadline(MatchId::new(9), deadline, DeadlineMillis::new(31_000))
-            .unwrap()
-            .unwrap();
-        assert_eq!(applied.revision, 2);
-        assert_eq!(
-            service
-                .match_state(MatchId::new(9))
+        block_on(async {
+            let mut service = service();
+            let first = service
+                .apply_at(
+                    MatchId::new(9),
+                    AccountId::new(1),
+                    envelope(0, 5, MatchCommand::Timeout),
+                    DeadlineMillis::new(1_000),
+                )
+                .await
+                .unwrap();
+            let deadline = first.deadline.unwrap();
+            assert_eq!(deadline.due_at, DeadlineMillis::new(31_000));
+            assert_eq!(service.journal.records[0].deadline, Some(deadline));
+            assert_eq!(
+                service
+                    .apply_due_deadline(MatchId::new(9), deadline, DeadlineMillis::new(30_999))
+                    .await
+                    .unwrap(),
+                None
+            );
+            let applied = service
+                .apply_due_deadline(MatchId::new(9), deadline, DeadlineMillis::new(31_000))
+                .await
                 .unwrap()
-                .1
-                .active_player(),
-            Player::One
-        );
-        assert_eq!(
-            service
-                .apply_due_deadline(MatchId::new(9), deadline, DeadlineMillis::new(40_000))
-                .unwrap(),
-            None
-        );
-        assert_eq!(service.journal.records.len(), 2);
+                .unwrap();
+            assert_eq!(applied.revision, 2);
+            assert_eq!(
+                service
+                    .match_state(MatchId::new(9))
+                    .unwrap()
+                    .1
+                    .active_player(),
+                Player::One
+            );
+            assert_eq!(
+                service
+                    .apply_due_deadline(MatchId::new(9), deadline, DeadlineMillis::new(40_000))
+                    .await
+                    .unwrap(),
+                None
+            );
+            assert_eq!(service.journal.records.len(), 2);
+        });
     }
 
     #[test]
     fn recovery_restores_deadline_for_exact_once_application() {
-        let mut original = service();
-        let acknowledgement = original
-            .apply_at(
-                MatchId::new(9),
-                AccountId::new(1),
-                envelope(0, 6, MatchCommand::Timeout),
-                DeadlineMillis::new(500),
-            )
-            .unwrap();
-        let deadline = acknowledgement.deadline.unwrap();
-        let mut recovered = MatchService::new(MemoryJournal {
-            records: original.journal.records.clone(),
-            fail: false,
-        });
-        recovered
-            .recover_match(
-                MatchId::new(9),
-                Participants {
-                    player_one: AccountId::new(1),
-                    player_two: AccountId::new(2),
-                },
-            )
-            .unwrap();
-        assert_eq!(recovered.deadline(MatchId::new(9)), Some(deadline));
-        assert!(
+        block_on(async {
+            let mut original = service();
+            let acknowledgement = original
+                .apply_at(
+                    MatchId::new(9),
+                    AccountId::new(1),
+                    envelope(0, 6, MatchCommand::Timeout),
+                    DeadlineMillis::new(500),
+                )
+                .await
+                .unwrap();
+            let deadline = acknowledgement.deadline.unwrap();
+            let mut recovered = MatchService::new(MemoryJournal {
+                records: original.journal.records.clone(),
+                fail: false,
+            });
             recovered
-                .apply_due_deadline(MatchId::new(9), deadline, deadline.due_at)
-                .unwrap()
-                .is_some()
-        );
-        assert_eq!(recovered.journal.records.len(), 2);
+                .recover_match(
+                    MatchId::new(9),
+                    Participants {
+                        player_one: AccountId::new(1),
+                        player_two: AccountId::new(2),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(recovered.deadline(MatchId::new(9)), Some(deadline));
+            assert!(
+                recovered
+                    .apply_due_deadline(MatchId::new(9), deadline, deadline.due_at)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert_eq!(recovered.journal.records.len(), 2);
+        });
     }
 
     #[test]
     fn durable_recovery_restores_state_revision_and_idempotency() {
-        let mut original = service();
-        let command = envelope(0, 8, MatchCommand::Timeout);
-        let first = original
-            .apply(MatchId::new(9), AccountId::new(1), command)
-            .unwrap();
-        let journal = MemoryJournal {
-            records: original.journal.records.clone(),
-            fail: false,
-        };
-        let expected = original.match_state(MatchId::new(9)).unwrap().1.clone();
-        let mut recovered = MatchService::new(journal);
-        assert_eq!(
-            recovered.recover_match(
-                MatchId::new(9),
-                Participants {
-                    player_one: AccountId::new(1),
-                    player_two: AccountId::new(2),
-                },
-            ),
-            Ok(Some(1))
-        );
-        let (revision, state) = recovered.match_state(MatchId::new(9)).unwrap();
-        assert_eq!(revision, 1);
-        assert_eq!(state, &expected);
-        let duplicate = recovered
-            .apply(MatchId::new(9), AccountId::new(1), command)
-            .unwrap();
-        assert_eq!(duplicate.result, first.result);
-        assert!(duplicate.duplicate);
-        assert_eq!(recovered.journal.records.len(), 1);
+        block_on(async {
+            let mut original = service();
+            let command = envelope(0, 8, MatchCommand::Timeout);
+            let first = original
+                .apply(MatchId::new(9), AccountId::new(1), command)
+                .await
+                .unwrap();
+            let journal = MemoryJournal {
+                records: original.journal.records.clone(),
+                fail: false,
+            };
+            let expected = original.match_state(MatchId::new(9)).unwrap().1.clone();
+            let mut recovered = MatchService::new(journal);
+            assert_eq!(
+                recovered
+                    .recover_match(
+                        MatchId::new(9),
+                        Participants {
+                            player_one: AccountId::new(1),
+                            player_two: AccountId::new(2),
+                        },
+                    )
+                    .await,
+                Ok(Some(1))
+            );
+            let (revision, state) = recovered.match_state(MatchId::new(9)).unwrap();
+            assert_eq!(revision, 1);
+            assert_eq!(state, &expected);
+            let duplicate = recovered
+                .apply(MatchId::new(9), AccountId::new(1), command)
+                .await
+                .unwrap();
+            assert_eq!(duplicate.result, first.result);
+            assert!(duplicate.duplicate);
+            assert_eq!(recovered.journal.records.len(), 1);
+        });
     }
 
     #[test]
     fn corrupted_recovery_records_fail_closed() {
-        let mut original = service();
-        original
-            .apply(
-                MatchId::new(9),
-                AccountId::new(1),
-                envelope(0, 9, MatchCommand::Timeout),
-            )
-            .unwrap();
-        let mut records = original.journal.records.clone();
-        records[0].checksum ^= 1;
-        let mut recovered = MatchService::new(MemoryJournal {
-            records,
-            fail: false,
+        block_on(async {
+            let mut original = service();
+            original
+                .apply(
+                    MatchId::new(9),
+                    AccountId::new(1),
+                    envelope(0, 9, MatchCommand::Timeout),
+                )
+                .await
+                .unwrap();
+            let mut records = original.journal.records.clone();
+            records[0].checksum ^= 1;
+            let mut recovered = MatchService::new(MemoryJournal {
+                records,
+                fail: false,
+            });
+            assert_eq!(
+                recovered
+                    .recover_match(
+                        MatchId::new(9),
+                        Participants {
+                            player_one: AccountId::new(1),
+                            player_two: AccountId::new(2),
+                        },
+                    )
+                    .await,
+                Err(RecoveryError::ChecksumMismatch)
+            );
+            assert!(recovered.match_state(MatchId::new(9)).is_none());
         });
-        assert_eq!(
-            recovered.recover_match(
-                MatchId::new(9),
-                Participants {
-                    player_one: AccountId::new(1),
-                    player_two: AccountId::new(2),
-                },
-            ),
-            Err(RecoveryError::ChecksumMismatch)
-        );
-        assert!(recovered.match_state(MatchId::new(9)).is_none());
     }
 
     #[test]
     fn acknowledgement_happens_after_durable_commit() {
-        let mut service = service();
-        let acknowledgement = service
-            .apply(
-                MatchId::new(9),
-                AccountId::new(1),
-                envelope(0, 1, MatchCommand::Timeout),
-            )
-            .unwrap();
-        assert_eq!(acknowledgement.revision, 1);
-        assert!(!acknowledgement.duplicate);
-        assert_eq!(service.journal.records.len(), 1);
-        let (revision, state) = service.match_state(MatchId::new(9)).unwrap();
-        assert_eq!(revision, 1);
-        assert_eq!(state.active_player(), Player::Two);
-        assert_eq!(service.journal.records[0].snapshot, state.to_bytes());
+        block_on(async {
+            let mut service = service();
+            let acknowledgement = service
+                .apply(
+                    MatchId::new(9),
+                    AccountId::new(1),
+                    envelope(0, 1, MatchCommand::Timeout),
+                )
+                .await
+                .unwrap();
+            assert_eq!(acknowledgement.revision, 1);
+            assert!(!acknowledgement.duplicate);
+            assert_eq!(service.journal.records.len(), 1);
+            let (revision, state) = service.match_state(MatchId::new(9)).unwrap();
+            assert_eq!(revision, 1);
+            assert_eq!(state.active_player(), Player::Two);
+            assert_eq!(service.journal.records[0].snapshot, state.to_bytes());
+        });
     }
 
     #[test]
     fn journal_failure_does_not_mutate_or_acknowledge() {
-        let mut service = service();
-        service.journal.fail = true;
-        let before = service.match_state(MatchId::new(9)).unwrap().1.clone();
-        assert_eq!(
-            service.apply(
-                MatchId::new(9),
-                AccountId::new(1),
-                envelope(0, 1, MatchCommand::Timeout),
-            ),
-            Err(CommandError::Journal(JournalError))
-        );
-        let (revision, after) = service.match_state(MatchId::new(9)).unwrap();
-        assert_eq!(revision, 0);
-        assert_eq!(after, &before);
+        block_on(async {
+            let mut service = service();
+            service.journal.fail = true;
+            let before = service.match_state(MatchId::new(9)).unwrap().1.clone();
+            assert_eq!(
+                service
+                    .apply(
+                        MatchId::new(9),
+                        AccountId::new(1),
+                        envelope(0, 1, MatchCommand::Timeout),
+                    )
+                    .await,
+                Err(CommandError::Journal(JournalError))
+            );
+            let (revision, after) = service.match_state(MatchId::new(9)).unwrap();
+            assert_eq!(revision, 0);
+            assert_eq!(after, &before);
+        });
     }
 
     #[test]
     fn duplicates_are_harmless_and_conflicts_fail() {
-        let mut service = service();
-        let command = envelope(0, 3, MatchCommand::Timeout);
-        let first = service
-            .apply(MatchId::new(9), AccountId::new(1), command)
-            .unwrap();
-        let duplicate = service
-            .apply(MatchId::new(9), AccountId::new(1), command)
-            .unwrap();
-        assert_eq!(first.revision, duplicate.revision);
-        assert!(duplicate.duplicate);
-        assert_eq!(service.journal.records.len(), 1);
-        assert_eq!(
-            service.apply(
-                MatchId::new(9),
-                AccountId::new(1),
-                envelope(1, 3, MatchCommand::Timeout),
-            ),
-            Err(CommandError::IdempotencyConflict)
-        );
+        block_on(async {
+            let mut service = service();
+            let command = envelope(0, 3, MatchCommand::Timeout);
+            let first = service
+                .apply(MatchId::new(9), AccountId::new(1), command)
+                .await
+                .unwrap();
+            let duplicate = service
+                .apply(MatchId::new(9), AccountId::new(1), command)
+                .await
+                .unwrap();
+            assert_eq!(first.revision, duplicate.revision);
+            assert!(duplicate.duplicate);
+            assert_eq!(service.journal.records.len(), 1);
+            assert_eq!(
+                service
+                    .apply(
+                        MatchId::new(9),
+                        AccountId::new(1),
+                        envelope(1, 3, MatchCommand::Timeout),
+                    )
+                    .await,
+                Err(CommandError::IdempotencyConflict)
+            );
+        });
     }
 
     #[test]
     fn authorization_revision_and_active_player_are_enforced() {
-        let mut service = service();
-        assert_eq!(
-            service.apply(
-                MatchId::new(9),
-                AccountId::new(3),
-                envelope(0, 1, MatchCommand::Timeout),
-            ),
-            Err(CommandError::Unauthorized)
-        );
-        assert!(matches!(
-            service.apply(
-                MatchId::new(9),
-                AccountId::new(1),
-                envelope(7, 2, MatchCommand::Timeout),
-            ),
-            Err(CommandError::StaleRevision { actual: 0, .. })
-        ));
-        assert_eq!(
-            service.apply(
-                MatchId::new(9),
-                AccountId::new(2),
-                envelope(
-                    0,
-                    4,
-                    MatchCommand::PlayShot {
-                        shot: pwmtf_game_domain::VersionedShotCommand::new(
-                            pwmtf_game_domain::Aim::new(0).unwrap(),
-                            pwmtf_game_domain::ShotPower::new(0).unwrap(),
-                            pwmtf_game_domain::Spin::CENTER,
+        block_on(async {
+            let mut service = service();
+            assert_eq!(
+                service
+                    .apply(
+                        MatchId::new(9),
+                        AccountId::new(3),
+                        envelope(0, 1, MatchCommand::Timeout),
+                    )
+                    .await,
+                Err(CommandError::Unauthorized)
+            );
+            assert!(matches!(
+                service
+                    .apply(
+                        MatchId::new(9),
+                        AccountId::new(1),
+                        envelope(7, 2, MatchCommand::Timeout),
+                    )
+                    .await,
+                Err(CommandError::StaleRevision { actual: 0, .. })
+            ));
+            assert_eq!(
+                service
+                    .apply(
+                        MatchId::new(9),
+                        AccountId::new(2),
+                        envelope(
+                            0,
+                            4,
+                            MatchCommand::PlayShot {
+                                shot: pwmtf_game_domain::VersionedShotCommand::new(
+                                    pwmtf_game_domain::Aim::new(0).unwrap(),
+                                    pwmtf_game_domain::ShotPower::new(0).unwrap(),
+                                    pwmtf_game_domain::Spin::CENTER,
+                                ),
+                                called_pocket: None,
+                            },
                         ),
-                        called_pocket: None,
-                    },
-                ),
-            ),
-            Err(CommandError::WrongActor)
-        );
+                    )
+                    .await,
+                Err(CommandError::WrongActor)
+            );
+        });
     }
 }

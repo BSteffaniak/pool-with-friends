@@ -46,6 +46,12 @@ impl ChallengeId {
     pub const fn new(value: u128) -> Self {
         Self(value)
     }
+
+    /// Returns the stable numeric identifier.
+    #[must_use]
+    pub const fn value(self) -> u128 {
+        self.0
+    }
 }
 
 /// Stable invitation identifier.
@@ -58,6 +64,12 @@ impl InvitationId {
     pub const fn new(value: u128) -> Self {
         Self(value)
     }
+
+    /// Returns the stable numeric identifier.
+    #[must_use]
+    pub const fn value(self) -> u128 {
+        self.0
+    }
 }
 
 /// Fixed-size hash of a secret invitation token.
@@ -69,6 +81,12 @@ impl InvitationTokenHash {
     #[must_use]
     pub const fn new(bytes: [u8; 32]) -> Self {
         Self(bytes)
+    }
+
+    /// Returns the exact hash bytes.
+    #[must_use]
+    pub const fn bytes(self) -> [u8; 32] {
+        self.0
     }
 }
 

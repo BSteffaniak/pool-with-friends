@@ -10,13 +10,24 @@ readme      = "README.md"
 repository  = { workspace = true }
 version     = { workspace = true }
 
+[[bin]]
+name = "pwmtf-server"
+path = "src/main.rs"
+
 [dependencies]
+axum                        = { workspace = true }
+getrandom                   = { workspace = true }
+openidconnect               = { workspace = true }
 pwmtf_game_domain           = { path = "../game_domain", version = "0.1.0" }
 pwmtf_protocol              = { path = "../protocol", version = "0.1.0" }
+serde                       = { workspace = true }
+sha2                        = { workspace = true }
 switchy_database            = { workspace = true }
 switchy_database_connection = { workspace = true }
 switchy_schema              = { workspace = true }
 thiserror                   = { workspace = true }
+tokio                       = { workspace = true }
+tower-http                  = { workspace = true }
 
 [dev-dependencies]
 futures-lite = { workspace = true }

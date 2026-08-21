@@ -2,7 +2,7 @@
 
 use switchy_database::{
     Database,
-    schema::{Column, DataType, create_index, create_table, drop_index, drop_table},
+    schema::{Column, DataType, alter_table, create_index, create_table, drop_index, drop_table},
 };
 use switchy_schema::{
     discovery::code::{CodeMigration, CodeMigrationSource},
@@ -102,6 +102,7 @@ fn migrations_for(include_profiles: bool) -> CodeMigrationSource<'static> {
             nullable_bigint("deadline_revision"),
             nullable_bigint("deadline_player"),
             nullable_bigint("deadline_at_ms"),
+            nullable_text("previous_match_id"),
         ],
         "match_id",
     ));
@@ -146,6 +147,63 @@ fn migrations_for(include_profiles: bool) -> CodeMigrationSource<'static> {
             "account_profiles",
             vec!["handle"],
         ));
+        source.add_migration(add_text_column(
+            "014_command_deadline_revision",
+            "accepted_commands",
+            "deadline_revision",
+        ));
+        source.add_migration(add_text_column(
+            "015_command_deadline_player",
+            "accepted_commands",
+            "deadline_player",
+        ));
+        source.add_migration(add_text_column(
+            "016_command_deadline_at",
+            "accepted_commands",
+            "deadline_at_ms",
+        ));
+        source.add_migration(table(
+            "017_oidc_attempts",
+            "oidc_attempts",
+            vec![
+                text("attempt_id"),
+                text("state_hash"),
+                text("browser_binding_hash"),
+                text("nonce"),
+                text("pkce_verifier"),
+                bigint("expires_at_ms"),
+                text("status"),
+            ],
+            "attempt_id",
+        ));
+        source.add_migration(index(
+            "018_oidc_state_unique",
+            "idx_oidc_attempts_state",
+            "oidc_attempts",
+            vec!["state_hash"],
+        ));
+        source.add_migration(table(
+            "019_match_summaries",
+            "match_summaries",
+            vec![
+                text("match_id"),
+                text("winner_account_id"),
+                text("completion_reason"),
+                bigint("canonical_revision"),
+                text("canonical_checksum"),
+            ],
+            "match_id",
+        ));
+        source.add_migration(table(
+            "020_rematch_offers",
+            "rematch_offers",
+            vec![
+                text("previous_match_id"),
+                text("offered_by_account_id"),
+                nullable_text("accepted_match_id"),
+            ],
+            "previous_match_id",
+        ));
     }
     source
 }
@@ -167,6 +225,14 @@ async fn migrate_source(
         .with_table_name("__pwmtf_migrations")
         .run(db)
         .await
+}
+
+fn add_text_column(id: &str, table: &'static str, name: &'static str) -> CodeMigration<'static> {
+    CodeMigration::new(
+        id.to_owned(),
+        Box::new(alter_table(table).add_column(name.to_owned(), DataType::Text, true, None)),
+        Some(Box::new(alter_table(table).drop_column(name.to_owned()))),
+    )
 }
 
 fn table(
@@ -299,7 +365,7 @@ mod tests {
             .iter()
             .map(|migration| migration.id())
             .collect::<Vec<_>>();
-        assert_eq!(ids.len(), 13);
+        assert_eq!(ids.len(), 20);
         assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
     }
 }

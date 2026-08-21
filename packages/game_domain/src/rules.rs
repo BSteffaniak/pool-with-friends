@@ -9,6 +9,8 @@ use thiserror::Error;
 
 /// Current canonical match-command version.
 pub const MATCH_COMMAND_VERSION: u16 = 1;
+/// Current canonical match-result version.
+pub const MATCH_COMMAND_RESULT_VERSION: u16 = 1;
 /// Current canonical match snapshot version.
 pub const MATCH_STATE_VERSION: u16 = 1;
 /// Current launch rules profile version.
@@ -244,6 +246,222 @@ pub enum MatchCommandResult {
     CueBallPlaced,
 }
 
+impl MatchCommandResult {
+    /// Encodes the result into the stable version-one binary format.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MATCH_COMMAND_RESULT_VERSION.to_be_bytes());
+        match self {
+            Self::Shot(resolution) => {
+                bytes.push(1);
+                bytes.push(encode_player(resolution.shooter));
+                bytes.push(u8::try_from(resolution.fouls.len()).unwrap_or(u8::MAX));
+                for foul in &resolution.fouls {
+                    bytes.push(match foul {
+                        Foul::Scratch => 1,
+                        Foul::NoObjectContact => 2,
+                        Foul::WrongFirstContact => 3,
+                        Foul::NoRailAfterContact => 4,
+                    });
+                }
+                bytes.push(encode_group(resolution.assigned_group));
+                bytes.push(u8::from(resolution.reracked));
+                encode_status(resolution.status, &mut bytes);
+                bytes.push(resolution.next_player.map_or(0, encode_player));
+                bytes.push(u8::from(resolution.ball_in_hand));
+            }
+            Self::Timeout { active_player } => {
+                bytes.push(2);
+                bytes.push(encode_player(*active_player));
+            }
+            Self::Conceded(outcome) => {
+                bytes.push(3);
+                encode_status(MatchStatus::Completed(*outcome), &mut bytes);
+            }
+            Self::CueBallPlaced => bytes.push(4),
+        }
+        bytes
+    }
+
+    /// Decodes and validates a stable canonical command result.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MatchResultDecodeError`] for unsupported, truncated, trailing,
+    /// invalid, or internally inconsistent payloads.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, MatchResultDecodeError> {
+        let mut reader = ResultReader::new(bytes);
+        let version = reader.u16()?;
+        if version != MATCH_COMMAND_RESULT_VERSION {
+            return Err(MatchResultDecodeError::UnsupportedVersion(version));
+        }
+        let result = match reader.u8()? {
+            1 => {
+                let shooter = decode_result_player(reader.u8()?)?;
+                let foul_count = usize::from(reader.u8()?);
+                if foul_count > 4 {
+                    return Err(MatchResultDecodeError::Inconsistent);
+                }
+                let mut fouls = Vec::with_capacity(foul_count);
+                for _ in 0..foul_count {
+                    let foul = match reader.u8()? {
+                        1 => Foul::Scratch,
+                        2 => Foul::NoObjectContact,
+                        3 => Foul::WrongFirstContact,
+                        4 => Foul::NoRailAfterContact,
+                        value => return Err(MatchResultDecodeError::InvalidDiscriminant(value)),
+                    };
+                    if fouls.contains(&foul) {
+                        return Err(MatchResultDecodeError::Inconsistent);
+                    }
+                    fouls.push(foul);
+                }
+                let assigned_group = decode_result_group(reader.u8()?)?;
+                let reracked = decode_result_bool(reader.u8()?)?;
+                let status = decode_result_status(&mut reader)?;
+                let next_player = match reader.u8()? {
+                    0 => None,
+                    value => Some(decode_result_player(value)?),
+                };
+                let ball_in_hand = decode_result_bool(reader.u8()?)?;
+                if matches!(status, MatchStatus::Completed(_)) != next_player.is_none()
+                    || matches!(status, MatchStatus::Completed(_)) && ball_in_hand
+                {
+                    return Err(MatchResultDecodeError::Inconsistent);
+                }
+                Self::Shot(ShotResolution {
+                    shooter,
+                    fouls,
+                    assigned_group,
+                    reracked,
+                    status,
+                    next_player,
+                    ball_in_hand,
+                })
+            }
+            2 => Self::Timeout {
+                active_player: decode_result_player(reader.u8()?)?,
+            },
+            3 => match decode_result_status(&mut reader)? {
+                MatchStatus::Completed(outcome) => Self::Conceded(outcome),
+                MatchStatus::InProgress => return Err(MatchResultDecodeError::Inconsistent),
+            },
+            4 => Self::CueBallPlaced,
+            value => return Err(MatchResultDecodeError::InvalidDiscriminant(value)),
+        };
+        if !reader.finished() {
+            return Err(MatchResultDecodeError::TrailingBytes(reader.remaining()));
+        }
+        Ok(result)
+    }
+}
+
+/// Failure to decode a versioned canonical command result.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum MatchResultDecodeError {
+    /// Result payload version is unknown.
+    #[error("unsupported match result version {0}")]
+    UnsupportedVersion(u16),
+    /// Result ended before a complete field was available.
+    #[error("match result payload is truncated")]
+    Truncated,
+    /// Result contains trailing bytes.
+    #[error("match result payload has {0} trailing bytes")]
+    TrailingBytes(usize),
+    /// Result contains an unknown discriminant.
+    #[error("match result payload has invalid discriminant {0}")]
+    InvalidDiscriminant(u8),
+    /// Decoded fields form an impossible result.
+    #[error("match result payload is internally inconsistent")]
+    Inconsistent,
+}
+
+struct ResultReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> ResultReader<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn u8(&mut self) -> Result<u8, MatchResultDecodeError> {
+        let value = *self
+            .bytes
+            .get(self.offset)
+            .ok_or(MatchResultDecodeError::Truncated)?;
+        self.offset += 1;
+        Ok(value)
+    }
+
+    fn u16(&mut self) -> Result<u16, MatchResultDecodeError> {
+        let end = self
+            .offset
+            .checked_add(2)
+            .ok_or(MatchResultDecodeError::Truncated)?;
+        let bytes = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or(MatchResultDecodeError::Truncated)?;
+        self.offset = end;
+        Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
+    }
+
+    const fn finished(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
+
+    const fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.offset)
+    }
+}
+
+const fn decode_result_player(value: u8) -> Result<Player, MatchResultDecodeError> {
+    match value {
+        1 => Ok(Player::One),
+        2 => Ok(Player::Two),
+        _ => Err(MatchResultDecodeError::InvalidDiscriminant(value)),
+    }
+}
+
+const fn decode_result_group(value: u8) -> Result<Option<Group>, MatchResultDecodeError> {
+    match value {
+        0 => Ok(None),
+        1 => Ok(Some(Group::Solids)),
+        2 => Ok(Some(Group::Stripes)),
+        _ => Err(MatchResultDecodeError::InvalidDiscriminant(value)),
+    }
+}
+
+const fn decode_result_bool(value: u8) -> Result<bool, MatchResultDecodeError> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(MatchResultDecodeError::InvalidDiscriminant(value)),
+    }
+}
+
+fn decode_result_status(
+    reader: &mut ResultReader<'_>,
+) -> Result<MatchStatus, MatchResultDecodeError> {
+    match reader.u8()? {
+        0 => Ok(MatchStatus::InProgress),
+        1 => {
+            let winner = decode_result_player(reader.u8()?)?;
+            let reason = match reader.u8()? {
+                1 => CompletionReason::LegalEightBall,
+                2 => CompletionReason::IllegalEightBall,
+                3 => CompletionReason::Concession,
+                value => return Err(MatchResultDecodeError::InvalidDiscriminant(value)),
+            };
+            Ok(MatchStatus::Completed(MatchOutcome { winner, reason }))
+        }
+        value => Err(MatchResultDecodeError::InvalidDiscriminant(value)),
+    }
+}
+
 /// Complete canonical 8-ball aggregate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MatchState {
@@ -302,6 +520,24 @@ impl MatchState {
     #[must_use]
     pub const fn physics(&self) -> PhysicsProfile {
         self.physics
+    }
+
+    /// Returns the pinned table geometry.
+    #[must_use]
+    pub const fn geometry(&self) -> TableGeometry {
+        self.geometry
+    }
+
+    /// Returns the pinned rack seed.
+    #[must_use]
+    pub const fn rack_seed(&self) -> RackSeed {
+        self.rack_seed
+    }
+
+    /// Returns the canonically selected breaker.
+    #[must_use]
+    pub const fn breaker(&self) -> Player {
+        self.breaker
     }
 
     /// Returns the canonical table state.
@@ -1042,6 +1278,41 @@ mod tests {
         }
         assert_eq!(replayed, incremental);
         assert_eq!(replayed.checksum(), incremental.checksum());
+    }
+
+    #[test]
+    fn match_command_results_round_trip_and_reject_unknown_versions() {
+        let results = [
+            MatchCommandResult::Timeout {
+                active_player: Player::Two,
+            },
+            MatchCommandResult::Conceded(MatchOutcome {
+                winner: Player::One,
+                reason: CompletionReason::Concession,
+            }),
+            MatchCommandResult::CueBallPlaced,
+            MatchCommandResult::Shot(ShotResolution {
+                shooter: Player::One,
+                fouls: vec![Foul::Scratch, Foul::NoRailAfterContact],
+                assigned_group: Some(Group::Solids),
+                reracked: false,
+                status: MatchStatus::InProgress,
+                next_player: Some(Player::Two),
+                ball_in_hand: true,
+            }),
+        ];
+        for result in results {
+            assert_eq!(
+                MatchCommandResult::from_bytes(&result.to_bytes()),
+                Ok(result)
+            );
+        }
+        let mut unknown = MatchCommandResult::CueBallPlaced.to_bytes();
+        unknown[1] = 2;
+        assert_eq!(
+            MatchCommandResult::from_bytes(&unknown),
+            Err(MatchResultDecodeError::UnsupportedVersion(2))
+        );
     }
 
     #[test]
