@@ -1,0 +1,18 @@
+[package]
+authors     = { workspace = true }
+categories  = ["games", "simulation"]
+description = "Canonical billiards physics and 8-ball rules for Pool with More Than Friends"
+edition     = { workspace = true }
+keywords    = ["billiards", "game", "physics", "pool", "simulation"]
+license     = { workspace = true }
+name        = "pwmtf_game_domain"
+readme      = "README.md"
+repository  = { workspace = true }
+version     = { workspace = true }
+
+[dependencies]
+thiserror = { workspace = true }
+
+[features]
+default          = []
+fail-on-warnings = []

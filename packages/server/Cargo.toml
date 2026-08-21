@@ -1,0 +1,26 @@
+[package]
+authors     = { workspace = true }
+categories  = ["games", "network-programming"]
+description = "Authoritative native server runtime for Pool with More Than Friends"
+edition     = { workspace = true }
+keywords    = ["billiards", "game", "pool", "server"]
+license     = { workspace = true }
+name        = "pwmtf_server"
+readme      = "README.md"
+repository  = { workspace = true }
+version     = { workspace = true }
+
+[dependencies]
+pwmtf_game_domain           = { path = "../game_domain", version = "0.1.0" }
+pwmtf_protocol              = { path = "../protocol", version = "0.1.0" }
+switchy_database            = { workspace = true }
+switchy_database_connection = { workspace = true }
+switchy_schema              = { workspace = true }
+thiserror                   = { workspace = true }
+
+[dev-dependencies]
+futures-lite = { workspace = true }
+
+[features]
+default          = []
+fail-on-warnings = []

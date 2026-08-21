@@ -1,0 +1,19 @@
+[package]
+authors     = { workspace = true }
+categories  = ["games", "network-programming"]
+description = "Versioned bounded wire protocol for Pool with More Than Friends"
+edition     = { workspace = true }
+keywords    = ["billiards", "game", "networking", "pool", "protocol"]
+license     = { workspace = true }
+name        = "pwmtf_protocol"
+readme      = "README.md"
+repository  = { workspace = true }
+version     = { workspace = true }
+
+[dependencies]
+pwmtf_game_domain = { path = "../game_domain", version = "0.1.0" }
+thiserror         = { workspace = true }
+
+[features]
+default          = []
+fail-on-warnings = []

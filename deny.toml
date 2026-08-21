@@ -6,6 +6,12 @@ ignore = [
     # No safe upgrade exists as of 2026-08-16; this is unmaintained metadata,
     # not a vulnerability. Remove when the Bevy/winit chain migrates.
     "RUSTSEC-2026-0192",
+    # switchy_schema 0.4.0 -> moosicbox_json_utils -> switchy_database ->
+    # moosicbox_profiles(api) -> actix-web -> actix-http -> h2 0.3.27.
+    # PWMTF enables Switchy code/schema and simulator builders only and does not
+    # expose this transitive Actix HTTP/2 stack. Remove when Switchy decouples
+    # schema JSON utilities from the profile API or upgrades its h2 line.
+    "RUSTSEC-2026-0258",
 ]
 version = 2
 yanked = "deny"

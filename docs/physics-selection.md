@@ -1,0 +1,43 @@
+# Canonical physics selection
+
+## Decision
+
+PWMTF selects the focused fixed-point billiards solver in `pwmtf_game_domain` for physics profile version 1.
+
+The selected solver uses integer micro-units, quantized external commands, fixed 240 Hz ticks, stable ball/pocket identifiers, stable pair iteration, canonical event sorting, complete versioned snapshots, and bounded shot/event limits. The profile is immutable and serialized into every canonical match snapshot.
+
+## Evidence
+
+The shared qualification corpus covers:
+
+- Straight and glancing ball contacts.
+- Chain and simultaneous contacts with stable identifier ordering.
+- Side and corner-jaw cushion approaches.
+- Side, object-ball, and cue-ball pockets, including scratch.
+- Maximum-power break contact without front-ball tunnelling.
+- Low-speed settling.
+- Side and top/back spin response.
+- Seeded rack constraints.
+- Repeated replay equality.
+- Moving-state serialization and rollback continuation.
+- Native debug/release and `wasm32-unknown-unknown` compilation.
+
+## Rejected alternatives
+
+### Constrained floating point
+
+Rejected for the launch canonical profile because native/WASM transcendental and arithmetic behavior would require an additional normalization and cross-target proof boundary. Fixed point already satisfies current precision, replay, ordering, serialization, and performance needs without that ambiguity.
+
+### Avian canonical simulation
+
+Rejected for the launch canonical profile. An Avian prototype would introduce Bevy/ECS ownership and iteration-order risk at the exact boundary required to remain renderer-independent. The focused solver already implements the product-specific table, pockets, spin, stable contact ordering, rollback state, and event stream with no Bevy dependency. Adding Avian solely to duplicate the same corpus would not reduce a remaining product risk and would create a second candidate authority path.
+
+Avian may still be used later for non-authoritative presentation experiments, but it cannot own accepted gameplay outcomes.
+
+## Native performance evidence
+
+On 2026-08-20, the release benchmark ran 12,000 complete corpus shots in 1,533 ms on the local Apple M4 development machine: 7,825.46 settled shots/second, checksum `04e74a68d60774a1`. This is strong native headroom for two-player turn-based authoritative simulation, but does not replace browser/device WASM runtime measurement.
+
+## Revisit triggers
+
+Reconsider the selected solver only if the complete product exposes a reproducible physics defect that cannot be corrected within the focused model, or measured release/WASM performance fails the target device budget. Any replacement must pass the same corpus and preserve canonical replay compatibility or introduce an explicitly versioned profile transition.
