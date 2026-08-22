@@ -199,6 +199,14 @@ pub fn match_revision() -> Option<u64> {
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
+/// Returns whether local presentation awaits authority for one predicted command.
+#[must_use]
+pub fn match_has_pending_prediction() -> bool {
+    browser_transport::has_pending_prediction()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
 /// Sets the authenticated participant seat used only to gate local input.
 ///
 /// # Errors

@@ -170,11 +170,29 @@ curl --fail --silent \
     --output "$tmp/restarted-match-one.body" \
     "http://127.0.0.1:$port/api/matches/$match_id"
 grep -q '"player":1' "$tmp/restarted-match-one.body"
+grep -q '"revision":2' "$tmp/restarted-match-one.body"
+grep -q '"active_player":0' "$tmp/restarted-match-one.body"
+grep -q '"completed":true' "$tmp/restarted-match-one.body"
+grep -q '"deadline_at_ms":null' "$tmp/restarted-match-one.body"
+grep -Eq '"server_time_ms":[0-9]+' "$tmp/restarted-match-one.body"
 curl --fail --silent \
     --header "Cookie: $player_two_cookie" \
     --output "$tmp/restarted-match-two.body" \
     "http://127.0.0.1:$port/api/matches/$match_id"
 grep -q '"player":2' "$tmp/restarted-match-two.body"
+grep -q '"revision":2' "$tmp/restarted-match-two.body"
+grep -q '"deadline_at_ms":null' "$tmp/restarted-match-two.body"
+
+curl --fail --silent \
+    --header "Cookie: $player_one_cookie" \
+    --output "$tmp/live-match-zero.body" \
+    "http://127.0.0.1:$port/api/matches/$live_match_id"
+grep -q '"player":1' "$tmp/live-match-zero.body"
+grep -q '"revision":0' "$tmp/live-match-zero.body"
+grep -q '"active_player":1' "$tmp/live-match-zero.body"
+grep -q '"completed":false' "$tmp/live-match-zero.body"
+grep -Eq '"deadline_at_ms":[0-9]+' "$tmp/live-match-zero.body"
+grep -Eq '"server_time_ms":[0-9]+' "$tmp/live-match-zero.body"
 
 node - "$port" "$live_match_id" "$player_one_cookie" "$player_two_cookie" "$live_command" "$live_terminal_command" <<'JS'
 import net from "node:net";
@@ -245,6 +263,7 @@ async function subscribe(
     delayMs = 0,
     jitterMs = 0,
     loseFirstCommand = false,
+    expectRejected = false,
     label = "subscription",
   } = {},
 ) {
@@ -254,6 +273,7 @@ async function subscribe(
     let handshake = true;
     let buffer = Buffer.alloc(0);
     let negotiated = false;
+    let rejected = false;
     let initialRevision = null;
     socket.on("connect", () => {
       const key = crypto.randomBytes(16).toString("base64");
@@ -299,8 +319,16 @@ async function subscribe(
             return;
           }
           negotiated = true;
+        } else if (frame.opcode === 1 && frame.payload.toString() === "rejected") {
+          rejected = true;
         } else if (frame.opcode === 2 && frame.payload.length >= 22) {
           const revision = Number(frame.payload.readBigUInt64BE(2));
+          if (expectRejected && rejected) {
+            clearTimeout(timer);
+            socket.end();
+            resolve({ rejected: true, revision });
+            return;
+          }
           if (initialRevision === null) {
             initialRevision = revision;
             if (disconnectAfterInitial || disconnectBeforeCommand) {
@@ -370,6 +398,14 @@ const reconnected = await subscribe(playerTwoCookie, {
 if (!reconnected.disconnected || reconnected.revision !== 1) {
   throw new Error("reconnected participant did not receive current revision one");
 }
+const staleRejected = await subscribe(playerOneCookie, {
+  command: liveCommand,
+  expectRejected: true,
+  label: "stale command rejection recovery",
+});
+if (!staleRejected.rejected || staleRejected.revision !== 1) {
+  throw new Error("rejected stale command did not receive current authority");
+}
 const disconnectedBeforeTerminal = await subscribe(playerOneCookie, {
   disconnectBeforeCommand: true,
   label: "player one revision one disconnect",
@@ -408,6 +444,16 @@ if (terminalReconnects.some((result) => !result.disconnected || result.revision 
 }
 
 JS
+
+curl --fail --silent \
+    --header "Cookie: $player_one_cookie" \
+    --output "$tmp/live-match-terminal.body" \
+    "http://127.0.0.1:$port/api/matches/$live_match_id"
+grep -q '"player":1' "$tmp/live-match-terminal.body"
+grep -q '"revision":2' "$tmp/live-match-terminal.body"
+grep -q '"active_player":0' "$tmp/live-match-terminal.body"
+grep -q '"completed":true' "$tmp/live-match-terminal.body"
+grep -q '"deadline_at_ms":null' "$tmp/live-match-terminal.body"
 
 stop_server
 

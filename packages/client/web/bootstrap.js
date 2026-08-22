@@ -19,6 +19,7 @@ const matchStatus = document.querySelector("#match-status");
 const matchResult = document.querySelector("#match-result");
 const matchResultTitle = document.querySelector("#match-result-title");
 const matchResultDetail = document.querySelector("#match-result-detail");
+const turnTimer = document.querySelector("#turn-timer");
 const createInvitationButton = document.querySelector("#create-invitation");
 const lobbyPanel = document.querySelector("#lobby-panel");
 const lobbyLabel = document.querySelector("#lobby-label");
@@ -1585,10 +1586,125 @@ let matchReconnectTimer = null;
 let matchSubscriptionUrl = null;
 let matchConnectStartedAt = null;
 let matchPlayerSeat = null;
+let matchDeadlineAtMs = null;
+let matchDeadlineRevision = null;
+let matchServerTimeOffsetMs = 0;
+let matchServerTimeRequestStartedAt = 0;
+let matchServerTimeUncertaintyMs = 0;
+let matchAccessRevision = null;
+let matchAccessRefreshInFlight = false;
+let matchAccessRefreshPendingRevision = null;
 let activeLobbyId = null;
 let activeLobbyConnectionId = null;
 let lobbyPollTimer = null;
 let wasmModule = null;
+
+function applyMatchAccess(access, requestedAtMs = Date.now(), receivedAtMs = Date.now()) {
+  if (
+    !Number.isSafeInteger(requestedAtMs) ||
+    !Number.isSafeInteger(receivedAtMs) ||
+    requestedAtMs < 0 ||
+    receivedAtMs < requestedAtMs
+  ) {
+    throw new Error("match access timing sample is invalid");
+  }
+  const revision = Number(access.revision);
+  if (!Number.isSafeInteger(revision) || revision < 0) {
+    throw new Error("match access revision is invalid");
+  }
+  if (matchAccessRevision !== null && revision < matchAccessRevision) {
+    return false;
+  }
+  const player = Number(access.player);
+  if (player !== 1 && player !== 2) {
+    throw new Error("match access participant seat is invalid");
+  }
+  const activePlayer = Number(access.active_player);
+  if (activePlayer !== 0 && activePlayer !== 1 && activePlayer !== 2) {
+    throw new Error("match access active player is invalid");
+  }
+  const completed = access.completed === true;
+  if (completed !== (activePlayer === 0)) {
+    throw new Error("match access lifecycle is inconsistent");
+  }
+  const serverTimeMs = Number(access.server_time_ms);
+  if (!Number.isSafeInteger(serverTimeMs) || serverTimeMs < 0) {
+    throw new Error("match access server time is invalid");
+  }
+  const deadlineAtMs =
+    access.deadline_at_ms === null || access.deadline_at_ms === undefined
+      ? null
+      : Number(access.deadline_at_ms);
+  if (deadlineAtMs !== null && (!Number.isSafeInteger(deadlineAtMs) || deadlineAtMs < 0)) {
+    throw new Error("match access deadline is invalid");
+  }
+  if (completed !== (deadlineAtMs === null)) {
+    throw new Error("match access deadline lifecycle is inconsistent");
+  }
+  matchPlayerSeat = player;
+  if (wasmModule !== null) {
+    wasmModule.set_match_player(player);
+  }
+  matchDeadlineAtMs = deadlineAtMs;
+  matchDeadlineRevision = revision;
+  if (requestedAtMs >= matchServerTimeRequestStartedAt) {
+    const roundTripMs = receivedAtMs - requestedAtMs;
+    const requestMidpointMs = requestedAtMs + Math.floor(roundTripMs / 2);
+    matchServerTimeOffsetMs = serverTimeMs - requestMidpointMs;
+    matchServerTimeRequestStartedAt = requestedAtMs;
+    matchServerTimeUncertaintyMs = Math.ceil(roundTripMs / 2);
+  }
+  matchAccessRevision = revision;
+  updateTurnTimer();
+  return true;
+}
+
+async function refreshMatchAccess(matchId, minimumRevision) {
+  if (matchAccessRefreshInFlight) {
+    matchAccessRefreshPendingRevision = Math.max(
+      matchAccessRefreshPendingRevision ?? 0,
+      minimumRevision,
+    );
+    return;
+  }
+  matchAccessRefreshInFlight = true;
+  try {
+    const requestedAtMs = Date.now();
+    const access = await apiRequest(`/api/matches/${matchId}`);
+    const receivedAtMs = Date.now();
+    if (Number(access.revision) < minimumRevision) {
+      return;
+    }
+    applyMatchAccess(access, requestedAtMs, receivedAtMs);
+  } finally {
+    matchAccessRefreshInFlight = false;
+    const pendingRevision = matchAccessRefreshPendingRevision;
+    matchAccessRefreshPendingRevision = null;
+    if (pendingRevision !== null && pendingRevision !== matchAccessRevision) {
+      void refreshMatchAccess(matchId, pendingRevision).catch((error) => {
+        console.error("PWMTF queued match deadline refresh failed", error);
+      });
+    }
+  }
+}
+
+function updateTurnTimer() {
+  if (matchDeadlineAtMs === null || !Number.isFinite(matchDeadlineAtMs)) {
+    turnTimer.hidden = true;
+    turnTimer.textContent = "";
+    return;
+  }
+  const estimatedServerNowMs = Date.now() + matchServerTimeOffsetMs;
+  const optimisticRemainingMs = matchDeadlineAtMs - estimatedServerNowMs + matchServerTimeUncertaintyMs;
+  const remainingSeconds = Math.max(0, Math.ceil(optimisticRemainingMs / 1_000));
+  turnTimer.hidden = false;
+  turnTimer.textContent = `${remainingSeconds}s`;
+  if (remainingSeconds === 0) {
+    turnTimer.dataset.expired = "true";
+  } else {
+    turnTimer.removeAttribute("data-expired");
+  }
+}
 
 function completionReasonText(reason, localPlayerWon) {
   if (reason === "concession") {
@@ -1609,6 +1725,14 @@ function presentMatchCompletion(module) {
     return false;
   }
   const localPlayerWon = matchPlayerSeat === winner;
+  matchDeadlineAtMs = null;
+  matchDeadlineRevision = null;
+  matchServerTimeOffsetMs = 0;
+  matchServerTimeRequestStartedAt = 0;
+  matchServerTimeUncertaintyMs = 0;
+  matchAccessRevision = null;
+  matchAccessRefreshPendingRevision = null;
+  updateTurnTimer();
   concedeMatchButton.hidden = true;
   concedeMatchButton.disabled = true;
   offerRematchButton.hidden = false;
@@ -1665,6 +1789,7 @@ function startMatchSocket(module) {
     }, delay);
   };
   const monitor = window.setInterval(() => {
+    updateTurnTimer();
     if (module.match_socket_ready()) {
       matchSocketActive = true;
       matchConnectStartedAt = null;
@@ -1672,6 +1797,7 @@ function startMatchSocket(module) {
       if (commandRejected) {
         concedeMatchButton.disabled = false;
       }
+      const commandPending = module.match_has_pending_prediction();
       if (presentMatchCompletion(module)) {
         updateGameplayAudio(module);
         return;
@@ -1679,8 +1805,17 @@ function startMatchSocket(module) {
       matchResult.hidden = true;
       matchResult.removeAttribute("data-outcome");
       concedeMatchButton.hidden = false;
-      concedeMatchButton.disabled = false;
+      concedeMatchButton.disabled = commandPending;
       const revision = module.match_revision();
+      if (
+        revision !== undefined &&
+        revision !== matchAccessRevision &&
+        !commandPending
+      ) {
+        void refreshMatchAccess(matchId, revision).catch((error) => {
+          console.error("PWMTF match deadline refresh failed", error);
+        });
+      }
       const activePlayer = Number(module.match_active_player());
       const turn =
         activePlayer === 0
@@ -1690,7 +1825,17 @@ function startMatchSocket(module) {
             : ` · player ${activePlayer}'s turn`;
       matchStatus.textContent = commandRejected
         ? "Command rejected · synchronized to authority"
-        : `${revision === undefined ? "Connected" : `Connected · revision ${revision}`}${turn}`;
+        : commandPending
+          ? "Waiting for authority…"
+          : `${revision === undefined ? "Connected" : `Connected · revision ${revision}`}${turn}`;
+      if (
+        revision !== undefined &&
+        matchDeadlineRevision !== null &&
+        revision > matchDeadlineRevision
+      ) {
+        matchDeadlineAtMs = null;
+        matchDeadlineRevision = null;
+      }
       updateGameplayAudio(module);
       return;
     }
@@ -2103,8 +2248,9 @@ const sessionReady = refreshSession()
   .then(async (session) => {
     const matchId = new URLSearchParams(window.location.search).get("match");
     if (session !== undefined && /^\d{1,39}$/.test(matchId ?? "")) {
+      const requestedAtMs = Date.now();
       const access = await apiRequest(`/api/matches/${matchId}`);
-      matchPlayerSeat = access.player;
+      applyMatchAccess(access, requestedAtMs, Date.now());
       const url = new URL(window.location.href);
       url.searchParams.delete("player_one");
       url.searchParams.delete("player_two");

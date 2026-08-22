@@ -200,6 +200,12 @@ pub fn disconnect() {
     TRANSPORT.with(|transport| transport.borrow_mut().disconnected());
 }
 
+/// Returns whether presentation has one unresolved predicted command.
+#[must_use]
+pub fn has_pending_prediction() -> bool {
+    TRANSPORT.with(|transport| transport.borrow().has_pending_prediction())
+}
+
 /// Sets the participant seat derived from authenticated durable membership.
 pub fn set_local_player(player: pwmtf_game_domain::Player) {
     TRANSPORT.with(|transport| transport.borrow_mut().set_local_player(player));

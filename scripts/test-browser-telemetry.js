@@ -1430,7 +1430,206 @@ if (lifecycleOrder.join(",") !== "first-start,first-end,second") {
   throw new Error(`audio lifecycle transitions overlapped: ${lifecycleOrder.join(",")}`);
 }
 
-const socketStart = source.indexOf("function completionReasonText(reason, localPlayerWon) {");
+const accessStart = source.indexOf("function applyMatchAccess(access,");
+const accessEnd = source.indexOf("function completionReasonText", accessStart);
+if (accessStart < 0 || accessEnd < 0) {
+  throw new Error("cannot locate match access projection in bootstrap.js");
+}
+const accessContext = {
+  Number,
+  Date: { now: () => 1_000 },
+  turnTimer: {
+    hidden: true,
+    textContent: "",
+    dataset: {},
+    removeAttribute(name) {
+      if (name === "data-expired") delete this.dataset.expired;
+    },
+  },
+  matchPlayerSeat: null,
+  matchDeadlineAtMs: null,
+  matchDeadlineRevision: null,
+  matchServerTimeOffsetMs: 0,
+  matchServerTimeRequestStartedAt: 0,
+  matchServerTimeUncertaintyMs: 0,
+  matchAccessRevision: null,
+  matchAccessRefreshInFlight: false,
+  matchAccessRefreshPendingRevision: null,
+  apiRequest: async () => {
+    throw new Error("unexpected match access request");
+  },
+  console: { error() {} },
+  wasmModule: {
+    set_match_player(player) {
+      accessContext.wasmPlayer = player;
+    },
+  },
+  wasmPlayer: null,
+};
+vm.createContext(accessContext);
+vm.runInContext(
+  `${source.slice(accessStart, accessEnd)}\nthis.applyMatchAccess = applyMatchAccess; this.refreshMatchAccess = refreshMatchAccess;`,
+  accessContext,
+);
+if (
+  !accessContext.applyMatchAccess(
+    {
+      player: 1,
+      revision: 4,
+      active_player: 1,
+      completed: false,
+      deadline_at_ms: 6_000,
+      server_time_ms: 2_000,
+    },
+    900,
+    1_100,
+  ) ||
+  accessContext.matchAccessRevision !== 4 ||
+  accessContext.matchServerTimeUncertaintyMs !== 100 ||
+  accessContext.wasmPlayer !== 1 ||
+  accessContext.turnTimer.textContent !== "5s"
+) {
+  throw new Error("match access did not project the latency-adjusted authoritative deadline");
+}
+accessContext.applyMatchAccess(
+  {
+    player: 1,
+    revision: 4,
+    active_player: 1,
+    completed: false,
+    deadline_at_ms: 6_000,
+    server_time_ms: 2_100,
+  },
+  700,
+  1_200,
+);
+if (
+  accessContext.matchServerTimeOffsetMs !== 1_000 ||
+  accessContext.matchServerTimeRequestStartedAt !== 900 ||
+  accessContext.matchServerTimeUncertaintyMs !== 100
+) {
+  throw new Error("older match timing response overwrote the newest server clock sample");
+}
+let rejectedTimingSample = false;
+try {
+  accessContext.applyMatchAccess(
+    {
+      player: 1,
+      revision: 4,
+      active_player: 1,
+      completed: false,
+      deadline_at_ms: 6_000,
+      server_time_ms: 2_000,
+    },
+    1_100,
+    1_000,
+  );
+} catch {
+  rejectedTimingSample = true;
+}
+if (!rejectedTimingSample) {
+  throw new Error("match access accepted an invalid request timing sample");
+}
+if (
+  accessContext.applyMatchAccess({
+    player: 2,
+    revision: 3,
+    active_player: 2,
+    completed: false,
+    deadline_at_ms: 9_000,
+    server_time_ms: 2_000,
+  }) ||
+  accessContext.matchPlayerSeat !== 1 ||
+  accessContext.matchAccessRevision !== 4
+) {
+  throw new Error("stale match access overwrote newer authoritative presentation");
+}
+let rejectedTerminalDeadline = false;
+try {
+  accessContext.applyMatchAccess({
+    player: 1,
+    revision: 5,
+    active_player: 0,
+    completed: true,
+    deadline_at_ms: 10_000,
+    server_time_ms: 2_000,
+  });
+} catch {
+  rejectedTerminalDeadline = true;
+}
+if (!rejectedTerminalDeadline) {
+  throw new Error("terminal match access accepted an authoritative deadline");
+}
+
+const refreshResponses = [];
+let resolveFirstRefresh;
+accessContext.apiRequest = async () =>
+  new Promise((resolve) => {
+    if (resolveFirstRefresh === undefined) {
+      resolveFirstRefresh = resolve;
+    } else {
+      refreshResponses.push(resolve);
+    }
+  });
+const firstRefresh = accessContext.refreshMatchAccess("42", 5);
+await Promise.resolve();
+const queuedRefresh = accessContext.refreshMatchAccess("42", 6);
+await queuedRefresh;
+if (accessContext.matchAccessRefreshPendingRevision !== 6) {
+  throw new Error("in-flight match access refresh did not retain the newest requested revision");
+}
+resolveFirstRefresh({
+  player: 1,
+  revision: 5,
+  active_player: 1,
+  completed: false,
+  deadline_at_ms: 8_000,
+  server_time_ms: 2_000,
+});
+await firstRefresh;
+await Promise.resolve();
+if (refreshResponses.length !== 1 || !accessContext.matchAccessRefreshInFlight) {
+  throw new Error("queued match access refresh was not started after the in-flight response");
+}
+refreshResponses[0]({
+  player: 1,
+  revision: 6,
+  active_player: 2,
+  completed: false,
+  deadline_at_ms: 9_000,
+  server_time_ms: 2_100,
+});
+await new Promise((resolve) => setImmediate(resolve));
+if (
+  accessContext.matchAccessRevision !== 6 ||
+  accessContext.matchAccessRefreshInFlight ||
+  accessContext.matchAccessRefreshPendingRevision !== null
+) {
+  throw new Error("queued match access refresh did not converge to the newest requested revision");
+}
+let staleRefreshRequests = 0;
+accessContext.apiRequest = async () => {
+  staleRefreshRequests += 1;
+  return {
+    player: 1,
+    revision: 6,
+    active_player: 2,
+    completed: false,
+    deadline_at_ms: 9_000,
+    server_time_ms: 2_200,
+  };
+};
+await accessContext.refreshMatchAccess("42", 7);
+await new Promise((resolve) => setImmediate(resolve));
+if (
+  staleRefreshRequests !== 1 ||
+  accessContext.matchAccessRefreshInFlight ||
+  accessContext.matchAccessRefreshPendingRevision !== null
+) {
+  throw new Error("stale match access response created an unbounded immediate refresh loop");
+}
+
+const socketStart = source.indexOf("function updateTurnTimer() {");
 const socketEnd = source.indexOf("async function refreshSession() {", socketStart);
 if (socketStart < 0 || socketEnd < 0) {
   throw new Error("cannot locate match socket lifecycle in bootstrap.js");
@@ -1470,6 +1669,10 @@ const socketModule = {
   match_active_player() {
     return 1;
   },
+  commandPending: false,
+  match_has_pending_prediction() {
+    return this.commandPending;
+  },
   match_winner() {
     return 0;
   },
@@ -1486,6 +1689,7 @@ const socketContext = {
   Number,
   Math,
   performance: { now: () => 0 },
+  Date: { now: () => 0 },
   navigator: { onLine: true },
   document: {
     visibilityState: "visible",
@@ -1510,7 +1714,10 @@ const socketContext = {
     },
     confirm: () => false,
   },
-  console: { error() {} },
+  console: {
+    error() {},
+    queuedRefreshErrors: [],
+  },
   concedeMatchButton: { hidden: true, disabled: false, addEventListener() {} },
   offerRematchButton: { hidden: true, disabled: false, textContent: "Offer rematch" },
   matchStatus: { textContent: "" },
@@ -1523,6 +1730,14 @@ const socketContext = {
   },
   matchResultTitle: { textContent: "" },
   matchResultDetail: { textContent: "" },
+  turnTimer: {
+    hidden: true,
+    textContent: "",
+    dataset: {},
+    removeAttribute(name) {
+      if (name === "data-expired") delete this.dataset.expired;
+    },
+  },
   updateGameplayAudio() {},
   stopLobbyPolling() {},
   disconnectLobbyPresence: async () => {},
@@ -1531,6 +1746,22 @@ const socketContext = {
   matchSubscriptionUrl: null,
   matchConnectStartedAt: null,
   matchPlayerSeat: 1,
+  matchDeadlineAtMs: null,
+  matchDeadlineRevision: null,
+  matchServerTimeOffsetMs: 0,
+  matchServerTimeRequestStartedAt: 0,
+  matchServerTimeUncertaintyMs: 0,
+  matchAccessRevision: 3,
+  matchAccessRefreshInFlight: false,
+  matchAccessRefreshPendingRevision: null,
+  apiRequest: async () => ({
+    player: 1,
+    revision: 3,
+    active_player: 1,
+    completed: false,
+    deadline_at_ms: 10_000,
+    server_time_ms: 1_000,
+  }),
 };
 vm.createContext(socketContext);
 vm.runInContext(
@@ -1546,6 +1777,15 @@ socketContext.monitor();
 if (!socketContext.matchSocketActive || socketContext.matchStatus.textContent !== "Connected · revision 3 · your turn") {
   throw new Error("ready match socket was not presented as connected with authoritative turn state");
 }
+socketModule.commandPending = true;
+socketContext.monitor();
+if (
+  socketContext.matchStatus.textContent !== "Waiting for authority…" ||
+  !socketContext.concedeMatchButton.disabled
+) {
+  throw new Error("pending prediction did not disable duplicate controls");
+}
+socketModule.commandPending = false;
 socketModule.commandRejected = true;
 socketContext.monitor();
 if (socketContext.matchStatus.textContent !== "Command rejected · synchronized to authority") {

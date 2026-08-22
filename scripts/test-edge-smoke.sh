@@ -86,6 +86,7 @@ command = [
     "--no-first-run",
     "--no-default-browser-check",
     "--run-all-compositor-stages-before-draw",
+    "--timeout=30000",
     "--use-angle=swiftshader",
     "--virtual-time-budget=30000",
     "--window-size=1280,720",

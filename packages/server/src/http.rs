@@ -142,7 +142,7 @@ impl HttpState {
     ) -> Result<Option<SnapshotEnvelope>, TransportError> {
         match apply_transport_command(self, match_id, account, bytes).await? {
             TransportCommandResponse::Accepted { snapshot } => Ok(Some(snapshot)),
-            TransportCommandResponse::Rejected => Ok(None),
+            TransportCommandResponse::Rejected { .. } => Ok(None),
         }
     }
 
@@ -840,18 +840,35 @@ async fn websocket_loop(
                         negotiated = true;
                     }
                     Ok(Message::Binary(bytes)) if negotiated && bytes.len() <= MAX_FRAME_BYTES => {
-                        let response = apply_transport_command(&state, match_id, account, &bytes).await;
-                        let message = match response {
+                        match apply_transport_command(&state, match_id, account, &bytes).await {
                             Ok(TransportCommandResponse::Accepted { snapshot }) => {
                                 delivered_revision = delivered_revision.max(snapshot.revision);
-                                Message::Binary(snapshot.to_bytes().into())
+                                if socket
+                                    .send(Message::Binary(snapshot.to_bytes().into()))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
                             }
-                            Ok(TransportCommandResponse::Rejected) | Err(_) => {
-                                Message::Text("rejected".into())
+                            Ok(TransportCommandResponse::Rejected { snapshot }) => {
+                                if socket.send(Message::Text("rejected".into())).await.is_err() {
+                                    break;
+                                }
+                                delivered_revision = delivered_revision.max(snapshot.revision);
+                                if socket
+                                    .send(Message::Binary(snapshot.to_bytes().into()))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
                             }
-                        };
-                        if socket.send(message).await.is_err() {
-                            break;
+                            Err(_) => {
+                                if socket.send(Message::Text("rejected".into())).await.is_err() {
+                                    break;
+                                }
+                            }
                         }
                     }
                     Ok(Message::Text(_) | Message::Binary(_) | Message::Close(_)) | Err(_) => break,
@@ -866,7 +883,7 @@ async fn websocket_loop(
 #[derive(Debug)]
 enum TransportCommandResponse {
     Accepted { snapshot: SnapshotEnvelope },
-    Rejected,
+    Rejected { snapshot: SnapshotEnvelope },
 }
 
 async fn apply_transport_command(
@@ -876,7 +893,14 @@ async fn apply_transport_command(
     bytes: &[u8],
 ) -> Result<TransportCommandResponse, TransportError> {
     let Ok(envelope) = CommandEnvelope::from_bytes(bytes) else {
-        return Ok(TransportCommandResponse::Rejected);
+        return Ok(TransportCommandResponse::Rejected {
+            snapshot: state
+                .matches
+                .lock()
+                .await
+                .snapshot(match_id)
+                .map_err(|_| TransportError::Internal)?,
+        });
     };
     let mut matches = state.matches.lock().await;
     let Ok(_acknowledgement) = matches
@@ -888,7 +912,11 @@ async fn apply_transport_command(
         )
         .await
     else {
-        return Ok(TransportCommandResponse::Rejected);
+        return Ok(TransportCommandResponse::Rejected {
+            snapshot: matches
+                .snapshot(match_id)
+                .map_err(|_| TransportError::Internal)?,
+        });
     };
     let snapshot = matches
         .snapshot(match_id)
@@ -1324,11 +1352,20 @@ struct LobbyStatusResponse {
 #[derive(Debug, serde::Serialize)]
 struct MatchAccessResponse {
     player: u8,
+    revision: u64,
+    active_player: u8,
+    completed: bool,
+    deadline_at_ms: Option<u64>,
+    server_time_ms: u64,
 }
 
 fn match_access_response(
     participants: Participants,
     actor: AccountId,
+    revision: u64,
+    state: &pwmtf_game_domain::MatchState,
+    deadline: Option<crate::ScheduledDeadline>,
+    server_time_ms: u64,
 ) -> Result<MatchAccessResponse, TransportError> {
     let player = if actor == participants.player_one {
         1
@@ -1337,7 +1374,22 @@ fn match_access_response(
     } else {
         return Err(TransportError::InvalidSubscription);
     };
-    Ok(MatchAccessResponse { player })
+    let completed = matches!(state.status(), pwmtf_game_domain::MatchStatus::Completed(_));
+    Ok(MatchAccessResponse {
+        player,
+        revision,
+        active_player: if completed {
+            0
+        } else {
+            match state.active_player() {
+                pwmtf_game_domain::Player::One => 1,
+                pwmtf_game_domain::Player::Two => 2,
+            }
+        },
+        completed,
+        deadline_at_ms: deadline.map(|deadline| deadline.due_at.value()),
+        server_time_ms,
+    })
 }
 
 async fn match_access(
@@ -1351,7 +1403,22 @@ async fn match_access(
         .participants(match_id)
         .await
         .map_err(|_| TransportError::MatchNotFound)?;
-    Ok(axum::Json(match_access_response(participants, actor)?))
+    state.ensure_match_loaded(match_id, participants).await?;
+    let matches = state.matches.lock().await;
+    let (revision, match_state) = matches
+        .match_state(match_id)
+        .ok_or(TransportError::MatchNotFound)?;
+    let deadline = matches.deadline(match_id);
+    let response = match_access_response(
+        participants,
+        actor,
+        revision,
+        match_state,
+        deadline,
+        unix_millis()?,
+    )?;
+    drop(matches);
+    Ok(axum::Json(response))
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1682,22 +1749,51 @@ mod tests {
             player_one: AccountId::new(1),
             player_two: AccountId::new(2),
         };
+        let deadline = crate::ScheduledDeadline {
+            id: crate::DeadlineId {
+                revision: 4,
+                player: pwmtf_game_domain::Player::One,
+            },
+            due_at: crate::DeadlineMillis::new(9_000),
+        };
+        let mut state = pwmtf_game_domain::MatchState::new(
+            pwmtf_game_domain::RulesProfile::standard(),
+            pwmtf_game_domain::PhysicsProfile::standard(),
+            pwmtf_game_domain::TableGeometry::standard(),
+            pwmtf_game_domain::RackSeed::new(3),
+            pwmtf_game_domain::Player::One,
+        )
+        .unwrap();
+        let response = match_access_response(
+            participants,
+            AccountId::new(1),
+            4,
+            &state,
+            Some(deadline),
+            8_000,
+        )
+        .unwrap();
+        assert_eq!(response.player, 1);
+        assert_eq!(response.revision, 4);
+        assert_eq!(response.active_player, 1);
+        assert!(!response.completed);
+        assert_eq!(response.deadline_at_ms, Some(9_000));
+        assert_eq!(response.server_time_ms, 8_000);
         assert_eq!(
-            match_access_response(participants, AccountId::new(1))
-                .unwrap()
-                .player,
-            1
-        );
-        assert_eq!(
-            match_access_response(participants, AccountId::new(2))
+            match_access_response(participants, AccountId::new(2), 0, &state, None, 8_000)
                 .unwrap()
                 .player,
             2
         );
         assert!(matches!(
-            match_access_response(participants, AccountId::new(3)),
+            match_access_response(participants, AccountId::new(3), 0, &state, None, 8_000),
             Err(TransportError::InvalidSubscription)
         ));
+        state.concede(pwmtf_game_domain::Player::Two).unwrap();
+        let terminal =
+            match_access_response(participants, AccountId::new(1), 5, &state, None, 8_000).unwrap();
+        assert!(terminal.completed);
+        assert_eq!(terminal.active_player, 0);
     }
 
     #[test]

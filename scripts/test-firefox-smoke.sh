@@ -148,14 +148,14 @@ check_entry_point() {
     entry_url=$1
     label=$2
 
-    curl --fail --silent --show-error --output /dev/null \
+    curl --fail --silent --show-error --output /dev/null --max-time 30 \
         --header 'Content-Type: application/json' \
         --data "{\"url\":\"$entry_url\"}" \
         "http://127.0.0.1:$driver_port/session/$session_id/url"
 
     attempt=0
     while :; do
-        state=$(curl --fail --silent --show-error \
+        state=$(curl --fail --silent --show-error --max-time 10 \
             --header 'Content-Type: application/json' \
             --data '{"script":"return document.querySelector(\"#game-shell\")?.dataset.clientState ?? \"missing\";","args":[]}' \
             "http://127.0.0.1:$driver_port/session/$session_id/execute/sync" \
@@ -180,7 +180,7 @@ base_url="http://127.0.0.1:$server_port/"
 check_entry_point "$base_url" normal
 check_entry_point "${base_url}?feasibility" feasibility
 
-controls_present=$(curl --fail --silent --show-error \
+controls_present=$(curl --fail --silent --show-error --max-time 10 \
     --header 'Content-Type: application/json' \
     --data '{"script":"return [\"test-platform\",\"presentation-tier\",\"physical-checks\",\"capture-toggle\",\"audio-probe\",\"download-report\"].every((id) => document.getElementById(id));","args":[]}' \
     "http://127.0.0.1:$driver_port/session/$session_id/execute/sync" \
@@ -191,7 +191,7 @@ if [ "$controls_present" != true ]; then
 fi
 
 check_entry_point "${base_url}?feasibility&tier=reduced" "reduced feasibility"
-active_tier=$(curl --fail --silent --show-error \
+active_tier=$(curl --fail --silent --show-error --max-time 10 \
     --header 'Content-Type: application/json' \
     --data '{"script":"return document.querySelector(\"#presentation-tier\")?.value ?? \"missing\";","args":[]}' \
     "http://127.0.0.1:$driver_port/session/$session_id/execute/sync" \

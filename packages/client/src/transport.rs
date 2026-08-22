@@ -153,10 +153,19 @@ impl BrowserTransport {
         self.local_player = Some(player);
     }
 
+    /// Returns whether presentation has one unresolved predicted command.
+    #[must_use]
+    pub fn has_pending_prediction(&self) -> bool {
+        self.prediction
+            .as_ref()
+            .is_some_and(PredictionState::has_pending_prediction)
+    }
+
     /// Returns whether the local participant may submit a shot or placement.
     #[must_use]
     pub fn accepts_active_player_command(&self) -> bool {
         self.accepts_gameplay_commands()
+            && !self.has_pending_prediction()
             && self.local_player.is_some_and(|player| {
                 self.authoritative_state()
                     .is_some_and(|state| state.active_player() == player)
@@ -438,10 +447,16 @@ mod tests {
         transport
             .predict_shot(pwmtf_protocol::CommandId::new([8; 16]), shot, None)
             .unwrap();
+        assert!(transport.has_pending_prediction());
+        assert!(!transport.accepts_active_player_command());
+        assert!(matches!(
+            transport.predict_shot(pwmtf_protocol::CommandId::new([9; 16]), shot, None),
+            Err(TransportClientError::WrongTurn)
+        ));
         assert!(transport.prediction().unwrap().has_pending_prediction());
         transport.command_rejected();
         assert_eq!(transport.status(), ConnectionStatus::Ready);
-        assert!(!transport.prediction().unwrap().has_pending_prediction());
+        assert!(!transport.has_pending_prediction());
         assert!(transport.take_command_rejected());
         assert!(!transport.take_command_rejected());
     }
