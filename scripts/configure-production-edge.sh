@@ -6,6 +6,11 @@ app=${FLY_APP_NAME:-pwmtf}
 zone_name=${PWMTF_ZONE_NAME:-hyperchad.dev}
 directory_path=/games/pool-with-more-than-friends
 directory_target=https://pwmtf.hyperchad.dev
+mode=${1:-all}
+if [ "$#" -gt 1 ] || { [ "$mode" != all ] && [ "$mode" != origin ] && [ "$mode" != redirect ]; }; then
+    printf '%s\n' "usage: $0 [origin|redirect]" >&2
+    exit 2
+fi
 
 for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
     eval "value=\${$name-}"
@@ -20,8 +25,8 @@ for command in curl flyctl jq; do
         exit 1
     }
 done
-if [ "$hostname" != pwmtf.hyperchad.dev ] || [ "$zone_name" != hyperchad.dev ]; then
-    printf '%s\n' "production infrastructure must use the canonical PWMTF hostname and zone" >&2
+if [ "$app" != pwmtf ] || [ "$hostname" != pwmtf.hyperchad.dev ] || [ "$zone_name" != hyperchad.dev ]; then
+    printf '%s\n' "production infrastructure must use the canonical PWMTF app, hostname, and zone" >&2
     exit 1
 fi
 
@@ -76,8 +81,21 @@ EOF
     fi
 }
 
-upsert_record AAAA "$hostname" "$fly_ipv6" true
-upsert_record CNAME "$validation_hostname" "$validation_target" false
+if [ "$mode" != redirect ]; then
+    upsert_record AAAA "$hostname" "$fly_ipv6" true
+    upsert_record CNAME "$validation_hostname" "$validation_target" false
+
+    # Cloudflare must authenticate Fly's origin certificate. Flexible or Full mode
+    # would weaken the canonical TLS boundary for every proxied request.
+    ssl_payload='{"value":"strict"}'
+    cloudflare --request PATCH --data "$ssl_payload" "$api/zones/$zone_id/settings/ssl" \
+        | jq -e '.success == true and .result.value == "strict"' >/dev/null
+fi
+
+if [ "$mode" = origin ]; then
+    printf '%s\n' "PWMTF DNS, certificate challenge, and strict origin TLS applied"
+    exit 0
+fi
 
 # The dynamic redirect phase is a shared zone resource. Preserve every existing
 # rule and replace only PWMTF's stable ref, refusing duplicate ownership.
@@ -103,4 +121,4 @@ EOF
 cloudflare --request PUT --data "$payload" "$api/zones/$zone_id/rulesets/$ruleset_id" \
     | jq -e '.success == true' >/dev/null
 
-printf '%s\n' "PWMTF DNS, certificate challenge, and managed directory redirect applied"
+printf '%s\n' "PWMTF managed directory redirect applied"

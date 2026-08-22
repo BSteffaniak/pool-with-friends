@@ -4,6 +4,9 @@ set -eu
 app=${FLY_APP_NAME:-pwmtf}
 hostname=${PWMTF_HOSTNAME:-pwmtf.hyperchad.dev}
 canonical_origin=${PWMTF_CANONICAL_ORIGIN:-https://pwmtf.hyperchad.dev}
+volume_name=${FLY_VOLUME_NAME:-pwmtf_data}
+production_smoke=${PWMTF_PRODUCTION_SMOKE_SCRIPT:-./scripts/test-production-smoke.sh}
+production_smoke_argument=${PWMTF_PRODUCTION_SMOKE_ARGUMENT:---origin-only}
 
 require_environment() {
     name=$1
@@ -17,8 +20,8 @@ require_environment() {
 require_environment PWMTF_GOOGLE_CLIENT_ID
 require_environment PWMTF_GOOGLE_CLIENT_SECRET
 
-if [ "$hostname" != pwmtf.hyperchad.dev ] || [ "$canonical_origin" != https://pwmtf.hyperchad.dev ]; then
-    printf '%s\n' "production deployment must use the canonical PWMTF hostname and origin" >&2
+if [ "$app" != pwmtf ] || [ "$hostname" != pwmtf.hyperchad.dev ] || [ "$canonical_origin" != https://pwmtf.hyperchad.dev ]; then
+    printf '%s\n' "production deployment must use the canonical PWMTF app, hostname, and origin" >&2
     exit 1
 fi
 
@@ -36,12 +39,51 @@ printf 'PWMTF_GOOGLE_CLIENT_ID=%s\nPWMTF_GOOGLE_CLIENT_SECRET=%s\n' \
     | flyctl secrets import --app "$app" --stage >/dev/null
 
 flyctl config validate --app "$app"
+volumes=$(flyctl volumes list --app "$app" --json)
+volume_count=$(jq --arg name "$volume_name" '[.[] | select((.name // .Name) == $name and (.state // .State) == "created" and (.encrypted // .Encrypted) == true and (.region // .Region) == "ord" and (.snapshot_retention // .SnapshotRetention) == 14 and (.auto_backup_enabled // .AutoBackupEnabled) == true)] | length' <<EOF
+$volumes
+EOF
+)
+if [ "$volume_count" -ne 1 ]; then
+    printf '%s\n' "production requires exactly one created encrypted $volume_name volume in ord with 14-day snapshots and automatic backups; found $volume_count" >&2
+    exit 1
+fi
 flyctl deploy --app "$app" --remote-only --ha=false --strategy immediate --wait-timeout 10m
 
 machine_count=$(flyctl status --app "$app" --json \
     | jq '[.Machines[]? | select(.state != "destroyed")] | length')
 if [ "$machine_count" -ne 1 ]; then
     printf '%s\n' "production must run exactly one Fly Machine; found $machine_count" >&2
+    exit 1
+fi
+machine_id=$(flyctl status --app "$app" --json \
+    | jq -er '[.Machines[]? | select(.state == "started")] | if length == 1 then .[0].id else error("expected exactly one started production Machine") end')
+machine_configuration=$(flyctl machine status "$machine_id" --app "$app" --display-config 2>/dev/null \
+    | sed -n '/^Config:$/,$p' | sed '1d')
+if ! jq -e --arg volume "$volume_name" '
+    any(.mounts[]?; .name == $volume and .path == "/data" and .encrypted == true)
+    and any(.services[]?;
+        .internal_port == 8080
+        and .autostop == false
+        and .autostart == true
+        and .min_machines_running == 1
+        and any(.ports[]?; .port == 80 and .force_https == true and (.handlers | index("http") != null))
+        and any(.ports[]?; .port == 443 and (.handlers | index("http") != null) and (.handlers | index("tls") != null))
+        and any(.checks[]?; .type == "http" and .path == "/readyz"))
+' <<EOF
+$machine_configuration
+EOF
+then
+    printf '%s\n' "production Machine does not preserve the required volume, availability, and readiness configuration" >&2
+    exit 1
+fi
+identity_command='set -eu; build=$(cat /app/pwmtf-build-id); source=$(cat /app/pwmtf-source-hash); test -n "$build"; test ${#source} -eq 64; grep -Fq "const candidateBuildId = \"$build\";" /app/dist/bootstrap.js; grep -Fq "const candidateSourceHash = \"$source\";" /app/dist/bootstrap.js'
+identity_result=$(flyctl machine exec --app "$app" "$machine_id" "$identity_command" --timeout 30 --json)
+if ! jq -e '(.exit_code // 0) == 0' <<EOF
+$identity_result
+EOF
+then
+    printf '%s\n' "production Machine browser bundle identity does not match its immutable image identity" >&2
     exit 1
 fi
 
@@ -67,4 +109,18 @@ fi
 # Verify the direct health boundary before the broader canonical-origin smoke.
 curl --fail --silent --show-error --max-time 20 \
     "https://${hostname}/readyz" | grep -qx ready
-./scripts/test-production-smoke.sh
+"$production_smoke" "$production_smoke_argument"
+
+# Qualify the real process-recovery boundary on every deployment. This proves
+# startup migrations and recovery for the deployed database head; acceptance
+# after real play remains a separate product criterion.
+flyctl machine restart "$machine_id" --app "$app" --signal SIGTERM --time 30
+restarted_machine_id=$(flyctl status --app "$app" --json \
+    | jq -er '[.Machines[]? | select(.state == "started")] | if length == 1 then .[0].id else error("expected exactly one restarted production Machine") end')
+if [ "$restarted_machine_id" != "$machine_id" ]; then
+    printf '%s\n' "production restart changed the canonical Machine identity" >&2
+    exit 1
+fi
+curl --fail --silent --show-error --max-time 20 \
+    "https://${hostname}/readyz" | grep -qx ready
+"$production_smoke" "$production_smoke_argument"

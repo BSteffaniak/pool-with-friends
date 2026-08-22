@@ -41,9 +41,15 @@ jobs:
           test -n "$PWMTF_GOOGLE_CLIENT_SECRET"
       - name: Install operational tools
         run: sudo apt-get update && sudo apt-get install --yes jq
-      - name: Configure canonical DNS, TLS validation, and directory redirect
-        run: ./scripts/configure-production-edge.sh
+      - name: Snapshot existing production database
+        run: ./scripts/backup-production.sh --if-running
+      - name: Configure canonical DNS and TLS validation
+        run: ./scripts/configure-production-edge.sh origin
       - name: Deploy one authoritative Machine
         run: ./scripts/deploy-production.sh
+      - name: Configure managed directory redirect
+        run: ./scripts/configure-production-edge.sh redirect
+      - name: Verify canonical origin and directory redirect
+        run: ./scripts/test-production-smoke.sh
       - name: Verify application-consistent production backup and restore
         run: ./scripts/backup-production.sh

@@ -4,6 +4,18 @@ set -eu
 app=${FLY_APP_NAME:-pwmtf}
 database=${PWMTF_DATABASE_PATH:-/data/pwmtf.db}
 backup_directory=${PWMTF_BACKUP_DIRECTORY:-/data/backups}
+allow_no_machine=false
+if [ "${1:-}" = --if-running ] && [ "$#" -eq 1 ]; then
+    allow_no_machine=true
+elif [ "$#" -ne 0 ]; then
+    printf '%s\n' "usage: $0 [--if-running]" >&2
+    exit 2
+fi
+
+if [ "$app" != pwmtf ]; then
+    printf '%s\n' "production backup must target the canonical pwmtf app" >&2
+    exit 1
+fi
 
 for command in flyctl jq; do
     command -v "$command" >/dev/null 2>&1 || {
@@ -28,6 +40,14 @@ case "$backup_directory" in
 esac
 
 status=$(flyctl status --app "$app" --json)
+started_machine_count=$(jq '[.Machines[]? | select(.state == "started")] | length' <<EOF
+$status
+EOF
+)
+if [ "$allow_no_machine" = true ] && [ "$started_machine_count" -eq 0 ]; then
+    printf '%s\n' "No started production Machine; backup skipped"
+    exit 0
+fi
 machine_id=$(jq -er '[.Machines[]? | select(.state == "started")] | if length == 1 then .[0].id else error("expected exactly one started Machine") end' <<EOF
 $status
 EOF

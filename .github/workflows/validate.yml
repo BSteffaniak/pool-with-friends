@@ -25,7 +25,11 @@ jobs:
         with:
           tool: cargo-deny,cargo-nextest@0.9.114,cargo-machete@0.8.0,wasm-bindgen-cli@0.2.127
       - name: Install operational self-test tools
-        run: sudo apt-get update && sudo apt-get install --yes sqlite3 && command -v curl && command -v openssl
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libasound2-dev libudev-dev libwayland-dev sqlite3
+          command -v curl
+          command -v openssl
       - run: cargo fmt --check
       - run: cargo check --workspace --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -57,6 +61,6 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Validate GitHub Actions workflows
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/*.yml
-      - uses: DeterminateSystems/nix-installer-action@90bb610b3b8a6e298f0e3f78de85b753d65e5259 # v19
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - name: Evaluate development shell
         run: nix flake check --no-build
