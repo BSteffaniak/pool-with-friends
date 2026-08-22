@@ -26,6 +26,8 @@ pub struct BrowserTransport {
     protocol_negotiated: bool,
     retry_attempt: u8,
     prediction: Option<PredictionState>,
+    rejected_command: bool,
+    local_player: Option<pwmtf_game_domain::Player>,
 }
 
 impl Default for BrowserTransport {
@@ -35,6 +37,8 @@ impl Default for BrowserTransport {
             protocol_negotiated: false,
             retry_attempt: 0,
             prediction: None,
+            rejected_command: false,
+            local_player: None,
         }
     }
 }
@@ -70,6 +74,7 @@ impl BrowserTransport {
     pub const fn connecting(&mut self) {
         self.status = ConnectionStatus::Connecting;
         self.protocol_negotiated = false;
+        self.rejected_command = false;
     }
 
     /// Marks the browser socket open and returns the bounded negotiation offer.
@@ -143,6 +148,30 @@ impl BrowserTransport {
         Ok(disposition)
     }
 
+    /// Sets the participant seat derived from authenticated durable membership.
+    pub const fn set_local_player(&mut self, player: pwmtf_game_domain::Player) {
+        self.local_player = Some(player);
+    }
+
+    /// Returns whether the local participant may submit a shot or placement.
+    #[must_use]
+    pub fn accepts_active_player_command(&self) -> bool {
+        self.accepts_gameplay_commands()
+            && self.local_player.is_some_and(|player| {
+                self.authoritative_state()
+                    .is_some_and(|state| state.active_player() == player)
+            })
+    }
+
+    /// Returns whether the authoritative match accepts live gameplay commands.
+    #[must_use]
+    pub fn accepts_gameplay_commands(&self) -> bool {
+        self.status == ConnectionStatus::Ready
+            && self.authoritative_state().is_some_and(|state| {
+                matches!(state.status(), pwmtf_game_domain::MatchStatus::InProgress)
+            })
+    }
+
     /// Creates and locally predicts one cue-ball placement command.
     ///
     /// # Errors
@@ -154,8 +183,8 @@ impl BrowserTransport {
         command_id: pwmtf_protocol::CommandId,
         position: pwmtf_game_domain::Vector,
     ) -> Result<CommandEnvelope, TransportClientError> {
-        if self.status != ConnectionStatus::Ready {
-            return Err(TransportClientError::NotReady);
+        if !self.accepts_active_player_command() {
+            return Err(TransportClientError::WrongTurn);
         }
         self.prediction
             .as_mut()
@@ -176,8 +205,8 @@ impl BrowserTransport {
         shot: pwmtf_game_domain::VersionedShotCommand,
         called_pocket: Option<pwmtf_game_domain::PocketId>,
     ) -> Result<CommandEnvelope, TransportClientError> {
-        if self.status != ConnectionStatus::Ready {
-            return Err(TransportClientError::NotReady);
+        if !self.accepts_active_player_command() {
+            return Err(TransportClientError::WrongTurn);
         }
         self.prediction
             .as_mut()
@@ -197,7 +226,7 @@ impl BrowserTransport {
         command_id: pwmtf_protocol::CommandId,
         player: pwmtf_game_domain::Player,
     ) -> Result<CommandEnvelope, TransportClientError> {
-        if self.status != ConnectionStatus::Ready {
+        if !self.accepts_gameplay_commands() {
             return Err(TransportClientError::NotReady);
         }
         self.prediction
@@ -205,6 +234,22 @@ impl BrowserTransport {
             .ok_or(TransportClientError::NotReady)?
             .predict_concession(command_id, player)
             .map_err(Into::into)
+    }
+
+    /// Marks the current predicted command rejected without treating an
+    /// authoritative application rejection as a transport failure.
+    pub fn command_rejected(&mut self) {
+        if let Some(prediction) = &mut self.prediction {
+            prediction.abandon_prediction();
+        }
+        self.rejected_command = true;
+    }
+
+    /// Returns and clears whether the latest command was rejected.
+    pub const fn take_command_rejected(&mut self) -> bool {
+        let rejected = self.rejected_command;
+        self.rejected_command = false;
+        rejected
     }
 
     /// Cancels local prediction after a lifecycle loss and enters retry backoff.
@@ -217,6 +262,7 @@ impl BrowserTransport {
         }
         self.status = ConnectionStatus::Backoff;
         self.protocol_negotiated = false;
+        self.rejected_command = false;
     }
 
     /// Returns bounded exponential retry delay, capped at 30 seconds.
@@ -237,6 +283,9 @@ pub enum TransportClientError {
     /// Command was attempted before authoritative initialization.
     #[error("WebSocket is not ready")]
     NotReady,
+    /// Command was attempted when the local participant was not active.
+    #[error("local participant is not the active player")]
+    WrongTurn,
     /// Wire frame was malformed or incompatible.
     #[error(transparent)]
     Protocol(#[from] ProtocolError),
@@ -277,6 +326,7 @@ mod tests {
         assert_eq!(transport.status(), ConnectionStatus::Negotiating);
         assert_eq!(transport.receive_snapshot(&snapshot(0)).unwrap(), None);
         assert_eq!(transport.status(), ConnectionStatus::Ready);
+        assert!(transport.accepts_gameplay_commands());
         transport.disconnected();
         assert_eq!(transport.status(), ConnectionStatus::Backoff);
         assert_eq!(transport.retry_delay_ms(), 500);
@@ -291,6 +341,7 @@ mod tests {
         let _ = transport.opened();
         transport.negotiated("1").unwrap();
         transport.receive_snapshot(&snapshot(0)).unwrap();
+        transport.set_local_player(Player::Two);
         let mut state =
             MatchState::from_bytes(&SnapshotEnvelope::from_bytes(&snapshot(0)).unwrap().snapshot)
                 .unwrap();
@@ -311,6 +362,88 @@ mod tests {
             .unwrap();
         assert_eq!(command.expected_revision, 1);
         assert!(!transport.prediction().unwrap().predicted().ball_in_hand());
+    }
+
+    #[test]
+    fn inactive_participant_cannot_predict_active_player_commands() {
+        let mut transport = BrowserTransport::default();
+        transport.connecting();
+        let _ = transport.opened();
+        transport.negotiated("1").unwrap();
+        transport.receive_snapshot(&snapshot(0)).unwrap();
+        transport.set_local_player(Player::Two);
+        assert!(transport.accepts_gameplay_commands());
+        assert!(!transport.accepts_active_player_command());
+        let shot = pwmtf_game_domain::VersionedShotCommand::new(
+            pwmtf_game_domain::Aim::new(0).unwrap(),
+            pwmtf_game_domain::ShotPower::new(1).unwrap(),
+            pwmtf_game_domain::Spin::CENTER,
+        );
+        assert!(matches!(
+            transport.predict_shot(pwmtf_protocol::CommandId::new([7; 16]), shot, None),
+            Err(TransportClientError::WrongTurn)
+        ));
+    }
+
+    #[test]
+    fn terminal_authority_disables_all_gameplay_prediction() {
+        let mut state = MatchState::new(
+            RulesProfile::standard(),
+            PhysicsProfile::standard(),
+            TableGeometry::standard(),
+            RackSeed::new(42),
+            Player::One,
+        )
+        .unwrap();
+        state.concede(Player::Two).unwrap();
+        let terminal = SnapshotEnvelope::new(1, state.checksum(), state.to_bytes())
+            .unwrap()
+            .to_bytes();
+        let mut transport = BrowserTransport::default();
+        transport.connecting();
+        let _ = transport.opened();
+        transport.negotiated("1").unwrap();
+        transport.receive_snapshot(&terminal).unwrap();
+        transport.set_local_player(Player::One);
+        assert_eq!(transport.status(), ConnectionStatus::Ready);
+        assert!(!transport.accepts_gameplay_commands());
+        let shot = pwmtf_game_domain::VersionedShotCommand::new(
+            pwmtf_game_domain::Aim::new(0).unwrap(),
+            pwmtf_game_domain::ShotPower::new(1).unwrap(),
+            pwmtf_game_domain::Spin::CENTER,
+        );
+        assert!(matches!(
+            transport.predict_shot(pwmtf_protocol::CommandId::new([5; 16]), shot, None),
+            Err(TransportClientError::WrongTurn)
+        ));
+        assert!(matches!(
+            transport.predict_concession(pwmtf_protocol::CommandId::new([6; 16]), Player::One,),
+            Err(TransportClientError::NotReady)
+        ));
+    }
+
+    #[test]
+    fn authoritative_command_rejection_abandons_prediction_without_disconnect() {
+        let mut transport = BrowserTransport::default();
+        transport.connecting();
+        let _ = transport.opened();
+        transport.negotiated("1").unwrap();
+        transport.receive_snapshot(&snapshot(0)).unwrap();
+        transport.set_local_player(Player::One);
+        let shot = pwmtf_game_domain::VersionedShotCommand::new(
+            pwmtf_game_domain::Aim::new(0).unwrap(),
+            pwmtf_game_domain::ShotPower::new(1).unwrap(),
+            pwmtf_game_domain::Spin::CENTER,
+        );
+        transport
+            .predict_shot(pwmtf_protocol::CommandId::new([8; 16]), shot, None)
+            .unwrap();
+        assert!(transport.prediction().unwrap().has_pending_prediction());
+        transport.command_rejected();
+        assert_eq!(transport.status(), ConnectionStatus::Ready);
+        assert!(!transport.prediction().unwrap().has_pending_prediction());
+        assert!(transport.take_command_rejected());
+        assert!(!transport.take_command_rejected());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # PWMTF browser client
 
-This package owns the production-candidate Bevy/WASM presentation, browser input, canonical prediction and reconciliation, secure-WebSocket lifecycle, interpolation, and audio. It intentionally contains no authoritative pool physics or rules. Active-turn and terminal result UI is projected from validated authoritative snapshots; completion hides live match controls in both Bevy and browser chrome, presents the canonical winner/reason, and enables the existing durable rematch flow.
+This package owns the production-candidate Bevy/WASM presentation, browser input, canonical prediction and reconciliation, secure-WebSocket lifecycle, interpolation, and audio. It intentionally contains no authoritative pool physics or rules. Authenticated durable seat data and authoritative active-player state gate local shot/placement input and the cue/guide/power affordances, while the server remains the acceptance authority. Active-turn and terminal result UI is projected from validated authoritative snapshots; completion hides live match controls in both Bevy and browser chrome, disables all gameplay prediction and pointer release while preserving the terminal subscription, presents the canonical winner/reason, and enables the existing durable rematch flow. An authoritative command rejection abandons the affected local prediction and presents the rejection without misclassifying a healthy socket as disconnected.
 
 ## Native check
 

@@ -63,6 +63,7 @@ struct CanonicalPresentation {
     target: std::collections::BTreeMap<u8, Vec2>,
     pocketed: std::collections::BTreeSet<u8>,
     status: Option<String>,
+    active_player: Option<pwmtf_game_domain::Player>,
     completed: bool,
 }
 
@@ -194,6 +195,46 @@ pub fn match_socket_retry_delay_ms() -> u64 {
 #[must_use]
 pub fn match_revision() -> Option<u64> {
     browser_transport::authoritative_revision()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Sets the authenticated participant seat used only to gate local input.
+///
+/// # Errors
+///
+/// Returns a JavaScript exception unless `player` is one or two.
+pub fn set_match_player(player: u8) -> Result<(), wasm_bindgen::JsValue> {
+    let player = match player {
+        1 => pwmtf_game_domain::Player::One,
+        2 => pwmtf_game_domain::Player::Two,
+        _ => return Err(wasm_bindgen::JsValue::from_str("invalid participant seat")),
+    };
+    browser_transport::set_local_player(player);
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Returns whether the local participant may submit active-player commands.
+#[must_use]
+pub fn match_accepts_active_player_command() -> bool {
+    browser_transport::accepts_active_player_command()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Returns and clears whether authority rejected the latest gameplay command.
+pub fn match_command_rejected() -> bool {
+    browser_transport::take_command_rejected()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Returns whether the authoritative match accepts gameplay commands.
+#[must_use]
+pub fn match_accepts_gameplay_commands() -> bool {
+    browser_transport::accepts_gameplay_commands()
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -591,6 +632,7 @@ impl CanonicalPresentation {
             pwmtf_game_domain::MatchStatus::Completed(outcome) => Some(outcome),
         };
         self.completed = outcome.is_some();
+        self.active_player = (!self.completed).then_some(state.active_player());
         self.status = Some(match_status_text(state.active_player(), outcome));
         self.target.clear();
         self.pocketed.clear();
@@ -617,6 +659,7 @@ fn synchronize_canonical_presentation(mut presentation: ResMut<CanonicalPresenta
     presentation.checksum = Some(checksum);
     if let Some((active_player, outcome)) = browser_transport::authoritative_match_info() {
         presentation.completed = outcome.is_some();
+        presentation.active_player = (!presentation.completed).then_some(active_player);
         presentation.status = Some(match_status_text(active_player, outcome));
     }
     presentation.target.clear();
@@ -655,10 +698,14 @@ fn update_match_control_visibility(
     if !presentation.is_changed() {
         return;
     }
-    let visibility = if presentation.completed {
-        Visibility::Hidden
-    } else {
+    #[cfg(target_arch = "wasm32")]
+    let local_may_act = browser_transport::accepts_active_player_command();
+    #[cfg(not(target_arch = "wasm32"))]
+    let local_may_act = presentation.active_player.is_some();
+    let visibility = if local_may_act {
         Visibility::Inherited
+    } else {
+        Visibility::Hidden
     };
     for mut control in &mut controls {
         *control = visibility;
@@ -883,6 +930,14 @@ fn update_input(
 ) {
     let mouse_is_pressed = mouse.pressed(MouseButton::Left);
     let any_pressed = mouse_is_pressed || touches.iter().next().is_some();
+    #[cfg(target_arch = "wasm32")]
+    if !browser_transport::accepts_active_player_command() {
+        if any_pressed {
+            input.release_active_touch(true);
+        }
+        *was_pressed = any_pressed;
+        return;
+    }
     if *was_pressed && !any_pressed {
         #[cfg(target_arch = "wasm32")]
         {
@@ -1030,6 +1085,7 @@ mod tests {
         let mut presentation = CanonicalPresentation::default();
         presentation.project(&state);
         assert_eq!(presentation.target.len(), 16);
+        assert_eq!(presentation.active_player, Some(Player::One));
         assert!(!presentation.completed);
         assert!(presentation.target.contains_key(&0));
         assert!(presentation.pocketed.is_empty());
@@ -1056,6 +1112,7 @@ mod tests {
         let mut presentation = CanonicalPresentation::default();
         presentation.project(&state);
         assert!(presentation.completed);
+        assert_eq!(presentation.active_player, None);
         assert_eq!(presentation.status.as_deref(), Some("Player 1 wins"));
     }
 

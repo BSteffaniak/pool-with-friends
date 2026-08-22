@@ -1458,6 +1458,12 @@ const socketModule = {
   match_socket_retry_delay_ms() {
     return this.delay;
   },
+  commandRejected: false,
+  match_command_rejected() {
+    const rejected = this.commandRejected;
+    this.commandRejected = false;
+    return rejected;
+  },
   match_revision() {
     return 3;
   },
@@ -1466,6 +1472,9 @@ const socketModule = {
   },
   match_winner() {
     return 0;
+  },
+  match_accepts_gameplay_commands() {
+    return this.match_winner() === 0;
   },
   match_completion_reason() {
     return "";
@@ -1536,6 +1545,11 @@ socketModule.ready = true;
 socketContext.monitor();
 if (!socketContext.matchSocketActive || socketContext.matchStatus.textContent !== "Connected · revision 3 · your turn") {
   throw new Error("ready match socket was not presented as connected with authoritative turn state");
+}
+socketModule.commandRejected = true;
+socketContext.monitor();
+if (socketContext.matchStatus.textContent !== "Command rejected · synchronized to authority") {
+  throw new Error("authoritative command rejection was not presented without disconnecting");
 }
 socketModule.match_winner = () => 1;
 socketModule.match_completion_reason = () => "legal-eight-ball";

@@ -1668,6 +1668,10 @@ function startMatchSocket(module) {
     if (module.match_socket_ready()) {
       matchSocketActive = true;
       matchConnectStartedAt = null;
+      const commandRejected = module.match_command_rejected();
+      if (commandRejected) {
+        concedeMatchButton.disabled = false;
+      }
       if (presentMatchCompletion(module)) {
         updateGameplayAudio(module);
         return;
@@ -1684,9 +1688,9 @@ function startMatchSocket(module) {
           : matchPlayerSeat === activePlayer
             ? " · your turn"
             : ` · player ${activePlayer}'s turn`;
-      matchStatus.textContent = `${
-        revision === undefined ? "Connected" : `Connected · revision ${revision}`
-      }${turn}`;
+      matchStatus.textContent = commandRejected
+        ? "Command rejected · synchronized to authority"
+        : `${revision === undefined ? "Connected" : `Connected · revision ${revision}`}${turn}`;
       updateGameplayAudio(module);
       return;
     }
@@ -2124,6 +2128,9 @@ try {
   wasmModule = await import("./pwmtf_client.js");
   await wasmModule.default();
   await sessionReady;
+  if (matchPlayerSeat !== null) {
+    wasmModule.set_match_player(matchPlayerSeat);
+  }
   startMatchSocket(wasmModule);
   await new Promise((resolve) => window.requestAnimationFrame(resolve));
   await new Promise((resolve) => window.requestAnimationFrame(resolve));

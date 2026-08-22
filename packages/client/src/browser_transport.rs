@@ -44,6 +44,9 @@ pub fn connect(url: &str) -> Result<(), wasm_bindgen::JsValue> {
             let result = TRANSPORT.with(|transport| {
                 let mut transport = transport.borrow_mut();
                 if transport.status() == ConnectionStatus::Ready {
+                    if text == "rejected" {
+                        transport.command_rejected();
+                    }
                     Ok(())
                 } else {
                     transport.negotiated(&text)
@@ -195,6 +198,28 @@ pub fn disconnect() {
         }
     });
     TRANSPORT.with(|transport| transport.borrow_mut().disconnected());
+}
+
+/// Sets the participant seat derived from authenticated durable membership.
+pub fn set_local_player(player: pwmtf_game_domain::Player) {
+    TRANSPORT.with(|transport| transport.borrow_mut().set_local_player(player));
+}
+
+/// Returns whether the local participant may submit active-player commands.
+#[must_use]
+pub fn accepts_active_player_command() -> bool {
+    TRANSPORT.with(|transport| transport.borrow().accepts_active_player_command())
+}
+
+/// Returns and clears whether the authoritative server rejected the latest command.
+pub fn take_command_rejected() -> bool {
+    TRANSPORT.with(|transport| transport.borrow_mut().take_command_rejected())
+}
+
+/// Returns whether the authoritative match accepts live gameplay commands.
+#[must_use]
+pub fn accepts_gameplay_commands() -> bool {
+    TRANSPORT.with(|transport| transport.borrow().accepts_gameplay_commands())
 }
 
 /// Returns whether authoritative state permits cue-ball placement.
