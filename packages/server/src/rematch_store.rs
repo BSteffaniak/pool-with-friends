@@ -80,12 +80,34 @@ pub async fn offer_rematch(
         .await?;
     match existing.as_slice() {
         [] => {
-            tx.insert("rematch_offers")
+            let insert = tx
+                .insert("rematch_offers")
                 .value("previous_match_id", previous_match_id.value().to_string())
                 .value("offered_by_account_id", actor.value().to_string())
                 .value("accepted_match_id", DatabaseValue::Null)
                 .execute(&*tx)
-                .await?;
+                .await;
+            if let Err(error) = insert {
+                let current = tx
+                    .select("rematch_offers")
+                    .where_eq("previous_match_id", previous_match_id.value().to_string())
+                    .execute(&*tx)
+                    .await?;
+                return match current.as_slice() {
+                    [row]
+                        if account(row, "offered_by_account_id")? == actor
+                            && is_null(row, "accepted_match_id")? =>
+                    {
+                        Ok(())
+                    }
+                    [row] if !is_null(row, "accepted_match_id")? => {
+                        Err(RematchStoreError::AlreadyAccepted)
+                    }
+                    [_] => Err(RematchStoreError::OfferExists),
+                    [] => Err(RematchStoreError::Database(error)),
+                    _ => Err(RematchStoreError::Malformed),
+                };
+            }
             tx.commit().await?;
             Ok(())
         }
@@ -413,6 +435,30 @@ mod tests {
             .await
             .unwrap();
         previous
+    }
+
+    #[test]
+    fn concurrent_opposing_rematch_offers_create_one_offer() {
+        block_on(async {
+            let db: std::sync::Arc<dyn Database> = database().await.into();
+            insert_completed_match(&*db, MatchId::new(6)).await;
+            let first_db = std::sync::Arc::clone(&db);
+            let second_db = std::sync::Arc::clone(&db);
+            let (first, second) = futures_lite::future::zip(
+                async move { offer_rematch(&*first_db, MatchId::new(6), AccountId::new(1)).await },
+                async move { offer_rematch(&*second_db, MatchId::new(6), AccountId::new(2)).await },
+            )
+            .await;
+            assert!(first.is_ok() ^ second.is_ok());
+            assert_eq!(
+                db.select("rematch_offers")
+                    .execute(&*db)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        });
     }
 
     #[test]

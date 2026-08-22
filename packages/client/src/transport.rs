@@ -113,16 +113,25 @@ impl BrowserTransport {
         {
             return Err(TransportClientError::NotReady);
         }
-        let snapshot = SnapshotEnvelope::from_bytes(bytes)?;
+        let snapshot = SnapshotEnvelope::from_bytes(bytes).map_err(|error| {
+            self.disconnected();
+            TransportClientError::Protocol(error)
+        })?;
         if self.has_revision(snapshot.revision) {
             return Ok(None);
         }
-        let disposition = if let Some(prediction) = &mut self.prediction {
-            Some(prediction.reconcile(&snapshot)?)
+        let reconciliation = if let Some(prediction) = &mut self.prediction {
+            prediction.reconcile(&snapshot).map(Some)
         } else {
-            self.prediction = Some(PredictionState::from_snapshot(&snapshot)?);
-            None
+            PredictionState::from_snapshot(&snapshot).map(|prediction| {
+                self.prediction = Some(prediction);
+                None
+            })
         };
+        let disposition = reconciliation.map_err(|error| {
+            self.disconnected();
+            TransportClientError::Prediction(error)
+        })?;
         self.retry_attempt = 0;
         self.status = ConnectionStatus::Ready;
         Ok(disposition)
@@ -197,9 +206,11 @@ impl BrowserTransport {
         if let Some(prediction) = &mut self.prediction {
             prediction.abandon_prediction();
         }
+        if self.status != ConnectionStatus::Backoff {
+            self.retry_attempt = self.retry_attempt.saturating_add(1).min(8);
+        }
         self.status = ConnectionStatus::Backoff;
         self.protocol_negotiated = false;
-        self.retry_attempt = self.retry_attempt.saturating_add(1).min(8);
     }
 
     /// Returns bounded exponential retry delay, capped at 30 seconds.
@@ -263,6 +274,8 @@ mod tests {
         transport.disconnected();
         assert_eq!(transport.status(), ConnectionStatus::Backoff);
         assert_eq!(transport.retry_delay_ms(), 500);
+        transport.disconnected();
+        assert_eq!(transport.retry_delay_ms(), 500);
     }
 
     #[test]
@@ -320,6 +333,7 @@ mod tests {
         let _ = transport.opened();
         transport.negotiated("1").unwrap();
         assert!(transport.receive_snapshot(&[0, 1]).is_err());
+        assert_eq!(transport.status(), ConnectionStatus::Backoff);
     }
 
     #[test]

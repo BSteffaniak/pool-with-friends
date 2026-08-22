@@ -30,7 +30,10 @@ pub fn connect(url: &str) -> Result<(), wasm_bindgen::JsValue> {
     let opened_socket = socket.clone();
     let on_open = Closure::<dyn FnMut(Event)>::new(move |_| {
         let offer = TRANSPORT.with(|transport| transport.borrow_mut().opened());
-        let _ = opened_socket.send_with_str(&offer);
+        if opened_socket.send_with_str(&offer).is_err() {
+            TRANSPORT.with(|transport| transport.borrow_mut().disconnected());
+            let _ = opened_socket.close();
+        }
     });
     socket.set_onopen(Some(on_open.as_ref().unchecked_ref()));
     on_open.forget();
@@ -47,17 +50,25 @@ pub fn connect(url: &str) -> Result<(), wasm_bindgen::JsValue> {
                 }
             });
             if result.is_err() {
+                TRANSPORT.with(|transport| {
+                    let mut transport = transport.borrow_mut();
+                    if transport.status() != ConnectionStatus::Backoff {
+                        transport.disconnected();
+                    }
+                });
                 let _ = message_socket.close();
             }
             return;
         }
         let Ok(buffer) = event.data().dyn_into::<ArrayBuffer>() else {
+            TRANSPORT.with(|transport| transport.borrow_mut().disconnected());
             let _ = message_socket.close();
             return;
         };
         let bytes = Uint8Array::new(&buffer).to_vec();
         let result = TRANSPORT.with(|transport| transport.borrow_mut().receive_snapshot(&bytes));
         if result.is_err() {
+            TRANSPORT.with(|transport| transport.borrow_mut().disconnected());
             let _ = message_socket.close();
         }
     });
