@@ -1,7 +1,7 @@
 //! Rebuildable match-summary projection derived from canonical snapshots.
 
 use crate::{AccountId, MatchId, Participants};
-use pwmtf_game_domain::{CompletionReason, MatchState, MatchStatus, Player};
+use pwmtf_game_domain::{CompletionReason, MatchConfiguration, MatchState, MatchStatus, Player};
 use switchy_database::{Database, query::FilterableQuery as _};
 use thiserror::Error;
 
@@ -46,7 +46,10 @@ pub async fn rebuild_match_summaries(
         let snapshot = decode_bytes(&text(&row, "canonical_snapshot")?)?;
         let checksum = parse_u64(&row, "canonical_checksum")?;
         let state = MatchState::from_bytes(&snapshot).map_err(|_| ProjectionError::Malformed)?;
-        if state.checksum() != checksum {
+        let configuration =
+            MatchConfiguration::from_bytes(&decode_bytes(&text(&row, "match_configuration")?)?)
+                .map_err(|_| ProjectionError::Malformed)?;
+        if state.configuration() != configuration || state.checksum() != checksum {
             return Err(ProjectionError::Malformed);
         }
         let MatchStatus::Completed(outcome) = state.status() else {
@@ -243,6 +246,10 @@ mod tests {
                 .value("canonical_revision", 1_i64)
                 .value("canonical_snapshot", encode_bytes(&state.to_bytes()))
                 .value("canonical_checksum", checksum_i64(state.checksum()))
+                .value(
+                    "match_configuration",
+                    encode_bytes(&state.configuration().to_bytes()),
+                )
                 .value("deadline_revision", Option::<i64>::None)
                 .value("deadline_player", Option::<i64>::None)
                 .value("deadline_at_ms", Option::<i64>::None)

@@ -54,6 +54,16 @@ pub async fn create_challenge(
     if from == to {
         return Err(SocialStoreError::SelfChallenge);
     }
+    let duplicate = db
+        .select("challenges")
+        .where_eq("from_account_id", from.value().to_string())
+        .where_eq("to_account_id", to.value().to_string())
+        .where_eq("status", "pending")
+        .execute(db)
+        .await?;
+    if !duplicate.is_empty() {
+        return Err(SocialStoreError::DuplicateChallenge);
+    }
     db.insert("challenges")
         .value("challenge_id", id.value().to_string())
         .value("from_account_id", from.value().to_string())
@@ -195,10 +205,11 @@ pub async fn revoke_invitation(
     id: InvitationId,
     actor: AccountId,
 ) -> Result<(), SocialStoreError> {
-    let rows = db
+    let tx = db.begin_transaction().await?;
+    let rows = tx
         .select("invitations")
         .where_eq("invitation_id", id.value().to_string())
-        .execute(db)
+        .execute(&*tx)
         .await?;
     let row = exactly_one(&rows)?;
     if account(row, "creator_id")? != actor {
@@ -207,16 +218,18 @@ pub async fn revoke_invitation(
     if !is_null(row, "redeemed_lobby_id")? {
         return Err(SocialStoreError::AlreadyUsed);
     }
-    let updated = db
+    let updated = tx
         .update("invitations")
         .value("revoked", 1_i64)
         .where_eq("invitation_id", id.value().to_string())
         .where_eq("revoked", 0_i64)
-        .execute(db)
+        .where_eq("redeemed_lobby_id", DatabaseValue::Null)
+        .execute(&*tx)
         .await?;
     if updated.len() != 1 {
         return Err(SocialStoreError::Revoked);
     }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -248,6 +261,12 @@ pub async fn redeem_invitation_into_lobby(
         return Err(SocialStoreError::Revoked);
     }
     if integer(row, "expires_at_ms")? <= to_i64(now)? {
+        tx.delete("invitations")
+            .where_eq("invitation_id", text(row, "invitation_id")?)
+            .where_eq("redeemed_lobby_id", DatabaseValue::Null)
+            .execute(&*tx)
+            .await?;
+        tx.commit().await?;
         return Err(SocialStoreError::Expired);
     }
     if !is_null(row, "redeemed_lobby_id")? {
@@ -294,6 +313,9 @@ pub enum SocialStoreError {
     /// Challenge targets its creator.
     #[error("cannot challenge self")]
     SelfChallenge,
+    /// Same directed pending challenge already exists.
+    #[error("pending challenge already exists")]
+    DuplicateChallenge,
     /// Invitation creator attempted redemption.
     #[error("cannot redeem own invitation")]
     SelfInvitation,
@@ -398,6 +420,16 @@ mod tests {
             )
             .await
             .unwrap();
+            assert!(matches!(
+                create_challenge(
+                    &*db,
+                    ChallengeId::new(21),
+                    AccountId::new(1),
+                    AccountId::new(3),
+                )
+                .await,
+                Err(SocialStoreError::DuplicateChallenge)
+            ));
             create_challenge(
                 &*db,
                 ChallengeId::new(10),
@@ -571,6 +603,14 @@ mod tests {
                 .await,
                 Err(SocialStoreError::Expired)
             ));
+            assert!(
+                db.select("invitations")
+                    .where_eq("invitation_id", "3")
+                    .execute(&*db)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
             assert!(
                 db.select("waiting_lobbies")
                     .execute(&*db)

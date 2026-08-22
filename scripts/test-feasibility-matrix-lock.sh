@@ -63,4 +63,18 @@ if [ -e "$tmp/evidence/decision.md" ] || [ -e "$tmp/evidence/size.json" ]; then
     exit 1
 fi
 
+ln -s "$tmp/missing-decision" "$tmp/evidence/decision-link.md"
+if PWMTF_FEASIBILITY_REPORTS="$tmp/reports" \
+    PWMTF_FEASIBILITY_DECISION="$tmp/evidence/decision-link.md" \
+    PWMTF_FEASIBILITY_SIZE_EVIDENCE="$tmp/evidence/size-link.json" \
+    "$root/scripts/validate-feasibility-matrix.sh" >/dev/null 2>"$tmp/symlink.err"; then
+    printf '%s\n' "matrix validator unexpectedly replaced an evidence symlink" >&2
+    exit 1
+fi
+if ! grep -q 'acceptance decision already exists' "$tmp/symlink.err"; then
+    cat "$tmp/symlink.err" >&2
+    printf '%s\n' "matrix validator did not reject an evidence symlink" >&2
+    exit 1
+fi
+
 printf '%s\n' "feasibility matrix bundle-lock self-test passed"

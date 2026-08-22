@@ -45,7 +45,10 @@ pub use lobby::{
     LobbyError, LobbyId, LobbyJournal, LobbyJournalError, LobbyRecord, LobbyService, LobbyStatus,
     LobbyTransition,
 };
-pub use lobby_store::{LobbyStoreError, cancel_lobby, load_lobby, start_lobby};
+pub use lobby_store::{
+    LobbyStoreError, cancel_lobby, connect_lobby, disconnect_lobby, heartbeat_lobby, load_lobby,
+    lobby_ready, ready_lobby, start_lobby, start_ready_lobby,
+};
 pub use migrations::{migrate, migrations};
 pub use oidc::{GOOGLE_ISSUER, GoogleOidcClient, GoogleOidcError, OidcAttempt};
 pub use oidc_store::{
@@ -54,7 +57,9 @@ pub use oidc_store::{
 };
 pub use profile_store::{ProfileStoreError, account_for_handle, assign_handle, handle_for_account};
 pub use projection_store::{MatchSummary, ProjectionError, match_summary, rebuild_match_summaries};
-pub use rematch_store::{RematchStoreError, accept_rematch, offer_rematch};
+pub use rematch_store::{
+    PendingRematch, RematchStoreError, accept_rematch, offer_rematch, pending_rematches_for,
+};
 pub use session_store::{
     SessionStoreError, create_session as create_stored_session, insert_session,
     resolve_session as resolve_stored_session, resolve_token as resolve_session_token,
@@ -135,6 +140,12 @@ impl ConnectionId {
     pub const fn new(value: u128) -> Self {
         Self(value)
     }
+
+    /// Returns the stable numeric connection identifier.
+    #[must_use]
+    pub const fn value(self) -> u128 {
+        self.0
+    }
 }
 
 /// Authorized live match subscription registry.
@@ -195,6 +206,14 @@ impl SubscriptionRegistry {
             .map_or_else(Vec::new, |connections| {
                 connections.iter().copied().collect()
             })
+    }
+
+    /// Returns whether one authenticated connection is subscribed to a match.
+    #[must_use]
+    pub fn is_subscribed(&self, connection: ConnectionId, match_id: MatchId) -> bool {
+        self.subscriptions
+            .get(&match_id)
+            .is_some_and(|connections| connections.contains(&connection))
     }
 }
 
@@ -377,6 +396,9 @@ pub enum RecoveryError {
     /// Canonical snapshot is malformed or incompatible.
     #[error("durable journal contains an invalid canonical snapshot")]
     InvalidSnapshot,
+    /// Snapshot tail does not match canonical command replay.
+    #[error("durable snapshot tail does not match canonical replay")]
+    ReplayMismatch,
     /// Snapshot checksum does not match the durable record.
     #[error("durable canonical snapshot checksum mismatch")]
     ChecksumMismatch,
@@ -619,7 +641,7 @@ impl<J: CommandJournal> MatchService<J> {
         }
         let mut accepted = BTreeMap::new();
         let mut previous_revision = 0;
-        let mut state = None;
+        let mut state: Option<MatchState> = None;
         let mut records_last_deadline = None;
         for record in records {
             if record.match_id != match_id || record.revision != previous_revision + 1 {
@@ -628,9 +650,23 @@ impl<J: CommandJournal> MatchService<J> {
             if accepted.contains_key(&record.command_id) {
                 return Err(RecoveryError::DuplicateCommand);
             }
-            CommandEnvelope::from_bytes(&record.frame).map_err(|_| RecoveryError::InvalidFrame)?;
+            let envelope = CommandEnvelope::from_bytes(&record.frame)
+                .map_err(|_| RecoveryError::InvalidFrame)?;
+            if envelope.expected_revision != previous_revision
+                || envelope.command_id != record.command_id
+            {
+                return Err(RecoveryError::InvalidFrame);
+            }
             let restored = MatchState::from_bytes(&record.snapshot)
                 .map_err(|_| RecoveryError::InvalidSnapshot)?;
+            if let Some(mut replayed) = state.clone() {
+                let replayed_result = replayed
+                    .apply_command(envelope.command)
+                    .map_err(|_| RecoveryError::ReplayMismatch)?;
+                if replayed_result != record.result || replayed != restored {
+                    return Err(RecoveryError::ReplayMismatch);
+                }
+            }
             if restored.checksum() != record.checksum {
                 return Err(RecoveryError::ChecksumMismatch);
             }
@@ -922,7 +958,10 @@ mod tests {
                 registry.subscribers(MatchId::new(9)),
                 vec![ConnectionId::new(1), ConnectionId::new(2)]
             );
+            assert!(registry.is_subscribed(ConnectionId::new(1), MatchId::new(9)));
+            assert!(!registry.is_subscribed(ConnectionId::new(3), MatchId::new(9)));
             registry.disconnect(ConnectionId::new(1));
+            assert!(!registry.is_subscribed(ConnectionId::new(1), MatchId::new(9)));
             assert_eq!(
                 registry.subscribers(MatchId::new(9)),
                 vec![ConnectionId::new(2)]
@@ -1116,6 +1155,51 @@ mod tests {
             assert_eq!(duplicate.result, first.result);
             assert!(duplicate.duplicate);
             assert_eq!(recovered.journal.records.len(), 1);
+        });
+    }
+
+    #[test]
+    fn recovery_replays_snapshot_tail_and_rejects_divergence() {
+        block_on(async {
+            let mut original = service();
+            original
+                .apply(
+                    MatchId::new(9),
+                    AccountId::new(1),
+                    envelope(0, 12, MatchCommand::Timeout),
+                )
+                .await
+                .unwrap();
+            original
+                .apply(
+                    MatchId::new(9),
+                    AccountId::new(2),
+                    envelope(1, 13, MatchCommand::Timeout),
+                )
+                .await
+                .unwrap();
+            let mut records = original.journal.records.clone();
+            records[1].snapshot = records[0].snapshot.clone();
+            records[1].checksum = MatchState::from_bytes(&records[1].snapshot)
+                .unwrap()
+                .checksum();
+            let mut recovered = MatchService::new(MemoryJournal {
+                records,
+                fail: false,
+            });
+            assert_eq!(
+                recovered
+                    .recover_match(
+                        MatchId::new(9),
+                        Participants {
+                            player_one: AccountId::new(1),
+                            player_two: AccountId::new(2),
+                        },
+                    )
+                    .await,
+                Err(RecoveryError::ReplayMismatch)
+            );
+            assert!(recovered.match_state(MatchId::new(9)).is_none());
         });
     }
 

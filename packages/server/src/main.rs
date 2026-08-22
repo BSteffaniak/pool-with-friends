@@ -10,6 +10,7 @@ use thiserror::Error;
 const DEFAULT_BIND: &str = "0.0.0.0:8080";
 const DEFAULT_DATABASE_PATH: &str = "/data/pwmtf.db";
 const DEFAULT_CALLBACK: &str = "https://pwmtf.hyperchad.dev/auth/google/callback";
+const OIDC_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
 #[tokio::main]
 async fn main() {
@@ -50,8 +51,17 @@ async fn run() -> Result<(), StartupError> {
 }
 
 async fn scheduler_loop(state: Arc<HttpState>) {
+    let mut next_oidc_cleanup = 0_u64;
     loop {
         let now = unix_millis();
+        if now >= next_oidc_cleanup {
+            if let Err(error) = state.cleanup_oidc_attempts(now).await {
+                eprintln!("OIDC attempt cleanup failed: {error}");
+            }
+            next_oidc_cleanup = now.saturating_add(
+                u64::try_from(OIDC_CLEANUP_INTERVAL.as_millis()).unwrap_or(u64::MAX),
+            );
+        }
         if let Err(error) = state
             .poll_due_deadlines(pwmtf_server::DeadlineMillis::new(now))
             .await
@@ -139,8 +149,8 @@ impl Configuration {
             web_root: environment("PWMTF_WEB_ROOT")
                 .unwrap_or_else(|| "/app/dist".to_owned())
                 .into(),
-            google_client_id: required_environment("PWMTF_GOOGLE_CLIENT_ID")?,
-            google_client_secret: required_environment("PWMTF_GOOGLE_CLIENT_SECRET")?,
+            google_client_id: validate_secret_environment("PWMTF_GOOGLE_CLIENT_ID")?,
+            google_client_secret: validate_secret_environment("PWMTF_GOOGLE_CLIENT_SECRET")?,
             google_callback: callback,
         })
     }
@@ -153,8 +163,20 @@ fn environment(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn required_environment(name: &str) -> Result<String, StartupError> {
-    environment(name).ok_or(StartupError::Configuration)
+fn validate_secret_environment(name: &str) -> Result<String, StartupError> {
+    let value = environment(name).ok_or(StartupError::Configuration)?;
+    validate_secret_value(value)
+}
+
+fn validate_secret_value(value: String) -> Result<String, StartupError> {
+    if value.len() > 4_096
+        || value.chars().any(char::is_whitespace)
+        || value.chars().any(char::is_control)
+    {
+        Err(StartupError::Configuration)
+    } else {
+        Ok(value)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -176,6 +198,24 @@ enum StartupError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secret_configuration_rejects_whitespace_controls_and_oversize_values() {
+        assert_eq!(
+            validate_secret_value("client-id".to_owned()).unwrap(),
+            "client-id"
+        );
+        for value in [" secret", "secret ", "sec\nret", "two words"] {
+            assert!(matches!(
+                validate_secret_value(value.to_owned()),
+                Err(StartupError::Configuration)
+            ));
+        }
+        assert!(matches!(
+            validate_secret_value("x".repeat(4_097)),
+            Err(StartupError::Configuration)
+        ));
+    }
 
     #[test]
     fn production_constants_use_canonical_origin() {

@@ -6,7 +6,7 @@ The planned production experience uses a Bevy WebAssembly client with immediate 
 
 ## Status
 
-The repository is in its foundation and technical-feasibility stage. Product requirements and the production completion path are tracked in the local `pool-with-more-than-friends-progress.md` document.
+The repository now contains the renderer-independent canonical game domain, bounded protocol, authoritative native server, Switchy persistence, and Bevy WebAssembly client. Core gameplay, social/lobby/rematch flows, prediction/reconciliation, recovery, deployment packaging, and qualification tooling are implemented; live infrastructure, physical mobile acceptance, final presentation/audio polish, and disputed launch-rule evidence remain open in the local progress document.
 
 ## Architecture
 
@@ -20,7 +20,7 @@ Read `INVARIANTS.md` for durable architecture and `AGENTS.md` for contributor re
 
 ## Development
 
-The workspace contains the concrete `pwmtf_client` feasibility package and no speculative domain, protocol, or server packages. As implementation packages are introduced, use:
+The workspace contains the concrete `pwmtf_game_domain`, `pwmtf_protocol`, `pwmtf_server`, and `pwmtf_client` packages. Use:
 
 ```sh
 cargo fmt --check
@@ -52,6 +52,10 @@ cargo deny check
 ./scripts/test-edge-smoke.sh
 ./scripts/test-firefox-smoke.sh
 ./scripts/test-safari-smoke.sh
+./scripts/test-production-smoke.sh
+./scripts/test-production-smoke-self.sh
+./scripts/test-native-deployment-smoke.sh
+./scripts/test-backup-restore.sh
 ./scripts/check-architecture.sh
 ./scripts/test-architecture-checks.sh
 ```

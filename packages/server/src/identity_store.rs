@@ -18,21 +18,22 @@ pub async fn link_google_identity(
     identity: &GoogleIdentity,
     account: AccountId,
 ) -> Result<(), IdentityStoreError> {
-    if let Some(existing) = account_for_google_identity(db, identity).await? {
-        return if existing == account {
-            Ok(())
-        } else {
-            Err(IdentityStoreError::Conflict)
-        };
+    let tx = db.begin_transaction().await?;
+    if let Some(existing) = account_for_google_identity(&*tx, identity).await? {
+        if existing == account {
+            return Ok(());
+        }
+        return Err(IdentityStoreError::Conflict);
     }
 
-    db.insert("external_identities")
+    tx.insert("external_identities")
         .value("identity_id", identity_key(identity))
         .value("issuer", identity.issuer())
         .value("subject", identity.subject())
         .value("account_id", account.value().to_string())
-        .execute(db)
+        .execute(&*tx)
         .await?;
+    tx.commit().await?;
     Ok(())
 }
 

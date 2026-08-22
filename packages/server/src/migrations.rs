@@ -2,6 +2,7 @@
 
 use switchy_database::{
     Database,
+    query::{Expression as _, FilterableQuery as _},
     schema::{Column, DataType, alter_table, create_index, create_table, drop_index, drop_table},
 };
 use switchy_schema::{
@@ -204,6 +205,35 @@ fn migrations_for(include_profiles: bool) -> CodeMigrationSource<'static> {
             ],
             "previous_match_id",
         ));
+        source.add_migration(table(
+            "021_lobby_readiness",
+            "lobby_readiness",
+            vec![
+                text("lobby_id"),
+                text("account_id"),
+                text("connection_id"),
+                bigint("ready"),
+                bigint("last_seen_at_ms"),
+            ],
+            "connection_id",
+        ));
+        source.add_migration(index(
+            "022_lobby_readiness_membership",
+            "idx_lobby_readiness_lobby_connection",
+            "lobby_readiness",
+            vec!["lobby_id", "connection_id"],
+        ));
+        source.add_migration(add_text_column(
+            "023_match_configuration",
+            "matches",
+            "match_configuration",
+        ));
+        source.add_migration(index(
+            "024_pending_challenge_pair_unique",
+            "idx_challenges_from_to_status",
+            "challenges",
+            vec!["from_account_id", "to_account_id", "status"],
+        ));
     }
     source
 }
@@ -214,7 +244,89 @@ fn migrations_for(include_profiles: bool) -> CodeMigrationSource<'static> {
 ///
 /// Returns a Switchy schema error when discovery or execution fails.
 pub async fn migrate(db: &dyn Database) -> switchy_schema::Result<()> {
-    migrate_source(db, migrations()).await
+    migrate_source(db, migrations()).await?;
+    backfill_match_configurations(db).await
+}
+
+async fn backfill_match_configurations(db: &dyn Database) -> switchy_schema::Result<()> {
+    let rows = db.select("matches").execute(db).await?;
+    for row in rows {
+        let Some(configuration) = row.get("match_configuration") else {
+            return Err(switchy_schema::MigrationError::Validation(
+                "matches.match_configuration is absent".to_owned(),
+            ));
+        };
+        if !configuration.is_null() {
+            continue;
+        }
+        let match_id = migration_text(&row, "match_id")?;
+        let snapshot = migration_decode(&migration_text(&row, "canonical_snapshot")?)?;
+        let state = pwmtf_game_domain::MatchState::from_bytes(&snapshot).map_err(|_| {
+            switchy_schema::MigrationError::Validation(
+                "canonical match snapshot is incompatible".to_owned(),
+            )
+        })?;
+        let updated = db
+            .update("matches")
+            .value(
+                "match_configuration",
+                migration_encode(&state.configuration().to_bytes()),
+            )
+            .where_eq("match_id", match_id)
+            .where_eq("match_configuration", Option::<String>::None)
+            .execute(db)
+            .await?;
+        if updated.len() != 1 {
+            return Err(switchy_schema::MigrationError::Validation(
+                "match configuration backfill did not update exactly one row".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn migration_text(row: &switchy_database::Row, column: &str) -> switchy_schema::Result<String> {
+    row.get(column)
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .ok_or_else(|| {
+            switchy_schema::MigrationError::Validation(format!("matches.{column} is malformed"))
+        })
+}
+
+fn migration_encode(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
+}
+
+fn migration_decode(value: &str) -> switchy_schema::Result<Vec<u8>> {
+    if !value.len().is_multiple_of(2) {
+        return Err(switchy_schema::MigrationError::Validation(
+            "canonical match snapshot encoding is malformed".to_owned(),
+        ));
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = migration_hex(pair[0])?;
+            let low = migration_hex(pair[1])?;
+            Ok((high << 4) | low)
+        })
+        .collect()
+}
+
+fn migration_hex(value: u8) -> switchy_schema::Result<u8> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        _ => Err(switchy_schema::MigrationError::Validation(
+            "canonical match snapshot encoding is malformed".to_owned(),
+        )),
+    }
 }
 
 async fn migrate_source(
@@ -358,6 +470,60 @@ mod tests {
     }
 
     #[test]
+    fn existing_match_rows_receive_pinned_configuration_on_upgrade() {
+        block_on(async {
+            use pwmtf_game_domain::{
+                MatchState, PhysicsProfile, Player, RackSeed, RulesProfile, TableGeometry,
+            };
+
+            let db = switchy_database_connection::builder()
+                .turso()
+                .with_in_memory()
+                .build()
+                .await
+                .unwrap();
+            migrate_source(&*db, migrations_for(false)).await.unwrap();
+            let state = MatchState::new(
+                RulesProfile::standard(),
+                PhysicsProfile::standard(),
+                TableGeometry::standard(),
+                RackSeed::new(42),
+                Player::One,
+            )
+            .unwrap();
+            db.insert("matches")
+                .value("match_id", "9")
+                .value("player_one_id", "1")
+                .value("player_two_id", "2")
+                .value("canonical_revision", 0_i64)
+                .value("canonical_snapshot", migration_encode(&state.to_bytes()))
+                .value(
+                    "canonical_checksum",
+                    i64::from_ne_bytes(state.checksum().to_ne_bytes()),
+                )
+                .value("deadline_revision", Option::<i64>::None)
+                .value("deadline_player", Option::<i64>::None)
+                .value("deadline_at_ms", Option::<i64>::None)
+                .execute(&*db)
+                .await
+                .unwrap();
+
+            migrate(&*db).await.unwrap();
+            let row = db
+                .select("matches")
+                .where_eq("match_id", "9")
+                .execute(&*db)
+                .await
+                .unwrap()
+                .remove(0);
+            assert_eq!(
+                migration_text(&row, "match_configuration").unwrap(),
+                migration_encode(&state.configuration().to_bytes())
+            );
+        });
+    }
+
+    #[test]
     fn migration_ids_are_ordered_and_unique() {
         let source = migrations();
         let migrations = block_on(source.migrations()).expect("migrations are discoverable");
@@ -365,7 +531,7 @@ mod tests {
             .iter()
             .map(|migration| migration.id())
             .collect::<Vec<_>>();
-        assert_eq!(ids.len(), 20);
+        assert_eq!(ids.len(), 24);
         assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
     }
 }

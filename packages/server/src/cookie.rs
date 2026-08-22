@@ -89,7 +89,7 @@ impl SessionCookiePolicy {
             return Err(CookieError::InvalidLifetime);
         }
         Ok(format!(
-            "{}={}; Path={}; Max-Age={max_age_seconds}; SameSite={}; Secure; HttpOnly",
+            "{}={}; Path={}; Max-Age={max_age_seconds}; SameSite={}; Secure; HttpOnly; Priority=High",
             self.name,
             token.expose(),
             self.path,
@@ -101,7 +101,7 @@ impl SessionCookiePolicy {
     #[must_use]
     pub fn clear_cookie(&self) -> String {
         format!(
-            "{}=; Path={}; Max-Age=0; SameSite={}; Secure; HttpOnly",
+            "{}=; Path={}; Max-Age=0; SameSite={}; Secure; HttpOnly; Priority=High",
             self.name,
             self.path,
             self.same_site_label()
@@ -180,7 +180,14 @@ mod tests {
         assert!(header.contains("SameSite=Lax"));
         assert!(header.contains("Secure"));
         assert!(header.contains("HttpOnly"));
+        assert!(header.contains("Priority=High"));
         assert!(!header.contains("Domain="));
+        assert_eq!(
+            policy.clear_cookie(),
+            format!(
+                "{SESSION_COOKIE_NAME}=; Path=/; Max-Age=0; SameSite=Lax; Secure; HttpOnly; Priority=High"
+            )
+        );
         assert_eq!(
             policy
                 .parse_request(&format!(

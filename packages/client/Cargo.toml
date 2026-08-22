@@ -20,6 +20,10 @@ pwmtf_game_domain = { path = "../game_domain", version = "0.1.0" }
 pwmtf_protocol    = { path = "../protocol", version = "0.1.0" }
 thiserror         = { workspace = true }
 
+[dev-dependencies]
+futures-lite = { workspace = true }
+pwmtf_server = { path = "../server", version = "0.1.0" }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = { version = "0.3.104", default-features = false }
 wasm-bindgen = { version = "0.2.127", default-features = false }

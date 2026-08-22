@@ -38,7 +38,14 @@ pub fn connect(url: &str) -> Result<(), wasm_bindgen::JsValue> {
     let message_socket = socket.clone();
     let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
         if let Some(text) = event.data().as_string() {
-            let result = TRANSPORT.with(|transport| transport.borrow_mut().negotiated(&text));
+            let result = TRANSPORT.with(|transport| {
+                let mut transport = transport.borrow_mut();
+                if transport.status() == ConnectionStatus::Ready {
+                    Ok(())
+                } else {
+                    transport.negotiated(&text)
+                }
+            });
             if result.is_err() {
                 let _ = message_socket.close();
             }
@@ -138,6 +145,27 @@ pub fn predict_and_send_shot(
             transport
                 .borrow_mut()
                 .predict_shot(command_id, shot, called_pocket)
+                .map(pwmtf_protocol::CommandEnvelope::to_bytes)
+        })
+        .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
+    send_predicted_frame(&frame)
+}
+
+/// Predicts and sends one explicit concession command.
+///
+/// # Errors
+///
+/// Returns a JavaScript exception unless the protocol lifecycle is ready,
+/// prediction fails, or browser socket transmission fails.
+pub fn predict_and_send_concession(
+    command_id: pwmtf_protocol::CommandId,
+    player: pwmtf_game_domain::Player,
+) -> Result<(), wasm_bindgen::JsValue> {
+    let frame = TRANSPORT
+        .with(|transport| {
+            transport
+                .borrow_mut()
+                .predict_concession(command_id, player)
                 .map(pwmtf_protocol::CommandEnvelope::to_bytes)
         })
         .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;

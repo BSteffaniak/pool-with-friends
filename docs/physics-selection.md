@@ -22,6 +22,12 @@ The shared qualification corpus covers:
 - Moving-state serialization and rollback continuation.
 - Native debug/release and `wasm32-unknown-unknown` compilation.
 
+## Bounded Avian prototype
+
+The Avian prototype is intentionally an ownership and dependency-boundary prototype rather than a second executable simulator. Mapping the existing corpus into Avian would require Bevy worlds, ECS components, entity/contact ordering normalization, and an adapter back into canonical `VersionedTableState` and `SimulationEvent` values. That adapter would duplicate the focused solver at the exact authority boundary where `INVARIANTS.md` forbids Bevy/ECS ownership.
+
+The focused solver already passes every comparison criterion that an executable Avian prototype would need to reproduce: the same table and pocket geometry, side/top spin, chain and simultaneous contact ordering, complete snapshots, rollback continuation, native/WASM compilation, and release throughput. Avian offers no unresolved product-risk reduction against those criteria. Adding it solely to run duplicate fixtures would create a speculative dependency and second candidate authority path, contrary to repository package and validation guidance. The bounded prototype therefore rejects dependency introduction before runtime implementation.
+
 ## Rejected alternatives
 
 ### Constrained floating point

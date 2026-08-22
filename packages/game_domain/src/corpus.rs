@@ -237,6 +237,29 @@ mod tests {
     }
 
     #[test]
+    fn corpus_native_parallel_execution_matches_serial_results() {
+        let geometry = TableGeometry::standard();
+        let profile = qualification_profile();
+        let fixtures = qualification_corpus();
+        let serial = fixtures
+            .iter()
+            .map(|fixture| {
+                simulate_shot(geometry, profile, fixture.state.clone(), fixture.command).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let parallel = fixtures
+            .into_iter()
+            .map(|fixture| {
+                std::thread::spawn(move || {
+                    simulate_shot(geometry, profile, fixture.state, fixture.command).unwrap()
+                })
+            })
+            .map(|worker| worker.join().expect("qualification worker completes"))
+            .collect::<Vec<_>>();
+        assert_eq!(parallel, serial);
+    }
+
+    #[test]
     fn every_corpus_shot_is_repeatable_and_settles() {
         let geometry = TableGeometry::standard();
         let profile = qualification_profile();

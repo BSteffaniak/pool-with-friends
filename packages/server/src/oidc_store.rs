@@ -155,6 +155,12 @@ pub async fn claim_oidc_attempt(
         return Err(OidcAttemptStoreError::AlreadyUsed);
     }
     if integer(row, "expires_at_ms")? <= to_i64(now)? {
+        tx.delete("oidc_attempts")
+            .where_eq("attempt_id", attempt_id)
+            .where_eq("status", "pending")
+            .execute(&*tx)
+            .await?;
+        tx.commit().await?;
         return Err(OidcAttemptStoreError::Expired);
     }
     if !constant_time_eq(&text(row, "state_hash")?, &hash(state))
@@ -338,6 +344,26 @@ mod tests {
                 .await,
                 Err(OidcAttemptStoreError::AlreadyUsed)
             ));
+            let expired = create_oidc_attempt(&*db, 100, 200).await.unwrap();
+            assert!(matches!(
+                claim_oidc_attempt(
+                    &*db,
+                    expired.attempt_id(),
+                    expired.state(),
+                    expired.browser_binding(),
+                    200
+                )
+                .await,
+                Err(OidcAttemptStoreError::Expired)
+            ));
+            assert!(
+                db.select("oidc_attempts")
+                    .where_eq("attempt_id", expired.attempt_id())
+                    .execute(&*db)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
             cleanup_oidc_attempts(&*db, 50).await.unwrap();
             assert!(
                 db.select("oidc_attempts")

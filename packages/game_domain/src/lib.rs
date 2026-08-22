@@ -13,9 +13,10 @@ pub use corpus::{ShotFixture, qualification_corpus, qualification_profile};
 pub use rack::{RackError, RackSeed, standard_rack};
 pub use rules::{
     CompletionReason, Foul, Group, MATCH_COMMAND_RESULT_VERSION, MATCH_COMMAND_VERSION,
-    MATCH_STATE_VERSION, MatchCommand, MatchCommandResult, MatchDecodeError, MatchError,
-    MatchOutcome, MatchResultDecodeError, MatchState, MatchStatus, Player, RULES_PROFILE_VERSION,
-    RematchMetadata, RulesProfile, RulesProfileError, ShotResolution, VersionedMatchCommand,
+    MATCH_CONFIGURATION_VERSION, MATCH_STATE_VERSION, MatchCommand, MatchCommandResult,
+    MatchConfiguration, MatchDecodeError, MatchError, MatchOutcome, MatchResultDecodeError,
+    MatchState, MatchStatus, Player, RULES_PROFILE_VERSION, RematchMetadata, RulesProfile,
+    RulesProfileError, ShotResolution, VersionedMatchCommand,
 };
 
 /// Current schema version for canonical table snapshots.

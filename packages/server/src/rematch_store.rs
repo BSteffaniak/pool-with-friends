@@ -1,9 +1,58 @@
 //! Durable rematch offer/acceptance and linked-match creation.
 
 use crate::{AccountId, DeadlineId, DeadlineMillis, MatchId, Participants, ScheduledDeadline};
-use pwmtf_game_domain::{MatchState, RackSeed, RematchMetadata};
-use switchy_database::{Database, DatabaseValue, query::FilterableQuery as _};
+use pwmtf_game_domain::{MatchConfiguration, MatchState, RackSeed, RematchMetadata};
+use switchy_database::{
+    Database, DatabaseValue,
+    query::{FilterableQuery as _, SortDirection},
+};
 use thiserror::Error;
+
+/// Pending rematch offer visible to the opponent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PendingRematch {
+    /// Completed match being rematched.
+    pub previous_match_id: MatchId,
+    /// Participant who created the offer.
+    pub offered_by: AccountId,
+}
+
+/// Returns pending opponent rematch offers for an authenticated account.
+///
+/// # Errors
+///
+/// Returns [`RematchStoreError`] for malformed canonical or offer records and
+/// database failures.
+pub async fn pending_rematches_for(
+    db: &dyn Database,
+    actor: AccountId,
+) -> Result<Vec<PendingRematch>, RematchStoreError> {
+    let rows = db
+        .select("rematch_offers")
+        .sort("previous_match_id", SortDirection::Asc)
+        .execute(db)
+        .await?;
+    let mut pending = Vec::new();
+    for row in rows {
+        if !is_null(&row, "accepted_match_id")? {
+            continue;
+        }
+        let previous_match_id = MatchId::new(parse_u128(&row, "previous_match_id")?);
+        let offered_by = account(&row, "offered_by_account_id")?;
+        if offered_by == actor {
+            continue;
+        }
+        let (_, participants, previous) = load_match(db, previous_match_id).await?;
+        authorize(participants, actor)?;
+        RematchMetadata::from_completed(previous_match_id.value(), &previous)
+            .map_err(|_| RematchStoreError::NotCompleted)?;
+        pending.push(PendingRematch {
+            previous_match_id,
+            offered_by,
+        });
+    }
+    Ok(pending)
+}
 
 /// Creates or idempotently repeats one participant's rematch offer.
 ///
@@ -16,23 +65,25 @@ pub async fn offer_rematch(
     previous_match_id: MatchId,
     actor: AccountId,
 ) -> Result<(), RematchStoreError> {
-    let (_, participants, previous) = load_match(db, previous_match_id).await?;
+    let tx = db.begin_transaction().await?;
+    let (_, participants, previous) = load_match(&*tx, previous_match_id).await?;
     authorize(participants, actor)?;
     RematchMetadata::from_completed(previous_match_id.value(), &previous)
         .map_err(|_| RematchStoreError::NotCompleted)?;
-    let existing = db
+    let existing = tx
         .select("rematch_offers")
         .where_eq("previous_match_id", previous_match_id.value().to_string())
-        .execute(db)
+        .execute(&*tx)
         .await?;
     match existing.as_slice() {
         [] => {
-            db.insert("rematch_offers")
+            tx.insert("rematch_offers")
                 .value("previous_match_id", previous_match_id.value().to_string())
                 .value("offered_by_account_id", actor.value().to_string())
                 .value("accepted_match_id", DatabaseValue::Null)
-                .execute(db)
+                .execute(&*tx)
                 .await?;
+            tx.commit().await?;
             Ok(())
         }
         [row]
@@ -105,6 +156,10 @@ pub async fn accept_rematch(
         .value("canonical_revision", 0_i64)
         .value("canonical_snapshot", encode_bytes(&state.to_bytes()))
         .value("canonical_checksum", checksum_i64(state.checksum()))
+        .value(
+            "match_configuration",
+            encode_bytes(&state.configuration().to_bytes()),
+        )
         .value("deadline_revision", 0_i64)
         .value("deadline_player", encode_player(state.active_player()))
         .value("deadline_at_ms", to_i64(deadline.due_at.value())?)
@@ -174,6 +229,12 @@ async fn load_match(
     let revision = integer(row, "canonical_revision")?;
     let snapshot = decode_bytes(&text(row, "canonical_snapshot")?)?;
     let state = MatchState::from_bytes(&snapshot).map_err(|_| RematchStoreError::Malformed)?;
+    let configuration =
+        MatchConfiguration::from_bytes(&decode_bytes(&text(row, "match_configuration")?)?)
+            .map_err(|_| RematchStoreError::Malformed)?;
+    if state.configuration() != configuration {
+        return Err(RematchStoreError::Malformed);
+    }
     let checksum = parse_u64(row, "canonical_checksum")?;
     if state.checksum() != checksum {
         return Err(RematchStoreError::Malformed);
@@ -296,6 +357,82 @@ mod tests {
 
     use super::*;
 
+    async fn database() -> Box<dyn Database> {
+        let db = switchy_database_connection::builder()
+            .turso()
+            .with_in_memory()
+            .build()
+            .await
+            .unwrap();
+        crate::migrate(&*db).await.unwrap();
+        db
+    }
+
+    async fn insert_completed_match(db: &dyn Database, match_id: MatchId) -> MatchState {
+        let mut previous = MatchState::new(
+            RulesProfile::standard(),
+            PhysicsProfile::standard(),
+            TableGeometry::standard(),
+            RackSeed::new(42),
+            Player::One,
+        )
+        .unwrap();
+        previous
+            .apply_command(VersionedMatchCommand::new(MatchCommand::Concede {
+                player: Player::Two,
+            }))
+            .unwrap();
+        db.insert("matches")
+            .value("match_id", match_id.value().to_string())
+            .value("player_one_id", "1")
+            .value("player_two_id", "2")
+            .value("canonical_revision", 1_i64)
+            .value("canonical_snapshot", encode_bytes(&previous.to_bytes()))
+            .value("canonical_checksum", checksum_i64(previous.checksum()))
+            .value(
+                "match_configuration",
+                encode_bytes(&previous.configuration().to_bytes()),
+            )
+            .value("deadline_revision", DatabaseValue::Null)
+            .value("deadline_player", DatabaseValue::Null)
+            .value("deadline_at_ms", DatabaseValue::Null)
+            .value("previous_match_id", DatabaseValue::Null)
+            .execute(db)
+            .await
+            .unwrap();
+        previous
+    }
+
+    #[test]
+    fn pending_rematches_are_visible_only_to_the_opponent() {
+        block_on(async {
+            let db = database().await;
+            insert_completed_match(&*db, MatchId::new(8)).await;
+            offer_rematch(&*db, MatchId::new(8), AccountId::new(1))
+                .await
+                .unwrap();
+            assert!(
+                pending_rematches_for(&*db, AccountId::new(1))
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                pending_rematches_for(&*db, AccountId::new(2))
+                    .await
+                    .unwrap(),
+                vec![PendingRematch {
+                    previous_match_id: MatchId::new(8),
+                    offered_by: AccountId::new(1),
+                }]
+            );
+            assert!(matches!(
+                pending_rematches_for(&*db, AccountId::new(3)).await,
+                Err(RematchStoreError::Unauthorized)
+            ));
+        });
+    }
+
     #[test]
     fn accepted_rematch_is_linked_single_use_and_alternates_breaker() {
         block_on(async {
@@ -326,6 +463,10 @@ mod tests {
                 .value("canonical_revision", 1_i64)
                 .value("canonical_snapshot", encode_bytes(&previous.to_bytes()))
                 .value("canonical_checksum", checksum_i64(previous.checksum()))
+                .value(
+                    "match_configuration",
+                    encode_bytes(&previous.configuration().to_bytes()),
+                )
                 .value("deadline_revision", DatabaseValue::Null)
                 .value("deadline_player", DatabaseValue::Null)
                 .value("deadline_at_ms", DatabaseValue::Null)

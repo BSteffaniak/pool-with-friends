@@ -18,6 +18,15 @@ kill_timeout = "30s"
   source = "pwmtf_data"
   destination = "/data"
 
+  initial_size = "1gb"
+
+  [mounts.auto_extend_size]
+  threshold_percent = 80
+  increment = "1gb"
+  limit = "10gb"
+
+  snapshot_retention = 14
+
 [http_service]
   internal_port = 8080
   force_https = true

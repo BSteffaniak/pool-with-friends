@@ -70,6 +70,7 @@
             cargo-machete
             cargo-nextest
             curl
+            geckodriver
             llvmPackages.bintools
             nodejs
             openssl
@@ -85,6 +86,7 @@
             echo "  $(cargo machete --version)"
             echo "  $(cargo deny --version)"
             echo "  $(wasm-bindgen --version)"
+            echo "  $(geckodriver --version | head -n 1)"
 
             if [ -z "$IN_NIX_SHELL_FISH" ] && [ -z "$BASH_EXECUTION_STRING" ]; then
               case "$-" in

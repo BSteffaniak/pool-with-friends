@@ -5872,9 +5872,11 @@ name = "pwmtf_client"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "futures-lite",
  "js-sys",
  "pwmtf_game_domain",
  "pwmtf_protocol",
+ "pwmtf_server",
  "thiserror 2.0.20",
  "wasm-bindgen",
  "web-sys",

@@ -7,6 +7,8 @@ use crate::{
 };
 use thiserror::Error;
 
+/// Current canonical match-configuration version.
+pub const MATCH_CONFIGURATION_VERSION: u16 = 1;
 /// Current canonical match-command version.
 pub const MATCH_COMMAND_VERSION: u16 = 1;
 /// Current canonical match-result version.
@@ -462,6 +464,85 @@ fn decode_result_status(
     }
 }
 
+/// Immutable canonical configuration pinned for one match.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MatchConfiguration {
+    rules: RulesProfile,
+    physics: PhysicsProfile,
+    geometry: TableGeometry,
+    rack_seed: RackSeed,
+    breaker: Player,
+}
+
+impl MatchConfiguration {
+    /// Encodes the pinned configuration into its stable version-one format.
+    #[must_use]
+    pub fn to_bytes(self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(80);
+        bytes.extend_from_slice(&MATCH_CONFIGURATION_VERSION.to_be_bytes());
+        bytes.extend_from_slice(&self.rules.version().to_be_bytes());
+        encode_physics(self.physics, &mut bytes);
+        encode_geometry(self.geometry, &mut bytes);
+        bytes.extend_from_slice(&self.rack_seed.value().to_be_bytes());
+        bytes.push(encode_player(self.breaker));
+        bytes
+    }
+
+    /// Decodes and validates one immutable match configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MatchDecodeError`] for malformed, unsupported, or trailing data.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, MatchDecodeError> {
+        let mut reader = MatchReader::new(bytes);
+        let version = reader.u16()?;
+        if version != MATCH_CONFIGURATION_VERSION {
+            return Err(MatchDecodeError::UnsupportedConfigurationVersion(version));
+        }
+        let configuration = Self {
+            rules: RulesProfile::new(reader.u16()?)?,
+            physics: decode_physics(&mut reader)?,
+            geometry: decode_geometry(&mut reader)?,
+            rack_seed: RackSeed::new(reader.u64()?),
+            breaker: decode_player(reader.u8()?)?,
+        };
+        if !reader.finished() {
+            return Err(MatchDecodeError::TrailingBytes(reader.remaining()));
+        }
+        Ok(configuration)
+    }
+
+    /// Returns the pinned rules profile.
+    #[must_use]
+    pub const fn rules(self) -> RulesProfile {
+        self.rules
+    }
+
+    /// Returns the pinned physics profile.
+    #[must_use]
+    pub const fn physics(self) -> PhysicsProfile {
+        self.physics
+    }
+
+    /// Returns the pinned table geometry.
+    #[must_use]
+    pub const fn geometry(self) -> TableGeometry {
+        self.geometry
+    }
+
+    /// Returns the pinned rack seed.
+    #[must_use]
+    pub const fn rack_seed(self) -> RackSeed {
+        self.rack_seed
+    }
+
+    /// Returns the canonically selected initial breaker.
+    #[must_use]
+    pub const fn breaker(self) -> Player {
+        self.breaker
+    }
+}
+
 /// Complete canonical 8-ball aggregate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MatchState {
@@ -508,6 +589,18 @@ impl MatchState {
             ball_in_hand: false,
             status: MatchStatus::InProgress,
         })
+    }
+
+    /// Returns the complete immutable configuration pinned for this match.
+    #[must_use]
+    pub const fn configuration(&self) -> MatchConfiguration {
+        MatchConfiguration {
+            rules: self.rules,
+            physics: self.physics,
+            geometry: self.geometry,
+            rack_seed: self.rack_seed,
+            breaker: self.breaker,
+        }
     }
 
     /// Returns the pinned rules profile.
@@ -982,6 +1075,9 @@ pub enum MatchError {
 /// Failure to decode a canonical match snapshot.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum MatchDecodeError {
+    /// Match configuration version is unknown.
+    #[error("unsupported match configuration version {0}")]
+    UnsupportedConfigurationVersion(u16),
     /// Match snapshot version is unknown.
     #[error("unsupported match state version {0}")]
     UnsupportedVersion(u16),
@@ -1329,6 +1425,27 @@ mod tests {
     }
 
     #[test]
+    fn match_configuration_round_trip_remains_pinned() {
+        let game = match_state();
+        let configuration =
+            MatchConfiguration::from_bytes(&game.configuration().to_bytes()).unwrap();
+        assert_eq!(configuration, game.configuration());
+        let mut unknown = configuration.to_bytes();
+        unknown[1] = 2;
+        assert_eq!(
+            MatchConfiguration::from_bytes(&unknown),
+            Err(MatchDecodeError::UnsupportedConfigurationVersion(2))
+        );
+        let restored = MatchState::from_bytes(&game.to_bytes()).unwrap();
+        assert_eq!(restored.configuration(), configuration);
+        assert_eq!(configuration.rules(), game.rules());
+        assert_eq!(configuration.physics(), game.physics());
+        assert_eq!(configuration.geometry(), game.geometry());
+        assert_eq!(configuration.rack_seed(), game.rack_seed());
+        assert_eq!(configuration.breaker(), game.breaker());
+    }
+
+    #[test]
     fn match_snapshot_round_trip_preserves_checksum_and_continuation() {
         let mut game = match_state();
         game.timeout_turn().unwrap();
@@ -1402,6 +1519,25 @@ mod tests {
                 breaker: Player::Two,
             })
         );
+    }
+
+    #[test]
+    fn break_uses_canonical_contact_and_rail_foul_precedence() {
+        let mut game = match_state();
+        game.table = VersionedTableState::new(
+            crate::TABLE_STATE_VERSION,
+            TableGeometry::standard(),
+            0,
+            vec![
+                crate::BallState::stationary(BallId::CUE, crate::Vector::from_micros(-400_000, 0)),
+                crate::BallState::stationary(BallId::new(1).unwrap(), crate::Vector::ZERO),
+            ],
+        )
+        .unwrap();
+        let result = game.play_shot(command(0, 100), None).unwrap();
+        assert_eq!(result.fouls, vec![Foul::NoObjectContact]);
+        assert_eq!(result.status, MatchStatus::InProgress);
+        assert!(!result.reracked);
     }
 
     #[test]

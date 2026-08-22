@@ -35,7 +35,8 @@ for entry in output.iterdir():
     else:
         entry.unlink()
 PY
-cp packages/client/web/index.html packages/client/web/styles.css packages/client/web/bootstrap.js dist/
+cp packages/client/web/index.html packages/client/web/styles.css packages/client/web/bootstrap.js \
+    packages/client/web/brand-mark.svg dist/
 wasm_optimization=not-applied
 if command -v wasm-opt >/dev/null 2>&1 && [ "${PWMTF_SKIP_WASM_OPT:-0}" != 1 ]; then
     wasm_optimization=wasm-opt-Oz
@@ -82,6 +83,7 @@ contents = path.read_text(encoding="utf-8")
 bundle_hash = hashlib.sha256()
 assets = sorted(
     (
+        "brand-mark.svg",
         "index.html",
         "styles.css",
         "pwmtf_client.d.ts",

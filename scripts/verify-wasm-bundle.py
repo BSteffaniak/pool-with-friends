@@ -17,6 +17,7 @@ MANIFEST_NAME = "pwmtf-bundle-manifest.json"
 BUNDLE_HASH_ALGORITHM = "sha256-length-prefixed-v1"
 EXPECTED_ASSETS = {
     "bootstrap.js",
+    "brand-mark.svg",
     "index.html",
     "pwmtf_client.d.ts",
     "pwmtf_client.js",

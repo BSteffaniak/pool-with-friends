@@ -4,14 +4,28 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no" />
     <meta name="theme-color" content="#08130f" />
+    <meta name="description" content="Play an original real-time two-player 8-ball match with friends." />
+    <link rel="canonical" href="https://pwmtf.hyperchad.dev/" />
+    <meta property="og:title" content="Pool with More Than Friends" />
+    <meta property="og:description" content="An original online two-player 8-ball game." />
+    <meta property="og:url" content="https://pwmtf.hyperchad.dev/" />
+    <meta property="og:image" content="https://pwmtf.hyperchad.dev/brand-mark.svg" />
+    <meta property="og:image:alt" content="Pool with More Than Friends original eight-ball mark" />
+    <link rel="icon" href="./brand-mark.svg" type="image/svg+xml" />
     <title>Pool with More Than Friends</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <main id="game-shell" aria-label="Pool with More Than Friends" data-client-state="loading">
+      <header id="brand-lockup" aria-label="Pool with More Than Friends">
+        <span class="brand-mark" aria-hidden="true"><i></i><b>8</b><i></i></span>
+        <span class="brand-name">Pool <small>with more than</small> Friends</span>
+      </header>
       <section id="account-panel" hidden>
         <span id="account-label"></span>
-        <a id="google-sign-in" href="/auth/google/start">Sign in with Google</a>
+        <form id="google-sign-in" method="post" action="/auth/google/start">
+          <button type="submit">Sign in with Google</button>
+        </form>
         <button id="sign-out" type="button" hidden>Sign out</button>
       </section>
       <section id="social-panel" hidden>
@@ -34,10 +48,18 @@
           <strong>Incoming challenges</strong>
           <div id="challenge-list"></div>
         </section>
+        <section id="incoming-rematches">
+          <strong>Rematch offers</strong>
+          <div id="rematch-list"></div>
+        </section>
+        <button id="offer-rematch" type="button" hidden>Offer rematch</button>
+        <button id="concede-match" type="button" hidden>Concede match</button>
+        <output id="match-status" role="status" aria-live="polite"></output>
         <button id="create-invitation" type="button">Create private invitation</button>
         <section id="lobby-panel" hidden>
           <strong id="lobby-label"></strong>
           <span id="lobby-state"></span>
+          <button id="ready-lobby" type="button">Ready</button>
           <button id="cancel-lobby" type="button">Cancel lobby</button>
         </section>
         <output id="social-status" role="status" aria-live="polite"></output>
@@ -47,7 +69,11 @@
         <strong>Rotate your device</strong>
         <span>Pool with More Than Friends plays in landscape.</span>
       </section>
-      <section id="loading" role="status" aria-live="polite">Loading the table…</section>
+      <section id="loading" role="status" aria-live="polite">
+        <span class="loading-mark" aria-hidden="true"><i></i><b>8</b><i></i></span>
+        <strong>Racking the table</strong>
+        <span>Preparing your private match…</span>
+      </section>
       <section id="load-error" role="alert" hidden>
         <strong>The table could not load</strong>
         <span>Reload this page. If the problem continues, update your browser or enable WebGL 2.</span>

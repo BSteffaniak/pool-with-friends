@@ -71,6 +71,12 @@ impl PredictionState {
         &self.predicted
     }
 
+    /// Returns whether local presentation has an unresolved predicted command.
+    #[must_use]
+    pub const fn has_pending_prediction(&self) -> bool {
+        self.pending.is_some()
+    }
+
     /// Returns interpolation samples created by the last correction.
     #[must_use]
     pub fn interpolation(&self) -> &[BallSample] {
@@ -141,6 +147,22 @@ impl PredictionState {
         )
     }
 
+    /// Predicts an explicit concession command locally.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::predict_command`].
+    pub fn predict_concession(
+        &mut self,
+        command_id: CommandId,
+        player: pwmtf_game_domain::Player,
+    ) -> Result<CommandEnvelope, PredictionError> {
+        self.predict_command(
+            command_id,
+            VersionedMatchCommand::new(MatchCommand::Concede { player }),
+        )
+    }
+
     /// Reconciles a complete authoritative snapshot and creates correction
     /// interpolation samples when prediction diverged.
     ///
@@ -157,9 +179,6 @@ impl PredictionState {
         }
         let next = decode_snapshot(snapshot)?;
         if snapshot.revision == self.authoritative_revision {
-            if self.pending.is_some() {
-                return Err(PredictionError::StaleSnapshot);
-            }
             return if next.checksum() == self.authoritative.checksum() {
                 Ok(Reconciliation::Advanced)
             } else {
@@ -249,22 +268,245 @@ fn interpolation_samples(from: &MatchState, to: &MatchState) -> Vec<BallSample> 
 
 #[cfg(test)]
 mod tests {
+    use futures_lite::future::block_on;
     use pwmtf_game_domain::{
         Aim, PhysicsProfile, Player, RackSeed, RulesProfile, ShotPower, Spin, TableGeometry,
+        VersionedMatchCommand,
+    };
+    use pwmtf_server::{
+        AcceptedCommand, AccountId, CommandJournal, DeadlineMillis, JournalError, MatchId,
+        MatchService, Participants,
     };
 
     use super::*;
 
-    fn initial() -> SnapshotEnvelope {
-        let state = MatchState::new(
+    #[derive(Clone, Default)]
+    struct ImpairedJournal {
+        records: std::sync::Arc<std::sync::Mutex<Vec<AcceptedCommand>>>,
+    }
+
+    impl ImpairedJournal {
+        fn record_count(&self) -> usize {
+            self.records.lock().expect("journal lock poisoned").len()
+        }
+    }
+
+    impl CommandJournal for ImpairedJournal {
+        async fn commit(&mut self, command: AcceptedCommand) -> Result<(), JournalError> {
+            self.records.lock().map_err(|_| JournalError)?.push(command);
+            Ok(())
+        }
+
+        async fn load(&self, match_id: MatchId) -> Result<Vec<AcceptedCommand>, JournalError> {
+            Ok(self
+                .records
+                .lock()
+                .map_err(|_| JournalError)?
+                .iter()
+                .filter(|record| record.match_id == match_id)
+                .cloned()
+                .collect())
+        }
+    }
+
+    const MATCH_ID: MatchId = MatchId::new(91);
+    const PARTICIPANTS: Participants = Participants {
+        player_one: AccountId::new(1),
+        player_two: AccountId::new(2),
+    };
+
+    fn match_state() -> MatchState {
+        MatchState::new(
             RulesProfile::standard(),
             PhysicsProfile::standard(),
             TableGeometry::standard(),
             RackSeed::new(42),
             Player::One,
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    fn initial() -> SnapshotEnvelope {
+        let state = match_state();
         SnapshotEnvelope::new(0, state.checksum(), state.to_bytes()).unwrap()
+    }
+
+    fn server_snapshot(service: &MatchService<ImpairedJournal>) -> SnapshotEnvelope {
+        service.snapshot(MATCH_ID).unwrap()
+    }
+
+    fn command(revision: u64, id: u8, command: MatchCommand) -> CommandEnvelope {
+        CommandEnvelope::new(
+            revision,
+            CommandId::new([id; 16]),
+            VersionedMatchCommand::new(command),
+        )
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn complete_match_converges_under_impairment_and_process_restart() {
+        block_on(async {
+            let journal = ImpairedJournal::default();
+            let mut server = MatchService::new(journal.clone());
+            server.insert_match(MATCH_ID, PARTICIPANTS, match_state());
+            let initial = server_snapshot(&server);
+            let mut shooter = PredictionState::from_snapshot(&initial).unwrap();
+            let mut opponent = PredictionState::from_snapshot(&initial).unwrap();
+
+            let shot = VersionedShotCommand::new(
+                Aim::new(0).unwrap(),
+                ShotPower::new(0).unwrap(),
+                Spin::CENTER,
+            );
+            let shot_frame = shooter
+                .predict_shot(CommandId::new([1; 16]), shot, None)
+                .unwrap();
+            let accepted = server
+                .apply_at(
+                    MATCH_ID,
+                    PARTICIPANTS.player_one,
+                    shot_frame,
+                    DeadlineMillis::new(100),
+                )
+                .await
+                .unwrap();
+            assert_eq!(accepted.revision, 1);
+
+            // Duplication is idempotent even when its acknowledgement is lost.
+            let duplicate = server
+                .apply_at(
+                    MATCH_ID,
+                    PARTICIPANTS.player_one,
+                    shot_frame,
+                    DeadlineMillis::new(180),
+                )
+                .await
+                .unwrap();
+            assert!(duplicate.duplicate);
+            assert_eq!(journal.record_count(), 1);
+
+            let authoritative_one = server_snapshot(&server);
+            assert_eq!(
+                shooter.reconcile(&authoritative_one).unwrap(),
+                Reconciliation::Confirmed
+            );
+            assert_eq!(
+                opponent.reconcile(&authoritative_one).unwrap(),
+                Reconciliation::Corrected
+            );
+            assert!(matches!(
+                opponent.reconcile(&initial),
+                Err(PredictionError::StaleSnapshot)
+            ));
+
+            let timeout = command(1, 2, MatchCommand::Timeout);
+            server
+                .apply_at(
+                    MATCH_ID,
+                    PARTICIPANTS.player_two,
+                    timeout,
+                    DeadlineMillis::new(250),
+                )
+                .await
+                .unwrap();
+            let authoritative_two = server_snapshot(&server);
+
+            // Reordering may deliver revision two before revision one.
+            assert_eq!(
+                opponent.reconcile(&authoritative_two).unwrap(),
+                Reconciliation::Corrected
+            );
+            assert!(matches!(
+                opponent.reconcile(&authoritative_one),
+                Err(PredictionError::StaleSnapshot)
+            ));
+
+            // Reconnect uses a complete snapshot instead of stale presentation work.
+            shooter.abandon_prediction();
+            assert_eq!(
+                shooter.reconcile(&authoritative_two).unwrap(),
+                Reconciliation::Corrected
+            );
+
+            let mut restarted = MatchService::new(journal.clone());
+            assert_eq!(
+                restarted.recover_match(MATCH_ID, PARTICIPANTS).await,
+                Ok(Some(2))
+            );
+            let after_restart = server_snapshot(&restarted);
+            assert_eq!(after_restart, authoritative_two);
+
+            // Retransmission after restart remains exactly-once.
+            let duplicate_after_restart = restarted
+                .apply_at(
+                    MATCH_ID,
+                    PARTICIPANTS.player_two,
+                    timeout,
+                    DeadlineMillis::new(400),
+                )
+                .await
+                .unwrap();
+            assert!(duplicate_after_restart.duplicate);
+            assert_eq!(journal.record_count(), 2);
+            assert_eq!(shooter.predicted().checksum(), after_restart.checksum);
+            assert_eq!(opponent.predicted().checksum(), after_restart.checksum);
+
+            let concession = command(
+                2,
+                3,
+                MatchCommand::Concede {
+                    player: Player::One,
+                },
+            );
+            restarted
+                .apply_at(
+                    MATCH_ID,
+                    PARTICIPANTS.player_one,
+                    concession,
+                    DeadlineMillis::new(600),
+                )
+                .await
+                .unwrap();
+            let completed = server_snapshot(&restarted);
+            assert!(matches!(
+                MatchState::from_bytes(&completed.snapshot)
+                    .unwrap()
+                    .status(),
+                pwmtf_game_domain::MatchStatus::Completed(_)
+            ));
+            assert_eq!(
+                shooter.reconcile(&completed).unwrap(),
+                Reconciliation::Corrected
+            );
+            assert_eq!(
+                opponent.reconcile(&completed).unwrap(),
+                Reconciliation::Corrected
+            );
+            assert_eq!(shooter.predicted().checksum(), completed.checksum);
+            assert_eq!(opponent.predicted().checksum(), completed.checksum);
+        });
+    }
+
+    #[test]
+    fn concession_uses_revision_bound_prediction_path() {
+        let state = MatchState::from_bytes(&initial().snapshot).unwrap();
+        let snapshot = SnapshotEnvelope::new(4, state.checksum(), state.to_bytes()).unwrap();
+        let mut prediction = PredictionState::from_snapshot(&snapshot).unwrap();
+        let envelope = prediction
+            .predict_concession(CommandId::new([11; 16]), Player::One)
+            .unwrap();
+        assert_eq!(envelope.expected_revision, 4);
+        assert!(matches!(
+            envelope.command.command,
+            MatchCommand::Concede {
+                player: Player::One
+            }
+        ));
+        assert!(matches!(
+            prediction.predicted().status(),
+            pwmtf_game_domain::MatchStatus::Completed(_)
+        ));
     }
 
     #[test]
@@ -292,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn same_revision_cannot_acknowledge_pending_prediction() {
+    fn same_revision_authority_does_not_clear_unaccepted_prediction() {
         let mut prediction = PredictionState::from_snapshot(&initial()).unwrap();
         prediction
             .predict_shot(
@@ -305,10 +547,12 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert!(matches!(
-            prediction.reconcile(&initial()),
-            Err(PredictionError::StaleSnapshot)
-        ));
+        assert!(prediction.has_pending_prediction());
+        assert_eq!(
+            prediction.reconcile(&initial()).unwrap(),
+            Reconciliation::Advanced
+        );
+        assert!(prediction.has_pending_prediction());
     }
 
     #[test]

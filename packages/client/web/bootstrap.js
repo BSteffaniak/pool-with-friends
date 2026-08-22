@@ -12,10 +12,15 @@ const handleInput = document.querySelector("#handle-input");
 const challengeForm = document.querySelector("#challenge-form");
 const challengeHandle = document.querySelector("#challenge-handle");
 const challengeList = document.querySelector("#challenge-list");
+const rematchList = document.querySelector("#rematch-list");
+const offerRematchButton = document.querySelector("#offer-rematch");
+const concedeMatchButton = document.querySelector("#concede-match");
+const matchStatus = document.querySelector("#match-status");
 const createInvitationButton = document.querySelector("#create-invitation");
 const lobbyPanel = document.querySelector("#lobby-panel");
 const lobbyLabel = document.querySelector("#lobby-label");
 const lobbyState = document.querySelector("#lobby-state");
+const readyLobbyButton = document.querySelector("#ready-lobby");
 const cancelLobbyButton = document.querySelector("#cancel-lobby");
 const socialStatus = document.querySelector("#social-status");
 const reload = loadError.querySelector("button");
@@ -127,6 +132,8 @@ let audioContextPendingClose = null;
 let masterGain = null;
 let audioNeedsExplicitResume = false;
 let audioProbeInFlight = false;
+let gameplayAudioEnabled = false;
+let gameplayAudioLastChecksum = null;
 let audioLifecycleOperations = 0;
 let audioLifecycleTransition = Promise.resolve();
 
@@ -780,6 +787,60 @@ function updateAudioControls() {
   refreshMetrics();
 }
 
+function playTone(frequency, duration, volume = 0.45) {
+  if (!gameplayAudioEnabled || audioContext === null || audioContext.state !== "running") {
+    return;
+  }
+  const oscillator = audioContext.createOscillator();
+  const envelope = audioContext.createGain();
+  const startedAt = audioContext.currentTime;
+  oscillator.type = "triangle";
+  oscillator.frequency.setValueAtTime(frequency, startedAt);
+  envelope.gain.setValueAtTime(0.0001, startedAt);
+  envelope.gain.exponentialRampToValueAtTime(volume, startedAt + 0.01);
+  envelope.gain.exponentialRampToValueAtTime(0.0001, startedAt + duration);
+  oscillator.connect(envelope);
+  envelope.connect(masterGain);
+  oscillator.start(startedAt);
+  oscillator.stop(startedAt + duration);
+  oscillator.addEventListener("ended", () => {
+    oscillator.disconnect();
+    envelope.disconnect();
+  });
+}
+
+async function enableGameplayAudio() {
+  if (!telemetry.audio.supported || gameplayAudioEnabled) {
+    return;
+  }
+  if (audioContext === null) {
+    createAudioGraph();
+  }
+  if (audioContext.state !== "running") {
+    await audioContext.resume();
+  }
+  if (audioContext.state === "running") {
+    gameplayAudioEnabled = true;
+    audioNeedsExplicitResume = false;
+    playTone(440, 0.08, 0.25);
+  }
+}
+
+function updateGameplayAudio(module) {
+  if (!gameplayAudioEnabled || !module.match_socket_ready()) {
+    return;
+  }
+  const checksum = module.match_checksum();
+  if (checksum === undefined || checksum === gameplayAudioLastChecksum) {
+    return;
+  }
+  if (gameplayAudioLastChecksum !== null) {
+    playTone(196, 0.12);
+    window.setTimeout(() => playTone(294, 0.09, 0.3), 70);
+  }
+  gameplayAudioLastChecksum = checksum;
+}
+
 function createAudioGraph() {
   const AudioContext = window.AudioContext || window.webkitAudioContext;
   audioContext = new AudioContext();
@@ -1430,6 +1491,9 @@ downloadButton.addEventListener("click", downloadReport);
 resetButton.addEventListener("click", resetReportForm);
 toggleToolsButton.addEventListener("click", toggleTools);
 canvas.addEventListener("pointerdown", () => {
+  void enableGameplayAudio().catch((error) => {
+    console.error("PWMTF gameplay audio failed", error);
+  });
   if (captureActive) {
     telemetry.pointerContacts += 1;
   }
@@ -1478,6 +1542,9 @@ document.addEventListener("visibilitychange", () => {
   }
   if (document.hidden) {
     requestBackgroundAudioSuspension();
+    stopLobbyPolling();
+  } else if (activeLobbyId !== null && lobbyPollTimer === null) {
+    void pollLobby();
   }
   refreshMetrics();
 });
@@ -1515,20 +1582,20 @@ let matchReconnectTimer = null;
 let matchSubscriptionUrl = null;
 let matchReconnectAttempt = 0;
 let matchConnectStartedAt = null;
+let matchPlayerSeat = null;
 let activeLobbyId = null;
+let activeLobbyConnectionId = null;
 let lobbyPollTimer = null;
 let wasmModule = null;
 
 function startMatchSocket(module) {
   const parameters = new URLSearchParams(window.location.search);
   const matchId = parameters.get("match");
-  const playerOne = parameters.get("player_one");
-  const playerTwo = parameters.get("player_two");
-  if (![matchId, playerOne, playerTwo].every((value) => /^\d{1,39}$/.test(value ?? ""))) {
+  if (!/^\d{1,39}$/.test(matchId ?? "")) {
     return;
   }
   const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-  matchSubscriptionUrl = `${scheme}//${window.location.host}/ws?match_id=${matchId}&player_one=${playerOne}&player_two=${playerTwo}`;
+  matchSubscriptionUrl = `${scheme}//${window.location.host}/ws?match_id=${matchId}`;
   const connect = () => {
     if (!matchSubscriptionUrl || document.visibilityState === "hidden" || !navigator.onLine) {
       return;
@@ -1568,6 +1635,10 @@ function startMatchSocket(module) {
       matchSocketActive = true;
       matchReconnectAttempt = 0;
       matchConnectStartedAt = null;
+      concedeMatchButton.hidden = false;
+      const revision = module.match_revision();
+      matchStatus.textContent = revision === undefined ? "Connected" : `Connected · revision ${revision}`;
+      updateGameplayAudio(module);
       return;
     }
     if (
@@ -1582,10 +1653,29 @@ function startMatchSocket(module) {
     }
   }, 500);
   window.addEventListener("online", connect);
+  concedeMatchButton.addEventListener("click", () => {
+    if (!window.confirm("Concede this match? Your opponent will win.")) {
+      return;
+    }
+    if (matchPlayerSeat === null) {
+      matchStatus.textContent = "Participant seat is unavailable.";
+      return;
+    }
+    try {
+      module.send_concession(matchPlayerSeat);
+      concedeMatchButton.disabled = true;
+      matchStatus.textContent = "Concession submitted…";
+    } catch (error) {
+      console.error("PWMTF concession failed", error);
+      matchStatus.textContent = "Concession failed. Reconnect and try again.";
+    }
+  });
   window.addEventListener("offline", () => {
     module.disconnect_match_socket();
     matchSocketActive = false;
     matchConnectStartedAt = null;
+    concedeMatchButton.hidden = true;
+    matchStatus.textContent = "Offline · reconnecting when network returns";
   });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") {
@@ -1600,6 +1690,7 @@ function startMatchSocket(module) {
   window.addEventListener("pagehide", () => {
     window.clearInterval(monitor);
     stopLobbyPolling();
+    void disconnectLobbyPresence().catch(() => {});
     if (matchReconnectTimer !== null) {
       window.clearTimeout(matchReconnectTimer);
     }
@@ -1630,7 +1721,7 @@ async function refreshSession() {
   googleSignIn.hidden = true;
   signOut.hidden = false;
   socialPanel.hidden = false;
-  await refreshChallenges();
+  await Promise.all([refreshChallenges(), refreshRematches()]);
   return session;
 }
 
@@ -1667,19 +1758,43 @@ function stopLobbyPolling() {
   }
 }
 
+async function disconnectLobbyPresence() {
+  if (activeLobbyId === null || activeLobbyConnectionId === null) {
+    return;
+  }
+  const lobbyId = activeLobbyId;
+  const connectionId = activeLobbyConnectionId;
+  activeLobbyConnectionId = null;
+  await apiRequest(`/api/lobbies/${lobbyId}/connections/${connectionId}`, { method: "DELETE" });
+}
+
+function setMatchLocation(url, matchId) {
+  url.searchParams.set("match", matchId);
+  url.searchParams.delete("player_one");
+  url.searchParams.delete("player_two");
+}
+
 async function pollLobby() {
   if (activeLobbyId === null || document.visibilityState === "hidden") {
     return;
   }
   try {
+    if (activeLobbyConnectionId !== null) {
+      await apiRequest(`/api/lobbies/${activeLobbyId}/connections/${activeLobbyConnectionId}`, {
+        method: "POST",
+      });
+    }
     const lobby = await apiRequest(`/api/lobbies/${activeLobbyId}`);
-    lobbyState.textContent = lobby.status === "waiting" ? "Waiting for both players" : lobby.status;
+    lobbyState.textContent =
+      lobby.status === "waiting"
+        ? lobby.both_ready
+          ? "Both players ready. Starting match…"
+          : "Waiting for both players"
+        : lobby.status;
     if (lobby.status === "started" && lobby.match_id !== null) {
       stopLobbyPolling();
       const url = new URL(window.location.href);
-      url.searchParams.set("match", lobby.match_id);
-      url.searchParams.set("player_one", lobby.player_one);
-      url.searchParams.set("player_two", lobby.player_two);
+      setMatchLocation(url, lobby.match_id);
       window.location.assign(url);
       return;
     }
@@ -1687,6 +1802,7 @@ async function pollLobby() {
       stopLobbyPolling();
       activeLobbyId = null;
       cancelLobbyButton.hidden = true;
+      readyLobbyButton.hidden = true;
     }
   } catch (error) {
     socialFailure(error);
@@ -1703,9 +1819,31 @@ function enterLobby(lobby) {
   lobbyLabel.textContent = `Lobby ${lobby.lobby_id}`;
   lobbyState.textContent = "Waiting for both players";
   cancelLobbyButton.hidden = false;
+  readyLobbyButton.hidden = false;
   socialStatus.textContent = `Joined waiting lobby ${lobby.lobby_id}.`;
-  void pollLobby();
+  void apiRequest(`/api/lobbies/${lobby.lobby_id}`, { method: "POST" })
+    .then((connection) => {
+      activeLobbyConnectionId = connection.connection_id;
+      return pollLobby();
+    })
+    .catch(socialFailure);
 }
+
+readyLobbyButton.addEventListener("click", async () => {
+  if (activeLobbyId === null) {
+    return;
+  }
+  readyLobbyButton.disabled = true;
+  try {
+    const lobby = await apiRequest(`/api/lobbies/${activeLobbyId}/ready`, { method: "POST" });
+    lobbyState.textContent = lobby.both_ready
+      ? "Both players ready. Starting match…"
+      : "Ready. Waiting for your friend.";
+  } catch (error) {
+    readyLobbyButton.disabled = false;
+    socialFailure(error);
+  }
+});
 
 cancelLobbyButton.addEventListener("click", async () => {
   if (activeLobbyId === null) {
@@ -1713,14 +1851,65 @@ cancelLobbyButton.addEventListener("click", async () => {
   }
   try {
     const lobby = await apiRequest(`/api/lobbies/${activeLobbyId}`, { method: "DELETE" });
+    activeLobbyConnectionId = null;
     lobbyState.textContent = lobby.status;
     activeLobbyId = null;
     stopLobbyPolling();
     cancelLobbyButton.hidden = true;
+    readyLobbyButton.hidden = true;
   } catch (error) {
     socialFailure(error);
   }
 });
+
+async function acceptRematch(matchId) {
+  socialStatus.textContent = "Accepting rematch…";
+  try {
+    const match = await apiRequest(`/api/matches/${matchId}/rematch/accept`, { method: "POST" });
+    const url = new URL(window.location.href);
+    setMatchLocation(url, match.match_id);
+    window.location.assign(url);
+  } catch (error) {
+    socialFailure(error);
+  }
+}
+
+async function refreshRematches() {
+  const rematches = await apiRequest("/api/rematches");
+  rematchList.replaceChildren();
+  if (rematches.length === 0) {
+    rematchList.textContent = "No rematch offers.";
+    return;
+  }
+  for (const rematch of rematches) {
+    const row = document.createElement("div");
+    const label = document.createElement("span");
+    label.textContent = `Match ${rematch.previous_match_id}`;
+    const accept = document.createElement("button");
+    accept.type = "button";
+    accept.textContent = "Accept";
+    accept.addEventListener("click", () => void acceptRematch(rematch.previous_match_id));
+    row.append(label, accept);
+    rematchList.append(row);
+  }
+}
+
+async function offerRematch(matchId) {
+  await apiRequest(`/api/matches/${matchId}/rematch`, { method: "POST" });
+  socialStatus.textContent = "Rematch offered.";
+}
+
+offerRematchButton.addEventListener("click", () => {
+  const matchId = new URLSearchParams(window.location.search).get("match");
+  if (matchId !== null) {
+    void offerRematch(matchId).catch(socialFailure);
+  }
+});
+
+const currentMatchId = new URLSearchParams(window.location.search).get("match");
+if (/^\d{1,39}$/.test(currentMatchId ?? "")) {
+  offerRematchButton.hidden = false;
+}
 
 async function acceptChallenge(challengeId) {
   socialStatus.textContent = "Accepting challenge…";
@@ -1819,6 +2008,10 @@ async function redeemInvitationFromUrl() {
   }
 }
 
+googleSignIn.addEventListener("submit", () => {
+  googleSignIn.querySelector("button").disabled = true;
+});
+
 signOut.addEventListener("click", async () => {
   signOut.disabled = true;
   try {
@@ -1839,13 +2032,26 @@ signOut.addEventListener("click", async () => {
   }
 });
 
-void refreshSession()
-  .then(() => redeemInvitationFromUrl())
+const sessionReady = refreshSession()
+  .then(async (session) => {
+    const matchId = new URLSearchParams(window.location.search).get("match");
+    if (session !== undefined && /^\d{1,39}$/.test(matchId ?? "")) {
+      const access = await apiRequest(`/api/matches/${matchId}`);
+      matchPlayerSeat = access.player;
+      const url = new URL(window.location.href);
+      url.searchParams.delete("player_one");
+      url.searchParams.delete("player_two");
+      window.history.replaceState(null, "", url);
+    }
+    await redeemInvitationFromUrl();
+    return session;
+  })
   .catch((error) => {
     console.error("PWMTF session lookup failed", error);
     accountPanel.hidden = false;
     accountLabel.textContent = "Account status unavailable";
     googleSignIn.hidden = false;
+    return undefined;
   });
 
 try {
@@ -1854,6 +2060,7 @@ try {
   }
   wasmModule = await import("./pwmtf_client.js");
   await wasmModule.default();
+  await sessionReady;
   startMatchSocket(wasmModule);
   await new Promise((resolve) => window.requestAnimationFrame(resolve));
   await new Promise((resolve) => window.requestAnimationFrame(resolve));

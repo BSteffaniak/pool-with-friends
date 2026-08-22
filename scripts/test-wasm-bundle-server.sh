@@ -80,6 +80,11 @@ grep -qi '^Content-Security-Policy: default-src' "$tmp/headers"
 grep -qi '^Cross-Origin-Opener-Policy: same-origin' "$tmp/headers"
 grep -qi '^Cross-Origin-Resource-Policy: same-origin' "$tmp/headers"
 
+curl --fail --silent --dump-header "$tmp/brand-headers" --output "$tmp/brand-mark.svg" \
+    "http://127.0.0.1:$port/brand-mark.svg"
+cmp "$root/dist/brand-mark.svg" "$tmp/brand-mark.svg"
+grep -qi '^Content-Type: image/svg+xml' "$tmp/brand-headers"
+
 for method in GET HEAD; do
     if [ "$method" = HEAD ]; then
         curl --silent --head "http://127.0.0.1:$port/pwmtf-bundle-manifest.json" >"$tmp/missing-headers"

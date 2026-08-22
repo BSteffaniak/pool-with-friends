@@ -37,6 +37,18 @@ fi
 
 decision_directory=$(dirname -- "$decision")
 size_evidence_directory=$(dirname -- "$size_evidence")
+for path in "$reports" "$bundle" "$decision_directory" "$size_evidence_directory"; do
+    if [ -L "$path" ]; then
+        printf '%s\n' "final feasibility paths must not be symlinks: $path" >&2
+        exit 1
+    fi
+done
+case "$decision$size_evidence" in
+    *"\n"*|*"\r"*)
+        printf '%s\n' "final feasibility evidence paths contain unsupported characters" >&2
+        exit 1
+        ;;
+esac
 if [ ! -d "$decision_directory" ]; then
     printf '%s\n' "acceptance decision directory does not exist: $decision_directory" >&2
     exit 1
@@ -46,14 +58,21 @@ if [ ! -d "$size_evidence_directory" ]; then
     exit 1
 fi
 
-if [ -e "$decision" ]; then
+if [ -e "$decision" ] || [ -L "$decision" ]; then
     printf '%s\n' "acceptance decision already exists; remove it explicitly before validating a replacement: $decision" >&2
     exit 1
 fi
-if [ -e "$size_evidence" ]; then
+if [ -e "$size_evidence" ] || [ -L "$size_evidence" ]; then
     printf '%s\n' "size evidence already exists; remove it explicitly before validating a replacement: $size_evidence" >&2
     exit 1
 fi
+
+if [ -e "$temporary_decision" ] || [ -L "$temporary_decision" ] \
+    || [ -e "$temporary_size_evidence" ] || [ -L "$temporary_size_evidence" ]; then
+    printf '%s\n' "temporary feasibility evidence path already exists" >&2
+    exit 1
+fi
+umask 077
 
 set -- "$reports"/*.json
 if [ ! -e "$1" ]; then

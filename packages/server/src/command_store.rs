@@ -6,7 +6,7 @@ use crate::{
     AcceptedCommand, AccountId, CommandJournal, DeadlineId, DeadlineMillis, JournalError, MatchId,
     Participants, ScheduledDeadline,
 };
-use pwmtf_game_domain::{MatchCommandResult, Player};
+use pwmtf_game_domain::{MatchCommandResult, MatchConfiguration, MatchState, Player};
 use pwmtf_protocol::{CommandEnvelope, CommandId};
 use switchy_database::{
     Database, DatabaseValue,
@@ -58,8 +58,8 @@ impl SwitchyCommandJournal {
         };
         let snapshot = decode_bytes(&text(row, "canonical_snapshot").map_err(|_| JournalError)?)
             .map_err(|_| JournalError)?;
-        let state =
-            pwmtf_game_domain::MatchState::from_bytes(&snapshot).map_err(|_| JournalError)?;
+        let state = MatchState::from_bytes(&snapshot).map_err(|_| JournalError)?;
+        validate_match_configuration(row, &state.configuration()).map_err(|_| JournalError)?;
         if state.checksum() != parse_u64(row, "canonical_checksum").map_err(|_| JournalError)? {
             return Err(JournalError);
         }
@@ -148,8 +148,8 @@ async fn commit_command(
     {
         return Err(CommandStoreError::Malformed);
     }
-    let state = pwmtf_game_domain::MatchState::from_bytes(&command.snapshot)
-        .map_err(|_| CommandStoreError::Malformed)?;
+    let state =
+        MatchState::from_bytes(&command.snapshot).map_err(|_| CommandStoreError::Malformed)?;
     if state.checksum() != command.checksum {
         return Err(CommandStoreError::Malformed);
     }
@@ -170,6 +170,7 @@ async fn commit_command(
         .execute(&*tx)
         .await?;
     let row = exactly_one(&matches)?;
+    validate_match_configuration(row, &state.configuration())?;
     let current_revision = integer(row, "canonical_revision")?;
     if current_revision != to_i64(envelope.expected_revision)? {
         return Err(CommandStoreError::StaleRevision);
@@ -239,15 +240,30 @@ async fn load_commands(
     db: &dyn Database,
     match_id: MatchId,
 ) -> Result<Vec<AcceptedCommand>, CommandStoreError> {
+    let matches = db
+        .select("matches")
+        .where_eq("match_id", match_id.value().to_string())
+        .execute(db)
+        .await?;
+    let configuration = pinned_match_configuration(exactly_one(&matches)?)?;
     let rows = db
         .select("accepted_commands")
         .where_eq("match_id", match_id.value().to_string())
         .sort("revision", SortDirection::Asc)
         .execute(db)
         .await?;
-    rows.iter()
+    let records = rows
+        .iter()
         .map(|row| decode_command(row, match_id))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    for record in &records {
+        let state =
+            MatchState::from_bytes(&record.snapshot).map_err(|_| CommandStoreError::Malformed)?;
+        if state.configuration() != configuration {
+            return Err(CommandStoreError::Malformed);
+        }
+    }
+    Ok(records)
 }
 
 fn decode_command(
@@ -270,8 +286,7 @@ fn decode_command(
     }
     let snapshot = decode_bytes(&text(row, "snapshot")?)?;
     let checksum = parse_u64(row, "checksum")?;
-    let state = pwmtf_game_domain::MatchState::from_bytes(&snapshot)
-        .map_err(|_| CommandStoreError::Malformed)?;
+    let state = MatchState::from_bytes(&snapshot).map_err(|_| CommandStoreError::Malformed)?;
     if state.checksum() != checksum {
         return Err(CommandStoreError::Malformed);
     }
@@ -290,6 +305,25 @@ fn decode_command(
         checksum,
         deadline,
     })
+}
+
+fn pinned_match_configuration(
+    row: &switchy_database::Row,
+) -> Result<MatchConfiguration, CommandStoreError> {
+    MatchConfiguration::from_bytes(&decode_bytes(&text(row, "match_configuration")?)?)
+        .map_err(|_| CommandStoreError::Malformed)
+}
+
+fn validate_match_configuration(
+    row: &switchy_database::Row,
+    expected: &MatchConfiguration,
+) -> Result<(), CommandStoreError> {
+    let stored = pinned_match_configuration(row)?;
+    if stored == *expected {
+        Ok(())
+    } else {
+        Err(CommandStoreError::Malformed)
+    }
 }
 
 fn validate_deadline(
@@ -499,6 +533,118 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::too_many_lines)]
+    fn pinned_configuration_rejects_mutated_match_rows_and_history() {
+        block_on(async {
+            let db: Arc<dyn Database> = switchy_database_connection::builder()
+                .turso()
+                .with_in_memory()
+                .build()
+                .await
+                .unwrap()
+                .into();
+            crate::migrate(&*db).await.unwrap();
+            let state = MatchState::new(
+                RulesProfile::standard(),
+                PhysicsProfile::standard(),
+                TableGeometry::standard(),
+                RackSeed::new(42),
+                Player::One,
+            )
+            .unwrap();
+            db.insert("matches")
+                .value("match_id", "9")
+                .value("player_one_id", "1")
+                .value("player_two_id", "2")
+                .value("canonical_revision", 0_i64)
+                .value("canonical_snapshot", encode_bytes(&state.to_bytes()))
+                .value("canonical_checksum", checksum_i64(state.checksum()))
+                .value(
+                    "match_configuration",
+                    encode_bytes(&state.configuration().to_bytes()),
+                )
+                .value("deadline_revision", DatabaseValue::Null)
+                .value("deadline_player", DatabaseValue::Null)
+                .value("deadline_at_ms", DatabaseValue::Null)
+                .execute(&*db)
+                .await
+                .unwrap();
+            let alternate = MatchState::new(
+                RulesProfile::standard(),
+                PhysicsProfile::standard(),
+                TableGeometry::standard(),
+                RackSeed::new(99),
+                Player::One,
+            )
+            .unwrap();
+            db.update("matches")
+                .value(
+                    "match_configuration",
+                    encode_bytes(&alternate.configuration().to_bytes()),
+                )
+                .where_eq("match_id", "9")
+                .execute(&*db)
+                .await
+                .unwrap();
+            let journal = SwitchyCommandJournal::new(Arc::clone(&db));
+            assert_eq!(
+                journal.initial_match(MatchId::new(9)).await,
+                Err(JournalError)
+            );
+            db.update("matches")
+                .value(
+                    "match_configuration",
+                    encode_bytes(&state.configuration().to_bytes()),
+                )
+                .where_eq("match_id", "9")
+                .execute(&*db)
+                .await
+                .unwrap();
+            let participants = crate::Participants {
+                player_one: AccountId::new(1),
+                player_two: AccountId::new(2),
+            };
+            let command = CommandEnvelope::new(
+                0,
+                CommandId::new([7; 16]),
+                VersionedMatchCommand::new(MatchCommand::Timeout),
+            );
+            let mut service = crate::MatchService::new(SwitchyCommandJournal::new(Arc::clone(&db)));
+            service.insert_match(MatchId::new(9), participants, state);
+            service
+                .apply_at(
+                    MatchId::new(9),
+                    AccountId::new(1),
+                    command,
+                    DeadlineMillis::new(100),
+                )
+                .await
+                .unwrap();
+
+            let alternate = MatchState::new(
+                RulesProfile::standard(),
+                PhysicsProfile::standard(),
+                TableGeometry::standard(),
+                RackSeed::new(99),
+                Player::One,
+            )
+            .unwrap();
+            db.update("matches")
+                .value(
+                    "match_configuration",
+                    encode_bytes(&alternate.configuration().to_bytes()),
+                )
+                .where_eq("match_id", "9")
+                .execute(&*db)
+                .await
+                .unwrap();
+
+            let journal = SwitchyCommandJournal::new(Arc::clone(&db));
+            assert_eq!(journal.load(MatchId::new(9)).await, Err(JournalError));
+        });
+    }
+
+    #[test]
     fn switchy_journal_commits_before_ack_and_recovers_idempotency_and_deadline() {
         block_on(async {
             let db: Arc<dyn Database> = switchy_database_connection::builder()
@@ -524,6 +670,10 @@ mod tests {
                 .value("canonical_revision", 0_i64)
                 .value("canonical_snapshot", encode_bytes(&state.to_bytes()))
                 .value("canonical_checksum", checksum_i64(state.checksum()))
+                .value(
+                    "match_configuration",
+                    encode_bytes(&state.configuration().to_bytes()),
+                )
                 .value("deadline_revision", DatabaseValue::Null)
                 .value("deadline_player", DatabaseValue::Null)
                 .value("deadline_at_ms", DatabaseValue::Null)

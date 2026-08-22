@@ -19,29 +19,30 @@ pub async fn assign_handle(
     handle: &Handle,
 ) -> Result<(), ProfileStoreError> {
     let account_id = account.value().to_string();
-    let account_rows = db
+    let tx = db.begin_transaction().await?;
+    let account_rows = tx
         .select("account_profiles")
         .where_eq("account_id", account_id.clone())
-        .execute(db)
+        .execute(&*tx)
         .await?;
     if let Some(row) = exactly_one_or_none(&account_rows)? {
         let stored = text(row, "handle")?;
-        return if stored == handle.as_str() {
-            Ok(())
-        } else {
-            Err(ProfileStoreError::AccountConflict)
-        };
+        if stored == handle.as_str() {
+            return Ok(());
+        }
+        return Err(ProfileStoreError::AccountConflict);
     }
 
-    if account_for_handle(db, handle).await?.is_some() {
+    if account_for_handle(&*tx, handle).await?.is_some() {
         return Err(ProfileStoreError::HandleConflict);
     }
 
-    db.insert("account_profiles")
+    tx.insert("account_profiles")
         .value("account_id", account_id)
         .value("handle", handle.as_str())
-        .execute(db)
+        .execute(&*tx)
         .await?;
+    tx.commit().await?;
     Ok(())
 }
 

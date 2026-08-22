@@ -52,6 +52,14 @@ impl BrowserTransport {
         self.prediction.as_ref()
     }
 
+    /// Returns whether one authoritative revision has already been ingested.
+    #[must_use]
+    pub fn has_revision(&self, revision: u64) -> bool {
+        self.prediction.as_ref().is_some_and(|prediction| {
+            prediction.authoritative_revision() == revision && !prediction.has_pending_prediction()
+        })
+    }
+
     /// Begins a new browser connection attempt.
     pub const fn connecting(&mut self) {
         self.status = ConnectionStatus::Connecting;
@@ -104,6 +112,9 @@ impl BrowserTransport {
             return Err(TransportClientError::NotReady);
         }
         let snapshot = SnapshotEnvelope::from_bytes(bytes)?;
+        if self.has_revision(snapshot.revision) {
+            return Ok(None);
+        }
         let disposition = if let Some(prediction) = &mut self.prediction {
             Some(prediction.reconcile(&snapshot)?)
         } else {
@@ -155,6 +166,27 @@ impl BrowserTransport {
             .as_mut()
             .ok_or(TransportClientError::NotReady)?
             .predict_shot(command_id, shot, called_pocket)
+            .map_err(Into::into)
+    }
+
+    /// Creates and locally predicts one concession command.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportClientError::NotReady`] unless initialization
+    /// completed, or a prediction/domain failure for invalid local state.
+    pub fn predict_concession(
+        &mut self,
+        command_id: pwmtf_protocol::CommandId,
+        player: pwmtf_game_domain::Player,
+    ) -> Result<CommandEnvelope, TransportClientError> {
+        if self.status != ConnectionStatus::Ready {
+            return Err(TransportClientError::NotReady);
+        }
+        self.prediction
+            .as_mut()
+            .ok_or(TransportClientError::NotReady)?
+            .predict_concession(command_id, player)
             .map_err(Into::into)
     }
 
@@ -258,6 +290,18 @@ mod tests {
             .unwrap();
         assert_eq!(command.expected_revision, 1);
         assert!(!transport.prediction().unwrap().predicted().ball_in_hand());
+    }
+
+    #[test]
+    fn duplicate_authoritative_revision_is_harmless_after_confirmation() {
+        let mut transport = BrowserTransport::default();
+        transport.connecting();
+        let _ = transport.opened();
+        transport.negotiated("1").unwrap();
+        assert_eq!(transport.receive_snapshot(&snapshot(0)).unwrap(), None);
+        assert!(transport.has_revision(0));
+        assert_eq!(transport.receive_snapshot(&snapshot(0)).unwrap(), None);
+        assert_eq!(transport.status(), ConnectionStatus::Ready);
     }
 
     #[test]

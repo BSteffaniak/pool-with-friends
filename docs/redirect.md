@@ -8,4 +8,4 @@ The managed games-directory entry must redirect only this exact source path:
 
 The owning HyperChad deployment must merge this rule into its managed redirect set rather than replacing unrelated rules. PWMTF infrastructure must not mutate the parent site's unmanaged configuration.
 
-Production smoke qualification must assert the exact source, target, and status and must reject redirect chains or any target on a noncanonical origin.
+Production smoke qualification uses `./scripts/test-production-smoke.sh`; it asserts canonical health and application metadata plus the exact redirect source, target, and status, and rejects redirect chains or any target on a noncanonical origin.

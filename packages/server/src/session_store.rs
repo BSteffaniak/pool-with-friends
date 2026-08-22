@@ -15,6 +15,9 @@ pub async fn insert_session(
     token_hash: SessionTokenHash,
     session: Session,
 ) -> Result<(), SessionStoreError> {
+    if session.expires_at <= session.last_used_at {
+        return Err(SessionStoreError::InvalidExpiration);
+    }
     db.insert("sessions")
         .value("session_hash", encode_hash(token_hash))
         .value("account_id", session.account.value().to_string())
@@ -80,6 +83,9 @@ pub async fn resolve_session(
         .where_eq("session_hash", encode_hash(token_hash))
         .execute(db)
         .await?;
+    if rows.len() > 1 {
+        return Err(SessionStoreError::Malformed);
+    }
     let Some(row) = rows.first() else {
         return Ok(None);
     };
@@ -87,7 +93,18 @@ pub async fn resolve_session(
         .get("expires_at_ms")
         .and_then(|value| value.as_i64())
         .ok_or(SessionStoreError::Malformed)?;
+    let last_used_at = row
+        .get("last_used_at_ms")
+        .and_then(|value| value.as_i64())
+        .ok_or(SessionStoreError::Malformed)?;
+    if expires_at <= last_used_at || to_i64(now)? < last_used_at {
+        return Err(SessionStoreError::Malformed);
+    }
     if expires_at <= to_i64(now)? {
+        db.delete("sessions")
+            .where_eq("session_hash", encode_hash(token_hash))
+            .execute(db)
+            .await?;
         return Ok(None);
     }
     let account = row
@@ -124,6 +141,9 @@ pub enum SessionStoreError {
     /// Token generation or canonical parsing failed.
     #[error(transparent)]
     Token(#[from] TokenError),
+    /// Session expiration is not later than its creation/use time.
+    #[error("session expiration is invalid")]
+    InvalidExpiration,
     /// Numeric value cannot be represented by the portable schema.
     #[error("session value exceeds portable schema bounds")]
     Overflow,
@@ -201,6 +221,49 @@ mod tests {
                 .expect("in-memory Turso opens");
             crate::migrate(&*db).await.expect("schema migrates");
             let hash = SessionTokenHash::new([5; 32]);
+            assert!(matches!(
+                insert_session(
+                    &*db,
+                    SessionTokenHash::new([4; 32]),
+                    Session {
+                        account: AccountId::new(42),
+                        expires_at: 100,
+                        last_used_at: 100,
+                    },
+                )
+                .await,
+                Err(SessionStoreError::InvalidExpiration)
+            ));
+            db.insert("sessions")
+                .value("session_hash", encode_hash(SessionTokenHash::new([3; 32])))
+                .value("account_id", "42")
+                .value("expires_at_ms", 100_i64)
+                .value("last_used_at_ms", 100_i64)
+                .execute(&*db)
+                .await
+                .unwrap();
+            assert!(matches!(
+                resolve_session(&*db, SessionTokenHash::new([3; 32]), 50).await,
+                Err(SessionStoreError::Malformed)
+            ));
+            revoke_session(&*db, SessionTokenHash::new([3; 32]))
+                .await
+                .unwrap();
+            db.insert("sessions")
+                .value("session_hash", encode_hash(SessionTokenHash::new([2; 32])))
+                .value("account_id", "42")
+                .value("expires_at_ms", 200_i64)
+                .value("last_used_at_ms", 100_i64)
+                .execute(&*db)
+                .await
+                .unwrap();
+            assert!(matches!(
+                resolve_session(&*db, SessionTokenHash::new([2; 32]), 50).await,
+                Err(SessionStoreError::Malformed)
+            ));
+            revoke_session(&*db, SessionTokenHash::new([2; 32]))
+                .await
+                .unwrap();
             insert_session(
                 &*db,
                 hash,
@@ -217,6 +280,13 @@ mod tests {
                 Some(AccountId::new(42))
             );
             assert_eq!(resolve_session(&*db, hash, 100).await.unwrap(), None);
+            assert!(
+                db.select("sessions")
+                    .execute(&*db)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
             revoke_session(&*db, hash).await.unwrap();
             assert_eq!(resolve_session(&*db, hash, 50).await.unwrap(), None);
         });

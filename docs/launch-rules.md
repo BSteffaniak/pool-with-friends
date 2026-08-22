@@ -21,7 +21,14 @@ Miniclip's official [How to Play 9 Ball](https://support.miniclip.com/hc/en-us/a
 
 ## PWMTF launch profile decisions
 
-Where Miniclip's public support material is incomplete, PWMTF version 1 uses the binding decisions in `INVARIANTS.md` and the local progress document:
+Miniclip's public documentation confirms that an illegal break is a foul but does not publish a numeric rail threshold or deterministic precedence for simultaneous break events. PWMTF version 1 therefore makes the following explicit launch-profile decisions rather than guessing hidden Miniclip behavior:
+
+- A break uses the same objective legality test as any open-table shot: the cue ball must first contact a non-8 object ball and, after contact, either a ball is pocketed or at least one ball reaches a cushion.
+- Failure of that test is represented by the existing `NoObjectContact`, `WrongFirstContact`, and `NoRailAfterContact` fouls in their canonical priority order; there is no separate undocumented multi-rail threshold.
+- Pocket events are evaluated before the 8-ball break-rerack rule, but fouls remain recorded on the shot result. Pocketing the 8-ball on the break reracks and keeps the breaker selected by the immutable launch profile; it never wins or loses the match.
+- Canonical event ordering and tick ordering resolve simultaneous contact, cushion, and pocket evidence; transport or ECS observation order is never used.
+
+Where Miniclip's public support material is incomplete, PWMTF version 1 also uses the binding decisions in `INVARIANTS.md` and the local progress document:
 
 - The table stays open after the break, regardless of groups pocketed during the break.
 - First legally pocketed post-break group assigns solids or stripes.
@@ -33,6 +40,6 @@ Where Miniclip's public support material is incomplete, PWMTF version 1 uses the
 - Concession is the only non-8-ball completion reason.
 - A linked rematch alternates the breaker.
 
-## Still requiring product evidence
+## Evidence boundary
 
-The exact illegal-break threshold and unusual break/rail precedence are not sufficiently documented by current official Miniclip support material. They remain excluded from completion claims until observed behavior or a stronger first-party source is captured as a versioned executable fixture.
+These are explicit PWMTF version-one rules, not a claim that Miniclip uses the same hidden threshold or precedence. If stronger first-party evidence later establishes different Miniclip behavior, PWMTF must evaluate it as an explicitly versioned rules-profile change and preserve replay of version-one matches. The launch aggregate is complete under the decisions above; no undocumented behavior is inferred at runtime.

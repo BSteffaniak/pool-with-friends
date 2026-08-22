@@ -11,7 +11,7 @@ pub mod transport;
 
 use bevy::{
     camera::{OrthographicProjection, Projection, ScalingMode},
-    color::palettes::css::{BLACK, WHITE},
+    color::palettes::css::WHITE,
     prelude::*,
     window::{PresentMode, WindowFocused, WindowResolution},
 };
@@ -166,6 +166,22 @@ pub fn match_socket_ready() -> bool {
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
+/// Returns the current authoritative/predicted revision for presentation.
+#[must_use]
+pub fn match_revision() -> Option<u64> {
+    browser_transport::authoritative_revision()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Returns the current canonical predicted checksum for presentation effects.
+#[must_use]
+pub fn match_checksum() -> Option<u64> {
+    browser_transport::predicted_checksum()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
 /// Predicts and sends a quantized cue-ball placement.
 ///
 /// # Errors
@@ -206,6 +222,23 @@ pub fn send_shot_command(
         pwmtf_game_domain::VersionedShotCommand::new(aim, power, spin),
         called_pocket,
     )
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Predicts and sends an explicit concession for the authenticated participant seat.
+///
+/// # Errors
+///
+/// Returns a JavaScript exception unless the socket is initialized, identifier
+/// generation succeeds, prediction is valid, and transmission succeeds.
+pub fn send_concession(player: u8) -> Result<(), wasm_bindgen::JsValue> {
+    let player = match player {
+        1 => pwmtf_game_domain::Player::One,
+        2 => pwmtf_game_domain::Player::Two,
+        _ => return Err(wasm_bindgen::JsValue::from_str("invalid player seat")),
+    };
+    browser_transport::predict_and_send_concession(random_command_id()?, player)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -306,6 +339,15 @@ fn setup(
     spawn_rectangle(
         &mut commands,
         Vec2::new(
+            CUSHION.mul_add(2.0, TABLE_SIZE.x) + 28.0,
+            CUSHION.mul_add(2.0, TABLE_SIZE.y) + 28.0,
+        ),
+        Color::srgb(0.055, 0.025, 0.012),
+        Vec3::new(TABLE_CENTER_X, -8.0, -0.5),
+    );
+    spawn_rectangle(
+        &mut commands,
+        Vec2::new(
             CUSHION.mul_add(2.0, TABLE_SIZE.x),
             CUSHION.mul_add(2.0, TABLE_SIZE.y),
         ),
@@ -318,10 +360,18 @@ fn setup(
         Color::srgb(0.025, 0.38, 0.21),
         Vec3::new(TABLE_CENTER_X, 0.0, 1.0),
     );
+    spawn_rectangle(
+        &mut commands,
+        Vec2::new(TABLE_SIZE.x - 34.0, TABLE_SIZE.y - 34.0),
+        Color::srgba(0.10, 0.62, 0.39, 0.16),
+        Vec3::new(TABLE_CENTER_X, 0.0, 1.5),
+    );
+
+    spawn_table_details(&mut commands);
 
     for pocket in pocket_positions() {
         commands.spawn((
-            Sprite::from_color(BLACK, Vec2::splat(42.0)),
+            Sprite::from_color(Color::srgb(0.015, 0.018, 0.016), Vec2::splat(46.0)),
             Transform::from_translation(pocket.extend(3.0)),
         ));
     }
@@ -362,10 +412,25 @@ fn setup(
     spawn_overlay(&mut commands, presentation_tier.0);
 }
 
+fn spawn_table_details(commands: &mut Commands) {
+    for x in [-360.0_f32, -120.0, 120.0, 360.0] {
+        for y in [
+            -TABLE_SIZE.y / 2.0 - CUSHION / 2.0,
+            TABLE_SIZE.y / 2.0 + CUSHION / 2.0,
+        ] {
+            commands.spawn((
+                Sprite::from_color(Color::srgb(0.93, 0.72, 0.31), Vec2::splat(7.0)),
+                Transform::from_xyz(TABLE_CENTER_X + x, y, 2.0)
+                    .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_4)),
+            ));
+        }
+    }
+}
+
 fn spawn_overlay(commands: &mut Commands, presentation_tier: &str) {
     commands.spawn((
         Text::new(format!(
-            "PWMTF · browser feasibility table · {presentation_tier} tier"
+            "POOL WITH MORE THAN FRIENDS · {presentation_tier} TIER"
         )),
         TextFont::from_font_size(24.0),
         TextColor(Color::srgb(0.92, 0.85, 0.65)),
@@ -377,7 +442,7 @@ fn spawn_overlay(commands: &mut Commands, presentation_tier: &str) {
         },
     ));
     commands.spawn((
-        Text::new("Aim by dragging · drag vertically at the right edge for power"),
+        Text::new("Drag to aim · pull the right rail for power · release to shoot"),
         TextFont::from_font_size(17.0),
         TextColor(Color::srgb(0.76, 0.82, 0.78)),
         Node {

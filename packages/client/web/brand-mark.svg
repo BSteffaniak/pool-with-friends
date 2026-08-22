@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title description">
+  <title id="title">Pool with More Than Friends</title>
+  <desc id="description">An original gold-trimmed eight ball mark on green felt.</desc>
+  <defs>
+    <radialGradient id="felt" cx="42%" cy="34%" r="76%">
+      <stop offset="0" stop-color="#16815f"/>
+      <stop offset="1" stop-color="#073f30"/>
+    </radialGradient>
+    <radialGradient id="ball" cx="38%" cy="30%" r="70%">
+      <stop offset="0" stop-color="#35413c"/>
+      <stop offset="0.52" stop-color="#111714"/>
+      <stop offset="1" stop-color="#020504"/>
+    </radialGradient>
+  </defs>
+  <rect width="256" height="256" rx="58" fill="url(#felt)"/>
+  <path d="M35 67 67 35h122l32 32v122l-32 32H67l-32-32Z" fill="none" stroke="#f0cd73" stroke-width="8"/>
+  <circle cx="128" cy="128" r="73" fill="url(#ball)" stroke="#f7f2e4" stroke-width="6"/>
+  <circle cx="128" cy="128" r="31" fill="#f7f2e4"/>
+  <text x="128" y="146" fill="#101714" font-family="Georgia,serif" font-size="54" font-weight="700" text-anchor="middle">8</text>
+  <circle cx="76" cy="76" r="7" fill="#f0cd73" opacity=".9"/>
+</svg>
