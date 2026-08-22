@@ -1,6 +1,14 @@
 //! Native HTTP and secure-WebSocket transport boundary.
 
-use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use axum::{
     Router,
@@ -50,6 +58,7 @@ const CACHE_CONTROL_ASSET: &str = "no-cache";
 const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; media-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 const PERMISSIONS_POLICY: &str = "camera=(), geolocation=(), microphone=()";
 const SNAPSHOT_CHANNEL_CAPACITY: usize = 256;
+const READINESS_MAX_AGE_MS: u64 = 5_000;
 type PublishedSnapshot = (MatchId, SnapshotEnvelope);
 
 /// Runtime services required by native HTTP/OIDC/WebSocket entry points.
@@ -61,6 +70,8 @@ pub struct HttpState {
     subscriptions: Mutex<SubscriptionRegistry>,
     snapshot_sender: tokio::sync::broadcast::Sender<PublishedSnapshot>,
     matches: Mutex<MatchService<SwitchyCommandJournal>>,
+    scheduler_healthy: AtomicBool,
+    scheduler_last_success_ms: AtomicU64,
     web_root: Option<PathBuf>,
 }
 
@@ -90,6 +101,9 @@ impl HttpState {
         }
         let count = accepted.len();
         drop(matches);
+        self.scheduler_last_success_ms
+            .store(now.value(), Ordering::Release);
+        self.scheduler_healthy.store(true, Ordering::Release);
         Ok(count)
     }
 
@@ -250,6 +264,59 @@ impl HttpState {
         Ok(recovered)
     }
 
+    /// Marks the authoritative scheduler unhealthy after a failed poll.
+    pub fn mark_scheduler_unhealthy(&self) {
+        self.scheduler_healthy.store(false, Ordering::Release);
+    }
+
+    fn scheduler_is_ready(&self, now: u64) -> bool {
+        scheduler_is_ready(
+            &self.scheduler_healthy,
+            &self.scheduler_last_success_ms,
+            now,
+        )
+    }
+
+    /// Returns whether this state's durable database and recovered in-process
+    /// authority are ready to receive traffic.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportError`] when durable match rows are unavailable,
+    /// malformed, or do not exactly match the authority loaded at startup.
+    pub async fn verify_readiness(&self, now: u64) -> Result<(), TransportError> {
+        if !self.scheduler_is_ready(now) {
+            return Err(TransportError::Recovery);
+        }
+        let journal = SwitchyCommandJournal::new(Arc::clone(&self.db));
+        let durable_ids = journal
+            .match_ids()
+            .await
+            .map_err(|_| TransportError::Recovery)?;
+        let loaded_heads = self.matches.lock().await.match_heads();
+        let loaded_ids = loaded_heads
+            .iter()
+            .map(|(match_id, ..)| *match_id)
+            .collect::<Vec<_>>();
+        if durable_ids != loaded_ids {
+            return Err(TransportError::Recovery);
+        }
+        for (match_id, participants, revision, state, deadline) in loaded_heads {
+            let (head_participants, head_revision, head_state, head_deadline) = journal
+                .canonical_head(match_id)
+                .await
+                .map_err(|_| TransportError::Recovery)?;
+            if participants != head_participants
+                || revision != head_revision
+                || state != head_state
+                || deadline != head_deadline
+            {
+                return Err(TransportError::Recovery);
+            }
+        }
+        Ok(())
+    }
+
     /// Creates production transport state with exact origin validation.
     #[must_use]
     pub fn production(db: Arc<dyn Database>, oidc: Arc<GoogleOidcClient>) -> Self {
@@ -273,6 +340,8 @@ impl HttpState {
             subscriptions: Mutex::new(SubscriptionRegistry::default()),
             snapshot_sender,
             matches: Mutex::new(matches),
+            scheduler_healthy: AtomicBool::new(false),
+            scheduler_last_success_ms: AtomicU64::new(0),
             web_root: None,
         }
     }
@@ -310,6 +379,8 @@ impl HttpState {
             subscriptions: Mutex::new(SubscriptionRegistry::default()),
             snapshot_sender,
             matches: Mutex::new(matches),
+            scheduler_healthy: AtomicBool::new(false),
+            scheduler_last_success_ms: AtomicU64::new(0),
             web_root: None,
         }
     }
@@ -320,6 +391,7 @@ pub fn router(state: Arc<HttpState>) -> Router {
     let web_root = state.web_root().map(PathBuf::from);
     let router = Router::new()
         .route("/healthz", get(health))
+        .route("/readyz", get(readiness))
         .route("/pwmtf-bundle-manifest.json", get(hidden_bundle_manifest))
         .route("/auth/google/start", axum::routing::post(google_start))
         .route(OIDC_CALLBACK_PATH, get(google_callback))
@@ -419,6 +491,21 @@ pub fn router(state: Arc<HttpState>) -> Router {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+fn scheduler_is_ready(healthy: &AtomicBool, last_success_ms: &AtomicU64, now: u64) -> bool {
+    healthy.load(Ordering::Acquire)
+        && now.saturating_sub(last_success_ms.load(Ordering::Acquire)) <= READINESS_MAX_AGE_MS
+}
+
+async fn readiness(State(state): State<Arc<HttpState>>) -> Result<&'static str, TransportError> {
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        state.verify_readiness(unix_millis()?),
+    )
+    .await
+    .map_err(|_| TransportError::Internal)??;
+    Ok("ready")
 }
 
 async fn hidden_bundle_manifest() -> StatusCode {
@@ -580,7 +667,21 @@ async fn google_callback(
 
 #[derive(Debug, serde::Deserialize)]
 struct WebSocketQuery {
-    match_id: u128,
+    match_id: String,
+}
+
+fn websocket_match_id(query: &WebSocketQuery) -> Result<MatchId, TransportError> {
+    if query.match_id.is_empty()
+        || query.match_id.len() > 39
+        || !query.match_id.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(TransportError::InvalidRequest);
+    }
+    query
+        .match_id
+        .parse::<u128>()
+        .map(MatchId::new)
+        .map_err(|_| TransportError::InvalidRequest)
 }
 
 async fn websocket(
@@ -592,7 +693,7 @@ async fn websocket(
     validate_origin(&headers, &state.origins)?;
     let account = authenticated_account(&state, &headers).await?;
     let connection = ConnectionId::new(random_u128()?);
-    let match_id = MatchId::new(query.match_id);
+    let match_id = websocket_match_id(&query)?;
     let durable_participants = SwitchyCommandJournal::new(Arc::clone(&state.db))
         .participants(match_id)
         .await
@@ -943,28 +1044,123 @@ pub enum TransportError {
     Subscription(#[from] crate::SubscriptionError),
 }
 
-impl IntoResponse for TransportError {
-    fn into_response(self) -> Response {
-        let status = match self {
+impl TransportError {
+    const fn status_code(&self) -> StatusCode {
+        match self {
             Self::Unauthenticated => StatusCode::UNAUTHORIZED,
-            Self::InvalidOrigin | Self::Subscription(_) | Self::InvalidSubscription => {
-                StatusCode::FORBIDDEN
-            }
-            Self::MatchNotFound | Self::SocialNotFound => StatusCode::NOT_FOUND,
-            Self::Attempt(_)
-            | Self::Oidc(_)
-            | Self::Cookie(_)
+            Self::InvalidOrigin
+            | Self::InvalidSubscription
+            | Self::Subscription(
+                crate::SubscriptionError::Unauthenticated | crate::SubscriptionError::Unauthorized,
+            )
+            | Self::Lobby(crate::LobbyStoreError::Unauthorized)
+            | Self::Rematch(crate::RematchStoreError::Unauthorized)
+            | Self::Social(crate::SocialStoreError::Unauthorized) => StatusCode::FORBIDDEN,
+            Self::MatchNotFound
+            | Self::SocialNotFound
+            | Self::Attempt(crate::OidcAttemptStoreError::NotFound)
+            | Self::Lobby(crate::LobbyStoreError::NotFound)
+            | Self::Rematch(crate::RematchStoreError::NotFound)
+            | Self::Social(crate::SocialStoreError::NotFound) => StatusCode::NOT_FOUND,
+            Self::Profile(
+                crate::ProfileStoreError::AccountConflict
+                | crate::ProfileStoreError::HandleConflict,
+            )
+            | Self::Lobby(
+                crate::LobbyStoreError::NotWaiting
+                | crate::LobbyStoreError::NotConnected
+                | crate::LobbyStoreError::ConnectionNotFound
+                | crate::LobbyStoreError::NotReady,
+            )
+            | Self::Rematch(
+                crate::RematchStoreError::NotCompleted
+                | crate::RematchStoreError::OfferExists
+                | crate::RematchStoreError::AlreadyAccepted
+                | crate::RematchStoreError::SelfAccept,
+            )
+            | Self::Social(
+                crate::SocialStoreError::DuplicateChallenge
+                | crate::SocialStoreError::Expired
+                | crate::SocialStoreError::Revoked
+                | crate::SocialStoreError::AlreadyUsed,
+            ) => StatusCode::CONFLICT,
+            Self::Oidc(
+                crate::GoogleOidcError::Discovery
+                | crate::GoogleOidcError::TokenExchange
+                | crate::GoogleOidcError::MissingIdToken,
+            ) => StatusCode::BAD_GATEWAY,
+            Self::Cookie(_)
             | Self::InvalidRequest
-            | Self::Social(_)
-            | Self::Lobby(_)
-            | Self::Rematch(_) => StatusCode::BAD_REQUEST,
+            | Self::Attempt(
+                crate::OidcAttemptStoreError::Expired
+                | crate::OidcAttemptStoreError::Mismatch
+                | crate::OidcAttemptStoreError::AlreadyUsed,
+            )
+            | Self::Oidc(
+                crate::GoogleOidcError::Callback | crate::GoogleOidcError::InvalidIdToken,
+            )
+            | Self::Profile(crate::ProfileStoreError::Social(_))
+            | Self::Lobby(crate::LobbyStoreError::InvalidDeadline)
+            | Self::Social(
+                crate::SocialStoreError::SelfChallenge
+                | crate::SocialStoreError::SelfInvitation
+                | crate::SocialStoreError::InvalidExpiration
+                | crate::SocialStoreError::Token(_),
+            ) => StatusCode::BAD_REQUEST,
             Self::Internal
             | Self::Recovery
+            | Self::Attempt(
+                crate::OidcAttemptStoreError::InvalidExpiration
+                | crate::OidcAttemptStoreError::Malformed
+                | crate::OidcAttemptStoreError::Overflow
+                | crate::OidcAttemptStoreError::Oidc(_)
+                | crate::OidcAttemptStoreError::Database(_),
+            )
+            | Self::Oidc(
+                crate::GoogleOidcError::Configuration
+                | crate::GoogleOidcError::HttpClient
+                | crate::GoogleOidcError::Randomness,
+            )
             | Self::Identity(_)
             | Self::Session(_)
-            | Self::Profile(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        (status, self.to_string()).into_response()
+            | Self::Profile(
+                crate::ProfileStoreError::Malformed | crate::ProfileStoreError::Database(_),
+            )
+            | Self::Lobby(
+                crate::LobbyStoreError::Malformed
+                | crate::LobbyStoreError::Overflow
+                | crate::LobbyStoreError::Database(_),
+            )
+            | Self::Rematch(
+                crate::RematchStoreError::Malformed
+                | crate::RematchStoreError::Overflow
+                | crate::RematchStoreError::Database(_),
+            )
+            | Self::Social(
+                crate::SocialStoreError::Malformed
+                | crate::SocialStoreError::Overflow
+                | crate::SocialStoreError::Database(_),
+            ) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    const fn public_message(status: StatusCode) -> &'static str {
+        match status {
+            StatusCode::BAD_REQUEST => "request is invalid",
+            StatusCode::UNAUTHORIZED => "request is not authenticated",
+            StatusCode::FORBIDDEN => "request is not allowed",
+            StatusCode::NOT_FOUND => "resource not found",
+            StatusCode::CONFLICT => "request conflicts with current state",
+            StatusCode::BAD_GATEWAY => "identity provider is unavailable",
+            _ => "transport operation failed",
+        }
+    }
+}
+
+impl IntoResponse for TransportError {
+    fn into_response(self) -> Response {
+        let status = self.status_code();
+        (status, Self::public_message(status)).into_response()
     }
 }
 
@@ -1531,6 +1727,25 @@ mod tests {
     }
 
     #[test]
+    fn websocket_match_identifiers_are_bounded_and_portably_parsed() {
+        assert_eq!(
+            websocket_match_id(&WebSocketQuery {
+                match_id: u128::MAX.to_string(),
+            })
+            .unwrap(),
+            MatchId::new(u128::MAX)
+        );
+        for value in ["", "-1", "7x", "340282366920938463463374607431768211456"] {
+            assert!(matches!(
+                websocket_match_id(&WebSocketQuery {
+                    match_id: value.to_owned(),
+                }),
+                Err(TransportError::InvalidRequest)
+            ));
+        }
+    }
+
+    #[test]
     fn websocket_origin_is_exact_and_fail_closed() {
         let allowed = BTreeSet::from([CANONICAL_ORIGIN.to_owned()]);
         let mut headers = HeaderMap::new();
@@ -1542,6 +1757,63 @@ mod tests {
             HeaderValue::from_static("https://evil.example"),
         );
         assert!(validate_origin(&headers, &allowed).is_err());
+    }
+
+    #[test]
+    fn scheduler_readiness_is_bounded_and_fail_closed() {
+        let healthy = AtomicBool::new(false);
+        let last_success = AtomicU64::new(0);
+        assert!(!scheduler_is_ready(&healthy, &last_success, 1_000));
+        last_success.store(1_000, Ordering::Release);
+        healthy.store(true, Ordering::Release);
+        assert!(scheduler_is_ready(&healthy, &last_success, 6_000));
+        assert!(!scheduler_is_ready(&healthy, &last_success, 6_001));
+        healthy.store(false, Ordering::Release);
+        assert!(!scheduler_is_ready(&healthy, &last_success, 1_001));
+    }
+
+    #[test]
+    fn transport_errors_expose_only_stable_public_categories() {
+        let cases = [
+            (
+                TransportError::Unauthenticated,
+                StatusCode::UNAUTHORIZED,
+                "request is not authenticated",
+            ),
+            (
+                TransportError::Social(crate::SocialStoreError::Unauthorized),
+                StatusCode::FORBIDDEN,
+                "request is not allowed",
+            ),
+            (
+                TransportError::Social(crate::SocialStoreError::NotFound),
+                StatusCode::NOT_FOUND,
+                "resource not found",
+            ),
+            (
+                TransportError::Profile(crate::ProfileStoreError::HandleConflict),
+                StatusCode::CONFLICT,
+                "request conflicts with current state",
+            ),
+            (
+                TransportError::Oidc(crate::GoogleOidcError::TokenExchange),
+                StatusCode::BAD_GATEWAY,
+                "identity provider is unavailable",
+            ),
+            (
+                TransportError::Social(crate::SocialStoreError::Malformed),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "transport operation failed",
+            ),
+        ];
+        for (error, expected_status, expected_message) in cases {
+            let status = error.status_code();
+            assert_eq!(status, expected_status);
+            assert_eq!(TransportError::public_message(status), expected_message);
+            if status == StatusCode::INTERNAL_SERVER_ERROR {
+                assert_ne!(error.to_string(), expected_message);
+            }
+        }
     }
 
     #[test]

@@ -52,6 +52,12 @@ impl BrowserTransport {
         self.prediction.as_ref()
     }
 
+    /// Returns the latest authoritative canonical match state.
+    #[must_use]
+    pub fn authoritative_state(&self) -> Option<&pwmtf_game_domain::MatchState> {
+        self.prediction.as_ref().map(PredictionState::authoritative)
+    }
+
     /// Returns whether one authoritative revision has already been ingested.
     #[must_use]
     pub fn has_revision(&self, revision: u64) -> bool {

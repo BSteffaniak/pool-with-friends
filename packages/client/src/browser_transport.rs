@@ -208,6 +208,23 @@ pub fn ball_in_hand() -> bool {
     })
 }
 
+/// Returns the latest authoritative match presentation facts.
+#[must_use]
+pub fn authoritative_match_info() -> Option<(
+    pwmtf_game_domain::Player,
+    Option<pwmtf_game_domain::MatchOutcome>,
+)> {
+    TRANSPORT.with(|transport| {
+        let transport = transport.borrow();
+        let state = transport.authoritative_state()?;
+        let outcome = match state.status() {
+            pwmtf_game_domain::MatchStatus::InProgress => None,
+            pwmtf_game_domain::MatchStatus::Completed(outcome) => Some(outcome),
+        };
+        Some((state.active_player(), outcome))
+    })
+}
+
 /// Returns the authoritative revision after snapshot initialization.
 #[must_use]
 pub fn authoritative_revision() -> Option<u64> {
@@ -250,6 +267,12 @@ pub fn predicted_ball(number: u8) -> Option<(pwmtf_game_domain::Vector, bool)> {
 #[must_use]
 pub fn retry_delay_ms() -> u64 {
     TRANSPORT.with(|transport| transport.borrow().retry_delay_ms())
+}
+
+/// Returns whether the failed socket lifecycle should be reconnected.
+#[must_use]
+pub fn needs_reconnect() -> bool {
+    TRANSPORT.with(|transport| transport.borrow().status() == ConnectionStatus::Backoff)
 }
 
 /// Returns whether an authoritative snapshot initialized the live socket.

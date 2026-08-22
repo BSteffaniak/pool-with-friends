@@ -110,6 +110,22 @@ impl SwitchyCommandJournal {
         decode_participants(row).map_err(|_| JournalError)
     }
 
+    /// Loads and validates the durable canonical head for readiness checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError`] when the match row, accepted-command tail,
+    /// snapshot, checksum, configuration, participants, revision, or deadline
+    /// is absent, malformed, or internally inconsistent.
+    pub async fn canonical_head(
+        &self,
+        match_id: MatchId,
+    ) -> Result<(Participants, u64, MatchState, Option<ScheduledDeadline>), JournalError> {
+        load_canonical_head(&*self.db, match_id)
+            .await
+            .map_err(|_| JournalError)
+    }
+
     /// Creates a journal over an initialized shared Switchy database.
     #[must_use]
     pub fn new(db: Arc<dyn Database>) -> Self {
@@ -228,6 +244,52 @@ async fn commit_command(
     }
     tx.commit().await?;
     Ok(())
+}
+
+async fn load_canonical_head(
+    db: &dyn Database,
+    match_id: MatchId,
+) -> Result<(Participants, u64, MatchState, Option<ScheduledDeadline>), CommandStoreError> {
+    let rows = db
+        .select("matches")
+        .where_eq("match_id", match_id.value().to_string())
+        .execute(db)
+        .await?;
+    let row = exactly_one(&rows)?;
+    let participants = decode_participants(row)?;
+    let revision = unsigned_integer(row, "canonical_revision")?;
+    let state = MatchState::from_bytes(&decode_bytes(&text(row, "canonical_snapshot")?)?)
+        .map_err(|_| CommandStoreError::Malformed)?;
+    if state.checksum() != parse_u64(row, "canonical_checksum")?
+        || state.configuration() != pinned_match_configuration(row)?
+    {
+        return Err(CommandStoreError::Malformed);
+    }
+    let deadline = decode_match_deadline(row)?;
+    validate_deadline(deadline, revision, &state)?;
+    if revision == 0 {
+        let command_rows = db
+            .select("accepted_commands")
+            .where_eq("match_id", match_id.value().to_string())
+            .execute(db)
+            .await?;
+        if !command_rows.is_empty() {
+            return Err(CommandStoreError::Malformed);
+        }
+    } else {
+        let commands = load_commands(db, match_id).await?;
+        let Some(last) = commands.last() else {
+            return Err(CommandStoreError::Malformed);
+        };
+        if last.revision != revision
+            || last.snapshot != state.to_bytes()
+            || last.checksum != state.checksum()
+            || last.deadline != deadline
+        {
+            return Err(CommandStoreError::Malformed);
+        }
+    }
+    Ok((participants, revision, state, deadline))
 }
 
 async fn load_commands(
@@ -647,6 +709,55 @@ mod tests {
 
             let journal = SwitchyCommandJournal::new(Arc::clone(&db));
             assert_eq!(journal.load(MatchId::new(9)).await, Err(JournalError));
+        });
+    }
+
+    #[test]
+    fn canonical_head_rejects_a_durable_row_diverging_from_its_command_tail() {
+        block_on(async {
+            let db: Arc<dyn Database> = switchy_database_connection::builder()
+                .turso()
+                .with_in_memory()
+                .build()
+                .await
+                .unwrap()
+                .into();
+            crate::migrate(&*db).await.unwrap();
+            let state = MatchState::new(
+                RulesProfile::standard(),
+                PhysicsProfile::standard(),
+                TableGeometry::standard(),
+                RackSeed::new(42),
+                Player::One,
+            )
+            .unwrap();
+            db.insert("matches")
+                .value("match_id", "19")
+                .value("player_one_id", "1")
+                .value("player_two_id", "2")
+                .value("canonical_revision", 0_i64)
+                .value("canonical_snapshot", encode_bytes(&state.to_bytes()))
+                .value("canonical_checksum", checksum_i64(state.checksum()))
+                .value(
+                    "match_configuration",
+                    encode_bytes(&state.configuration().to_bytes()),
+                )
+                .value("deadline_revision", 0_i64)
+                .value("deadline_player", 1_i64)
+                .value("deadline_at_ms", 100_i64)
+                .execute(&*db)
+                .await
+                .unwrap();
+            let journal = SwitchyCommandJournal::new(Arc::clone(&db));
+            assert_eq!(journal.canonical_head(MatchId::new(19)).await.unwrap().1, 0);
+
+            db.update("matches")
+                .value("canonical_revision", 1_i64)
+                .where_eq("match_id", "19")
+                .execute(&*db)
+                .await
+                .unwrap();
+            assert!(journal.canonical_head(MatchId::new(19)).await.is_err());
         });
     }
 

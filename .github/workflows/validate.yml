@@ -24,8 +24,8 @@ jobs:
         uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60
         with:
           tool: cargo-deny,cargo-nextest@0.9.114,cargo-machete@0.8.0,wasm-bindgen-cli@0.2.127
-      - name: Install feasibility server tools
-        run: command -v curl && command -v openssl
+      - name: Install operational self-test tools
+        run: sudo apt-get update && sudo apt-get install --yes sqlite3 && command -v curl && command -v openssl
       - run: cargo fmt --check
       - run: cargo check --workspace --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -44,6 +44,9 @@ jobs:
       - run: ./scripts/test-feasibility-matrix-lock.sh
       - run: ./scripts/test-feasibility-server.sh
       - run: ./scripts/test-browser-telemetry.js
+      - run: ./scripts/test-production-smoke-self.sh
+      - run: ./scripts/test-backup-restore.sh
+      - run: ./scripts/test-native-deployment-smoke.sh
       - run: ./scripts/check-architecture.sh
       - run: ./scripts/test-architecture-checks.sh
 

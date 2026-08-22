@@ -65,6 +65,12 @@ impl PredictionState {
         self.authoritative_revision
     }
 
+    /// Returns the last authoritative canonical state.
+    #[must_use]
+    pub const fn authoritative(&self) -> &MatchState {
+        &self.authoritative
+    }
+
     /// Returns presentation's current predicted state.
     #[must_use]
     pub const fn predicted(&self) -> &MatchState {

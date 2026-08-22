@@ -1430,6 +1430,142 @@ if (lifecycleOrder.join(",") !== "first-start,first-end,second") {
   throw new Error(`audio lifecycle transitions overlapped: ${lifecycleOrder.join(",")}`);
 }
 
+const socketStart = source.indexOf("function completionReasonText(reason, localPlayerWon) {");
+const socketEnd = source.indexOf("async function refreshSession() {", socketStart);
+if (socketStart < 0 || socketEnd < 0) {
+  throw new Error("cannot locate match socket lifecycle in bootstrap.js");
+}
+const scheduledReconnects = [];
+const socketListeners = new Map();
+const socketModule = {
+  ready: false,
+  reconnect: false,
+  delay: 2_000,
+  connectCount: 0,
+  disconnectCount: 0,
+  connect_match_socket() {
+    this.connectCount += 1;
+  },
+  disconnect_match_socket() {
+    this.disconnectCount += 1;
+  },
+  match_socket_ready() {
+    return this.ready;
+  },
+  match_socket_needs_reconnect() {
+    return this.reconnect;
+  },
+  match_socket_retry_delay_ms() {
+    return this.delay;
+  },
+  match_revision() {
+    return 3;
+  },
+  match_active_player() {
+    return 1;
+  },
+  match_winner() {
+    return 0;
+  },
+  match_completion_reason() {
+    return "";
+  },
+};
+const socketContext = {
+  URLSearchParams,
+  URL,
+  Number,
+  Math,
+  performance: { now: () => 0 },
+  navigator: { onLine: true },
+  document: {
+    visibilityState: "visible",
+    addEventListener(name, listener) {
+      socketListeners.set(`document:${name}`, listener);
+    },
+  },
+  window: {
+    location: { protocol: "https:", host: "pwmtf.example", search: "?match=42" },
+    setTimeout(callback, delay) {
+      scheduledReconnects.push({ callback, delay });
+      return scheduledReconnects.length;
+    },
+    clearTimeout() {},
+    setInterval(callback) {
+      socketContext.monitor = callback;
+      return 1;
+    },
+    clearInterval() {},
+    addEventListener(name, listener) {
+      socketListeners.set(`window:${name}`, listener);
+    },
+    confirm: () => false,
+  },
+  console: { error() {} },
+  concedeMatchButton: { hidden: true, disabled: false, addEventListener() {} },
+  offerRematchButton: { hidden: true, disabled: false, textContent: "Offer rematch" },
+  matchStatus: { textContent: "" },
+  matchResult: {
+    hidden: true,
+    dataset: {},
+    removeAttribute(name) {
+      if (name === "data-outcome") delete this.dataset.outcome;
+    },
+  },
+  matchResultTitle: { textContent: "" },
+  matchResultDetail: { textContent: "" },
+  updateGameplayAudio() {},
+  stopLobbyPolling() {},
+  disconnectLobbyPresence: async () => {},
+  matchSocketActive: false,
+  matchReconnectTimer: null,
+  matchSubscriptionUrl: null,
+  matchConnectStartedAt: null,
+  matchPlayerSeat: 1,
+};
+vm.createContext(socketContext);
+vm.runInContext(
+  `${source.slice(socketStart, socketEnd)}\nthis.startMatchSocket = startMatchSocket;`,
+  socketContext,
+);
+socketContext.startMatchSocket(socketModule);
+if (socketModule.connectCount !== 1 || typeof socketContext.monitor !== "function") {
+  throw new Error("match socket lifecycle did not start its initial connection and monitor");
+}
+socketModule.ready = true;
+socketContext.monitor();
+if (!socketContext.matchSocketActive || socketContext.matchStatus.textContent !== "Connected · revision 3 · your turn") {
+  throw new Error("ready match socket was not presented as connected with authoritative turn state");
+}
+socketModule.match_winner = () => 1;
+socketModule.match_completion_reason = () => "legal-eight-ball";
+socketContext.monitor();
+if (
+  !socketContext.matchResultTitle.textContent.includes("You win") ||
+  socketContext.matchResult.hidden ||
+  socketContext.concedeMatchButton.hidden !== true ||
+  socketContext.offerRematchButton.hidden !== false
+) {
+  throw new Error("authoritative completion did not present the result and rematch transition");
+}
+socketModule.match_winner = () => 0;
+socketModule.match_completion_reason = () => "";
+socketModule.ready = false;
+socketModule.reconnect = true;
+socketContext.monitor();
+if (
+  socketContext.matchSocketActive ||
+  socketContext.matchStatus.textContent !== "Connection lost · reconnecting" ||
+  scheduledReconnects.length !== 1 ||
+  scheduledReconnects[0].delay !== socketModule.delay
+) {
+  throw new Error("failed ready socket did not schedule transport-owned reconnect backoff");
+}
+scheduledReconnects[0].callback();
+if (socketModule.connectCount !== 2) {
+  throw new Error("scheduled match reconnect did not create another socket attempt");
+}
+
   console.log("browser telemetry self-tests passed");
 })().catch((error) => {
   console.error(error);

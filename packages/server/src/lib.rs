@@ -514,6 +514,35 @@ impl<J: CommandJournal> MatchService<J> {
         Ok(())
     }
 
+    /// Returns complete in-process match heads in stable identifier order.
+    ///
+    /// This snapshot lets operational verification release the authority lock
+    /// before performing durable I/O, so readiness probes never block command
+    /// processing while they inspect the database.
+    #[must_use]
+    pub fn match_heads(
+        &self,
+    ) -> Vec<(
+        MatchId,
+        Participants,
+        u64,
+        MatchState,
+        Option<ScheduledDeadline>,
+    )> {
+        self.matches
+            .iter()
+            .map(|(match_id, runtime)| {
+                (
+                    *match_id,
+                    runtime.participants,
+                    runtime.revision,
+                    runtime.state.clone(),
+                    runtime.deadline,
+                )
+            })
+            .collect()
+    }
+
     /// Returns the authorized participants for one in-process match.
     #[must_use]
     pub fn participants(&self, match_id: MatchId) -> Option<Participants> {

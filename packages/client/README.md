@@ -1,6 +1,6 @@
 # PWMTF browser client
 
-This package owns the Bevy/WASM presentation feasibility prototype. It intentionally contains no canonical pool physics or rules.
+This package owns the production-candidate Bevy/WASM presentation, browser input, canonical prediction and reconciliation, secure-WebSocket lifecycle, interpolation, and audio. It intentionally contains no authoritative pool physics or rules. Active-turn and terminal result UI is projected from validated authoritative snapshots; completion hides live match controls in both Bevy and browser chrome, presents the canonical winner/reason, and enables the existing durable rematch flow.
 
 ## Native check
 

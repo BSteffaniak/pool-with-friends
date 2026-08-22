@@ -16,6 +16,9 @@ const rematchList = document.querySelector("#rematch-list");
 const offerRematchButton = document.querySelector("#offer-rematch");
 const concedeMatchButton = document.querySelector("#concede-match");
 const matchStatus = document.querySelector("#match-status");
+const matchResult = document.querySelector("#match-result");
+const matchResultTitle = document.querySelector("#match-result-title");
+const matchResultDetail = document.querySelector("#match-result-detail");
 const createInvitationButton = document.querySelector("#create-invitation");
 const lobbyPanel = document.querySelector("#lobby-panel");
 const lobbyLabel = document.querySelector("#lobby-label");
@@ -1580,13 +1583,45 @@ if (feasibilityEnabled) {
 let matchSocketActive = false;
 let matchReconnectTimer = null;
 let matchSubscriptionUrl = null;
-let matchReconnectAttempt = 0;
 let matchConnectStartedAt = null;
 let matchPlayerSeat = null;
 let activeLobbyId = null;
 let activeLobbyConnectionId = null;
 let lobbyPollTimer = null;
 let wasmModule = null;
+
+function completionReasonText(reason, localPlayerWon) {
+  if (reason === "concession") {
+    return localPlayerWon ? "Your opponent conceded." : "The match ended by concession.";
+  }
+  if (reason === "legal-eight-ball") {
+    return "The 8-ball was legally pocketed.";
+  }
+  if (reason === "illegal-eight-ball") {
+    return "The 8-ball was pocketed illegally.";
+  }
+  return "The authoritative match is complete.";
+}
+
+function presentMatchCompletion(module) {
+  const winner = Number(module.match_winner());
+  if (winner === 0) {
+    return false;
+  }
+  const localPlayerWon = matchPlayerSeat === winner;
+  concedeMatchButton.hidden = true;
+  concedeMatchButton.disabled = true;
+  offerRematchButton.hidden = false;
+  matchResult.hidden = false;
+  matchResult.dataset.outcome = localPlayerWon ? "win" : "loss";
+  matchResultTitle.textContent = localPlayerWon ? "You win" : `Player ${winner} wins`;
+  matchResultDetail.textContent = completionReasonText(
+    String(module.match_completion_reason()),
+    localPlayerWon,
+  );
+  matchStatus.textContent = "Match complete · result saved";
+  return true;
+}
 
 function startMatchSocket(module) {
   const parameters = new URLSearchParams(window.location.search);
@@ -1623,8 +1658,7 @@ function startMatchSocket(module) {
     ) {
       return;
     }
-    const delay = Math.min(30_000, 250 * 2 ** Math.min(7, matchReconnectAttempt + 1));
-    matchReconnectAttempt = Math.min(8, matchReconnectAttempt + 1);
+    const delay = Math.min(30_000, Math.max(500, Number(module.match_socket_retry_delay_ms())));
     matchReconnectTimer = window.setTimeout(() => {
       matchReconnectTimer = null;
       connect();
@@ -1633,11 +1667,26 @@ function startMatchSocket(module) {
   const monitor = window.setInterval(() => {
     if (module.match_socket_ready()) {
       matchSocketActive = true;
-      matchReconnectAttempt = 0;
       matchConnectStartedAt = null;
+      if (presentMatchCompletion(module)) {
+        updateGameplayAudio(module);
+        return;
+      }
+      matchResult.hidden = true;
+      matchResult.removeAttribute("data-outcome");
       concedeMatchButton.hidden = false;
+      concedeMatchButton.disabled = false;
       const revision = module.match_revision();
-      matchStatus.textContent = revision === undefined ? "Connected" : `Connected · revision ${revision}`;
+      const activePlayer = Number(module.match_active_player());
+      const turn =
+        activePlayer === 0
+          ? ""
+          : matchPlayerSeat === activePlayer
+            ? " · your turn"
+            : ` · player ${activePlayer}'s turn`;
+      matchStatus.textContent = `${
+        revision === undefined ? "Connected" : `Connected · revision ${revision}`
+      }${turn}`;
       updateGameplayAudio(module);
       return;
     }
@@ -1649,6 +1698,14 @@ function startMatchSocket(module) {
       matchSocketActive = false;
       matchConnectStartedAt = null;
       module.disconnect_match_socket();
+      scheduleReconnect();
+      return;
+    }
+    if (matchSocketActive && module.match_socket_needs_reconnect()) {
+      matchSocketActive = false;
+      matchConnectStartedAt = null;
+      concedeMatchButton.hidden = true;
+      matchStatus.textContent = "Connection lost · reconnecting";
       scheduleReconnect();
     }
   }, 500);
@@ -1683,7 +1740,6 @@ function startMatchSocket(module) {
       matchSocketActive = false;
       matchConnectStartedAt = null;
     } else if (!matchSocketActive) {
-      matchReconnectAttempt = 0;
       connect();
     }
   });
@@ -1895,8 +1951,15 @@ async function refreshRematches() {
 }
 
 async function offerRematch(matchId) {
-  await apiRequest(`/api/matches/${matchId}/rematch`, { method: "POST" });
-  socialStatus.textContent = "Rematch offered.";
+  offerRematchButton.disabled = true;
+  try {
+    await apiRequest(`/api/matches/${matchId}/rematch`, { method: "POST" });
+    offerRematchButton.textContent = "Rematch offered";
+    socialStatus.textContent = "Rematch offered.";
+  } catch (error) {
+    offerRematchButton.disabled = false;
+    throw error;
+  }
 }
 
 offerRematchButton.addEventListener("click", () => {
@@ -1908,7 +1971,7 @@ offerRematchButton.addEventListener("click", () => {
 
 const currentMatchId = new URLSearchParams(window.location.search).get("match");
 if (/^\d{1,39}$/.test(currentMatchId ?? "")) {
-  offerRematchButton.hidden = false;
+  offerRematchButton.hidden = true;
 }
 
 async function acceptChallenge(challengeId) {

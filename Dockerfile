@@ -9,6 +9,8 @@ RUN apt-get update \
     && cargo install wasm-bindgen-cli --version "$locked_wasm_bindgen" --locked \
     && source_hash=$(./scripts/hash-wasm-source.py) \
     && PWMTF_BUILD_ID="production-$source_hash" ./scripts/build-wasm.sh \
+    && printf '%s' "production-$source_hash" > /app/pwmtf-build-id \
+    && printf '%s' "$source_hash" > /app/pwmtf-source-hash \
     && cargo build --locked --release -p pwmtf_server --bin pwmtf-server
 
 FROM debian:bookworm-slim
@@ -20,6 +22,8 @@ RUN apt-get update \
     && chown -R pwmtf:pwmtf /app /data
 COPY --from=builder /app/target/release/pwmtf-server /usr/local/bin/pwmtf-server
 COPY --from=builder /app/dist /app/dist
+COPY --from=builder /app/pwmtf-build-id /app/pwmtf-build-id
+COPY --from=builder /app/pwmtf-source-hash /app/pwmtf-source-hash
 USER pwmtf
 EXPOSE 8080
 STOPSIGNAL SIGTERM

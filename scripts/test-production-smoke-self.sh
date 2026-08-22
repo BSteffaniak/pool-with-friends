@@ -38,6 +38,10 @@ case "$url" in
         printf 'HTTP/1.1 200 OK\r\nStrict-Transport-Security: max-age=31536000\r\nX-Content-Type-Options: nosniff\r\n\r\n' >"$headers"
         printf ok >"$body"
         ;;
+    https://pwmtf.hyperchad.dev/readyz)
+        printf 'HTTP/1.1 200 OK\r\nStrict-Transport-Security: max-age=31536000\r\nX-Content-Type-Options: nosniff\r\n\r\n' >"$headers"
+        printf ready >"$body"
+        ;;
     https://pwmtf.hyperchad.dev/)
         printf 'HTTP/1.1 200 OK\r\nContent-Security-Policy: default-src self\r\nX-Content-Type-Options: nosniff\r\n\r\n' >"$headers"
         printf '%s' '<link rel="canonical" href="https://pwmtf.hyperchad.dev/" /><main data-client-state="loading">' >"$body"

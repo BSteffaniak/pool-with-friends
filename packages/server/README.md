@@ -1,3 +1,5 @@
 # PWMTF server
 
-This package owns authoritative command authorization, revision/idempotency enforcement, durable acceptance orchestration, scheduling, recovery, and operational adapters. Its initial implementation establishes the command-processing boundary with an injected durable journal.
+This package owns authoritative command authorization, revision/idempotency enforcement, durable acceptance, scheduling, recovery, identity, social/lobby/rematch persistence, and native HTTP/OIDC/secure-WebSocket operations. Canonical gameplay decisions remain in `pwmtf_game_domain`; this package authenticates and durably orchestrates them.
+
+`./scripts/test-native-deployment-smoke.sh` qualifies the native boundary with independently authenticated WebSocket participants, measured base delay, deterministic jitter, first-transmission loss/retransmission, duplicate/noise delivery, intermediate reconnect, terminal concession convergence under the same impairment model, terminal reconnect for both participants, exact durable command counts, deadline removal, process restart, and application-consistent backup/restore.

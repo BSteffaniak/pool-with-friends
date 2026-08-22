@@ -2,6 +2,8 @@
 
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
+use tokio::sync::watch;
+
 use pwmtf_server::{
     CANONICAL_ORIGIN, GOOGLE_ISSUER, GoogleOidcClient, HttpState, http_router, migrate,
 };
@@ -22,6 +24,11 @@ async fn main() {
 
 async fn run() -> Result<(), StartupError> {
     let configuration = Configuration::from_environment()?;
+    validate_web_bundle_identity(
+        &configuration.web_root,
+        configuration.expected_build_id.as_deref(),
+        configuration.expected_source_hash.as_deref(),
+    )?;
     let db: Arc<dyn switchy_database::Database> = switchy_database_connection::builder()
         .turso()
         .with_path(&configuration.database_path)
@@ -40,17 +47,23 @@ async fn run() -> Result<(), StartupError> {
     );
     let state = Arc::new(HttpState::production(db, oidc).with_web_root(configuration.web_root));
     state.recover_all_matches().await?;
-    let scheduler = tokio::spawn(scheduler_loop(Arc::clone(&state)));
+    let (scheduler_shutdown, scheduler_signal) = watch::channel(false);
+    let scheduler = tokio::spawn(scheduler_loop(Arc::clone(&state), scheduler_signal));
     let listener = tokio::net::TcpListener::bind(configuration.bind).await?;
     axum::serve(listener, http_router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
-    scheduler.abort();
-    let _ = scheduler.await;
+    scheduler_shutdown
+        .send(true)
+        .map_err(|_| StartupError::Scheduler)?;
+    tokio::time::timeout(Duration::from_secs(5), scheduler)
+        .await
+        .map_err(|_| StartupError::Scheduler)?
+        .map_err(|_| StartupError::Scheduler)?;
     Ok(())
 }
 
-async fn scheduler_loop(state: Arc<HttpState>) {
+async fn scheduler_loop(state: Arc<HttpState>, mut shutdown: watch::Receiver<bool>) {
     let mut next_auth_cleanup = 0_u64;
     loop {
         let now = unix_millis();
@@ -66,6 +79,7 @@ async fn scheduler_loop(state: Arc<HttpState>) {
             .poll_due_deadlines(pwmtf_server::DeadlineMillis::new(now))
             .await
         {
+            state.mark_scheduler_unhealthy();
             eprintln!("authoritative deadline polling failed: {error}");
         }
         let sleep = state
@@ -73,8 +87,18 @@ async fn scheduler_loop(state: Arc<HttpState>) {
             .await
             .map_or(Duration::from_secs(1), |deadline| {
                 Duration::from_millis(deadline.due_at.value().saturating_sub(unix_millis()).max(1))
-            });
-        tokio::time::sleep(sleep.min(Duration::from_secs(1))).await;
+            })
+            .min(Duration::from_secs(1));
+        if !wait_for_scheduler_tick(&mut shutdown, sleep).await {
+            break;
+        }
+    }
+}
+
+async fn wait_for_scheduler_tick(shutdown: &mut watch::Receiver<bool>, sleep: Duration) -> bool {
+    tokio::select! {
+        () = tokio::time::sleep(sleep) => true,
+        result = shutdown.changed() => result.is_ok() && !*shutdown.borrow(),
     }
 }
 
@@ -119,6 +143,8 @@ struct Configuration {
     google_client_id: String,
     google_client_secret: String,
     google_callback: String,
+    expected_build_id: Option<String>,
+    expected_source_hash: Option<String>,
 }
 
 impl Configuration {
@@ -152,6 +178,10 @@ impl Configuration {
             google_client_id: validate_secret_environment("PWMTF_GOOGLE_CLIENT_ID")?,
             google_client_secret: validate_secret_environment("PWMTF_GOOGLE_CLIENT_SECRET")?,
             google_callback: callback,
+            expected_build_id: optional_identity_environment("PWMTF_EXPECTED_BUILD_ID")?
+                .or_else(|| deployment_identity_file("/app/pwmtf-build-id")),
+            expected_source_hash: optional_hash_environment("PWMTF_EXPECTED_SOURCE_HASH")?
+                .or_else(|| deployment_identity_file("/app/pwmtf-source-hash")),
         })
     }
 }
@@ -161,6 +191,60 @@ fn environment(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+fn deployment_identity_file(path: &str) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn optional_identity_environment(name: &str) -> Result<Option<String>, StartupError> {
+    let Some(value) = environment(name) else {
+        return Ok(None);
+    };
+    if value.len() > 256
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(StartupError::Configuration);
+    }
+    Ok(Some(value))
+}
+
+fn optional_hash_environment(name: &str) -> Result<Option<String>, StartupError> {
+    let Some(value) = environment(name) else {
+        return Ok(None);
+    };
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(StartupError::Configuration);
+    }
+    Ok(Some(value))
+}
+
+fn validate_web_bundle_identity(
+    web_root: &std::path::Path,
+    expected_build_id: Option<&str>,
+    expected_source_hash: Option<&str>,
+) -> Result<(), StartupError> {
+    let bootstrap = std::fs::read_to_string(web_root.join("bootstrap.js"))?;
+    if let Some(expected) = expected_build_id
+        && !bootstrap.contains(&format!("const candidateBuildId = \"{expected}\";"))
+    {
+        return Err(StartupError::BundleIdentity);
+    }
+    if let Some(expected) = expected_source_hash
+        && !bootstrap.contains(&format!("const candidateSourceHash = \"{expected}\";"))
+    {
+        return Err(StartupError::BundleIdentity);
+    }
+    Ok(())
 }
 
 fn validate_secret_environment(name: &str) -> Result<String, StartupError> {
@@ -183,6 +267,8 @@ fn validate_secret_value(value: String) -> Result<String, StartupError> {
 enum StartupError {
     #[error("server configuration is invalid")]
     Configuration,
+    #[error("web bundle identity does not match the native deployment")]
+    BundleIdentity,
     #[error("database initialization failed")]
     Database(#[from] switchy_database_connection::InitTursoError),
     #[error("database migration failed")]
@@ -191,6 +277,8 @@ enum StartupError {
     Oidc(#[from] pwmtf_server::GoogleOidcError),
     #[error("transport recovery failed")]
     Transport(#[from] pwmtf_server::TransportError),
+    #[error("authoritative scheduler did not stop cleanly")]
+    Scheduler,
     #[error("server I/O failed")]
     Io(#[from] std::io::Error),
 }
@@ -215,6 +303,46 @@ mod tests {
             validate_secret_value("x".repeat(4_097)),
             Err(StartupError::Configuration)
         ));
+    }
+
+    #[test]
+    fn web_bundle_identity_is_verified_when_pinned() {
+        let root =
+            std::env::temp_dir().join(format!("pwmtf-bundle-identity-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("bootstrap.js"),
+            "const candidateBuildId = \"build-1\";\nconst candidateSourceHash = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\";\n",
+        )
+        .unwrap();
+        assert!(
+            validate_web_bundle_identity(
+                &root,
+                Some("build-1"),
+                Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            )
+            .is_ok()
+        );
+        assert!(validate_web_bundle_identity(&root, Some("build-2"), None).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scheduler_wait_stops_cooperatively_on_shutdown() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let (sender, mut receiver) = watch::channel(false);
+            let wait = tokio::spawn(async move {
+                wait_for_scheduler_tick(&mut receiver, Duration::from_secs(60)).await
+            });
+            tokio::task::yield_now().await;
+            sender.send(true).unwrap();
+            assert!(
+                !tokio::time::timeout(Duration::from_secs(1), wait)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            );
+        });
     }
 
     #[test]

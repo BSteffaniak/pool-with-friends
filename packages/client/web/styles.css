@@ -264,8 +264,31 @@ select:focus-visible,
 }
 
 #lobby-panel[hidden],
-#lobby-panel button[hidden] {
+#lobby-panel button[hidden],
+#match-result[hidden] {
   display: none;
+}
+
+#match-result {
+  display: grid;
+  gap: 0.3rem;
+  padding: 0.8rem;
+  border: 1px solid var(--gold);
+  border-radius: 0.75rem;
+  background: linear-gradient(145deg, rgb(96 72 23 / 72%), rgb(3 17 13 / 82%));
+  box-shadow: inset 0 0 1.5rem rgb(240 205 115 / 12%);
+}
+
+#match-result strong {
+  color: var(--gold);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.35rem;
+  letter-spacing: 0.03em;
+}
+
+#match-result[data-outcome="loss"] {
+  border-color: #8ca49a;
+  background: linear-gradient(145deg, rgb(48 65 59 / 78%), rgb(3 17 13 / 82%));
 }
 
 #incoming-challenges,

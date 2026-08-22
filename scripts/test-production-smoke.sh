@@ -60,6 +60,15 @@ fi
 grep -qi '^strict-transport-security:' "$response_headers"
 grep -qi '^x-content-type-options: nosniff' "$response_headers"
 
+request "$canonical_origin/readyz"
+status=$(awk 'NR == 1 { print $2 }' "$response_headers")
+if [ "$status" != 200 ] || [ "$(cat "$response_body")" != ready ]; then
+    printf '%s\n' "canonical readiness check did not return exact 200/ready" >&2
+    exit 1
+fi
+grep -qi '^strict-transport-security:' "$response_headers"
+grep -qi '^x-content-type-options: nosniff' "$response_headers"
+
 request "$canonical_origin/"
 status=$(awk 'NR == 1 { print $2 }' "$response_headers")
 if [ "$status" != 200 ]; then

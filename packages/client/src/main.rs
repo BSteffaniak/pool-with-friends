@@ -51,11 +51,19 @@ struct PowerFill;
 #[derive(Component)]
 struct OrientationNotice;
 
+#[derive(Component)]
+struct TurnStatus;
+
+#[derive(Component)]
+struct MatchControlChrome;
+
 #[derive(Resource, Default)]
 struct CanonicalPresentation {
     checksum: Option<u64>,
     target: std::collections::BTreeMap<u8, Vec2>,
     pocketed: std::collections::BTreeSet<u8>,
+    status: Option<String>,
+    completed: bool,
 }
 
 #[derive(Resource)]
@@ -166,10 +174,63 @@ pub fn match_socket_ready() -> bool {
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
+/// Returns whether the current socket failed and needs a reconnect attempt.
+#[must_use]
+pub fn match_socket_needs_reconnect() -> bool {
+    browser_transport::needs_reconnect()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Returns the retry delay selected by the transport lifecycle.
+#[must_use]
+pub fn match_socket_retry_delay_ms() -> u64 {
+    browser_transport::retry_delay_ms()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
 /// Returns the current authoritative/predicted revision for presentation.
 #[must_use]
 pub fn match_revision() -> Option<u64> {
     browser_transport::authoritative_revision()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Returns the authoritative active player, or zero after match completion.
+#[must_use]
+pub fn match_active_player() -> u8 {
+    browser_transport::authoritative_match_info().map_or(0, |(player, outcome)| {
+        outcome.map_or_else(|| player_number(player), |_| 0)
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Returns the authoritative winner, or zero while the match is active.
+#[must_use]
+pub fn match_winner() -> u8 {
+    browser_transport::authoritative_match_info()
+        .and_then(|(_, outcome)| outcome)
+        .map_or(0, |outcome| player_number(outcome.winner))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+/// Returns the stable authoritative completion-reason label, or an empty string.
+#[must_use]
+pub fn match_completion_reason() -> String {
+    browser_transport::authoritative_match_info()
+        .and_then(|(_, outcome)| outcome)
+        .map_or_else(String::new, |outcome| {
+            match outcome.reason {
+                pwmtf_game_domain::CompletionReason::LegalEightBall => "legal-eight-ball",
+                pwmtf_game_domain::CompletionReason::IllegalEightBall => "illegal-eight-ball",
+                pwmtf_game_domain::CompletionReason::Concession => "concession",
+            }
+            .to_owned()
+        })
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -298,6 +359,8 @@ fn main() {
                 update_aim,
                 #[cfg(target_arch = "wasm32")]
                 synchronize_canonical_presentation,
+                update_turn_status,
+                update_match_control_visibility,
                 interpolate_canonical_balls,
             )
                 .chain(),
@@ -387,11 +450,13 @@ fn setup(
         Sprite::from_color(Color::srgba(0.95, 0.95, 0.85, 0.68), Vec2::new(370.0, 3.0)),
         Transform::from_xyz(-145.0, 0.0, 6.0),
         AimGuide,
+        MatchControlChrome,
     ));
     commands.spawn((
         Sprite::from_color(Color::srgb(0.72, 0.40, 0.13), Vec2::new(420.0, 11.0)),
         Transform::from_xyz(-552.0, 0.0, 7.0),
         Cue,
+        MatchControlChrome,
     ));
 
     spawn_rectangle(
@@ -407,6 +472,7 @@ fn setup(
         ),
         Transform::from_xyz(565.0, POWER_BAR_HEIGHT * (DEFAULT_POWER - 1.0) / 2.0, 6.0),
         PowerFill,
+        MatchControlChrome,
     ));
 
     spawn_overlay(&mut commands, presentation_tier.0);
@@ -440,6 +506,18 @@ fn spawn_overlay(commands: &mut Commands, presentation_tier: &str) {
             left: px(24),
             ..default()
         },
+    ));
+    commands.spawn((
+        Text::new("Waiting for an authoritative match"),
+        TextFont::from_font_size(18.0),
+        TextColor(Color::srgb(0.92, 0.85, 0.65)),
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(58),
+            left: px(24),
+            ..default()
+        },
+        TurnStatus,
     ));
     commands.spawn((
         Text::new("Drag to aim · pull the right rail for power · release to shoot"),
@@ -488,9 +566,32 @@ fn canonical_to_world(position: pwmtf_game_domain::Vector) -> Vec2 {
     )
 }
 
+const fn player_number(player: pwmtf_game_domain::Player) -> u8 {
+    match player {
+        pwmtf_game_domain::Player::One => 1,
+        pwmtf_game_domain::Player::Two => 2,
+    }
+}
+
+fn match_status_text(
+    active_player: pwmtf_game_domain::Player,
+    outcome: Option<pwmtf_game_domain::MatchOutcome>,
+) -> String {
+    outcome.map_or_else(
+        || format!("Player {} to shoot", player_number(active_player)),
+        |outcome| format!("Player {} wins", player_number(outcome.winner)),
+    )
+}
+
 impl CanonicalPresentation {
     fn project(&mut self, state: &pwmtf_game_domain::MatchState) {
         self.checksum = Some(state.checksum());
+        let outcome = match state.status() {
+            pwmtf_game_domain::MatchStatus::InProgress => None,
+            pwmtf_game_domain::MatchStatus::Completed(outcome) => Some(outcome),
+        };
+        self.completed = outcome.is_some();
+        self.status = Some(match_status_text(state.active_player(), outcome));
         self.target.clear();
         self.pocketed.clear();
         for ball in state.table().balls() {
@@ -514,6 +615,10 @@ fn synchronize_canonical_presentation(mut presentation: ResMut<CanonicalPresenta
         return;
     }
     presentation.checksum = Some(checksum);
+    if let Some((active_player, outcome)) = browser_transport::authoritative_match_info() {
+        presentation.completed = outcome.is_some();
+        presentation.status = Some(match_status_text(active_player, outcome));
+    }
     presentation.target.clear();
     presentation.pocketed.clear();
     for number in 0_u8..=15 {
@@ -527,6 +632,36 @@ fn synchronize_canonical_presentation(mut presentation: ResMut<CanonicalPresenta
                 .target
                 .insert(number, canonical_to_world(position));
         }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn update_turn_status(
+    presentation: Res<CanonicalPresentation>,
+    mut status: Single<&mut Text, With<TurnStatus>>,
+) {
+    if presentation.is_changed()
+        && let Some(message) = &presentation.status
+    {
+        status.0.clone_from(message);
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn update_match_control_visibility(
+    presentation: Res<CanonicalPresentation>,
+    mut controls: Query<&mut Visibility, With<MatchControlChrome>>,
+) {
+    if !presentation.is_changed() {
+        return;
+    }
+    let visibility = if presentation.completed {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+    for mut control in &mut controls {
+        *control = visibility;
     }
 }
 
@@ -895,12 +1030,33 @@ mod tests {
         let mut presentation = CanonicalPresentation::default();
         presentation.project(&state);
         assert_eq!(presentation.target.len(), 16);
+        assert!(!presentation.completed);
         assert!(presentation.target.contains_key(&0));
         assert!(presentation.pocketed.is_empty());
         assert_eq!(
             canonical_to_world(pwmtf_game_domain::Vector::ZERO),
             Vec2::new(TABLE_CENTER_X, 0.0)
         );
+    }
+
+    #[test]
+    fn terminal_projection_hides_live_match_chrome() {
+        use pwmtf_game_domain::{
+            MatchState, PhysicsProfile, Player, RackSeed, RulesProfile, TableGeometry,
+        };
+        let mut state = MatchState::new(
+            RulesProfile::standard(),
+            PhysicsProfile::standard(),
+            TableGeometry::standard(),
+            RackSeed::new(42),
+            Player::One,
+        )
+        .unwrap();
+        state.concede(Player::Two).unwrap();
+        let mut presentation = CanonicalPresentation::default();
+        presentation.project(&state);
+        assert!(presentation.completed);
+        assert_eq!(presentation.status.as_deref(), Some("Player 1 wins"));
     }
 
     #[test]
