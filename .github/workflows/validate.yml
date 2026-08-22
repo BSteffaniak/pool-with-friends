@@ -45,6 +45,7 @@ jobs:
       - run: ./scripts/test-feasibility-server.sh
       - run: ./scripts/test-browser-telemetry.js
       - run: ./scripts/test-production-smoke-self.sh
+      - run: ./scripts/test-production-operations.sh
       - run: ./scripts/test-backup-restore.sh
       - run: ./scripts/test-native-deployment-smoke.sh
       - run: ./scripts/check-architecture.sh

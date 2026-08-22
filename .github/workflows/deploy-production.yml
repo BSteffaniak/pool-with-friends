@@ -1,0 +1,49 @@
+name: Deploy Production
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+jobs:
+  approve:
+    runs-on: ubuntu-latest
+    environment: production-approval
+    timeout-minutes: 5
+    steps:
+      - run: echo "Approved PWMTF production deployment"
+
+  deploy:
+    needs: approve
+    runs-on: ubuntu-latest
+    environment: Production
+    timeout-minutes: 60
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      PWMTF_GOOGLE_CLIENT_ID: ${{ secrets.PWMTF_GOOGLE_CLIENT_ID }}
+      PWMTF_GOOGLE_CLIENT_SECRET: ${{ secrets.PWMTF_GOOGLE_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+      - name: Assert protected credentials
+        run: |
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$FLY_API_TOKEN"
+          test -n "$PWMTF_GOOGLE_CLIENT_ID"
+          test -n "$PWMTF_GOOGLE_CLIENT_SECRET"
+      - name: Install operational tools
+        run: sudo apt-get update && sudo apt-get install --yes jq
+      - name: Configure canonical DNS, TLS validation, and directory redirect
+        run: ./scripts/configure-production-edge.sh
+      - name: Deploy one authoritative Machine
+        run: ./scripts/deploy-production.sh
+      - name: Verify application-consistent production backup and restore
+        run: ./scripts/backup-production.sh

@@ -15,13 +15,15 @@ RUN apt-get update \
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates sqlite3 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home pwmtf \
-    && mkdir -p /app/dist /data \
+    && mkdir -p /app/dist /app/scripts /data \
     && chown -R pwmtf:pwmtf /app /data
 COPY --from=builder /app/target/release/pwmtf-server /usr/local/bin/pwmtf-server
-COPY --from=builder /app/dist /app/dist
+COPY --from=builder --chown=pwmtf:pwmtf /app/dist /app/dist
+COPY --from=builder --chown=pwmtf:pwmtf --chmod=0555 /app/scripts/backup-database.sh /app/scripts/backup-database.sh
+COPY --from=builder --chown=pwmtf:pwmtf --chmod=0555 /app/scripts/restore-database.sh /app/scripts/restore-database.sh
 COPY --from=builder /app/pwmtf-build-id /app/pwmtf-build-id
 COPY --from=builder /app/pwmtf-source-hash /app/pwmtf-source-hash
 USER pwmtf
