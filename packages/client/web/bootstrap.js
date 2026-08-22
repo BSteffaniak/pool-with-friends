@@ -5,6 +5,8 @@ const loadError = document.querySelector("#load-error");
 const accountPanel = document.querySelector("#account-panel");
 const accountLabel = document.querySelector("#account-label");
 const googleSignIn = document.querySelector("#google-sign-in");
+const developmentSignIn = document.querySelector("#development-sign-in");
+const developmentUsername = document.querySelector("#development-username");
 const signOut = document.querySelector("#sign-out");
 const socialPanel = document.querySelector("#social-panel");
 const handleForm = document.querySelector("#handle-form");
@@ -1904,6 +1906,8 @@ function startMatchSocket(module) {
   connect();
 }
 
+let runtimeAuth = { development_login: false, google_login: true };
+
 async function refreshSession() {
   const response = await fetch("/api/session", {
     credentials: "same-origin",
@@ -1912,7 +1916,8 @@ async function refreshSession() {
   accountPanel.hidden = false;
   if (response.status === 401) {
     accountLabel.textContent = "Play online with friends";
-    googleSignIn.hidden = false;
+    googleSignIn.hidden = !runtimeAuth.google_login;
+    developmentSignIn.hidden = !runtimeAuth.development_login;
     signOut.hidden = true;
     socialPanel.hidden = true;
     return;
@@ -1924,6 +1929,7 @@ async function refreshSession() {
   accountLabel.textContent = session.handle ? `Signed in as @${session.handle}` : "Signed in";
   handleInput.value = session.handle ?? "";
   googleSignIn.hidden = true;
+  developmentSignIn.hidden = true;
   signOut.hidden = false;
   socialPanel.hidden = false;
   await Promise.all([refreshChallenges(), refreshRematches()]);
@@ -2224,6 +2230,35 @@ googleSignIn.addEventListener("submit", () => {
   googleSignIn.querySelector("button").disabled = true;
 });
 
+developmentSignIn.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = developmentSignIn.querySelector("button");
+  button.disabled = true;
+  try {
+    const response = await fetch("/auth/development", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "X-PWMTF-Origin": window.location.origin,
+      },
+      body: JSON.stringify({ username: developmentUsername.value.trim() }),
+    });
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(message || `local sign in failed with ${response.status}`);
+    }
+    developmentUsername.value = "";
+    await refreshSession();
+  } catch (error) {
+    console.error("PWMTF local development sign in failed", error);
+    accountLabel.textContent = error instanceof Error ? error.message : "Local sign in failed";
+  } finally {
+    button.disabled = false;
+  }
+});
+
 signOut.addEventListener("click", async () => {
   signOut.disabled = true;
   try {
@@ -2244,7 +2279,17 @@ signOut.addEventListener("click", async () => {
   }
 });
 
-const sessionReady = refreshSession()
+const runtimeAuthReady = fetch("/api/auth/runtime", {
+  credentials: "same-origin",
+  headers: { Accept: "application/json" },
+}).then(async (response) => {
+  if (!response.ok) {
+    throw new Error(`authentication runtime request failed with ${response.status}`);
+  }
+  runtimeAuth = await response.json();
+});
+
+const sessionReady = runtimeAuthReady.then(() => refreshSession())
   .then(async (session) => {
     const matchId = new URLSearchParams(window.location.search).get("match");
     if (session !== undefined && /^\d{1,39}$/.test(matchId ?? "")) {
@@ -2263,7 +2308,8 @@ const sessionReady = refreshSession()
     console.error("PWMTF session lookup failed", error);
     accountPanel.hidden = false;
     accountLabel.textContent = "Account status unavailable";
-    googleSignIn.hidden = false;
+    googleSignIn.hidden = !runtimeAuth.google_login;
+    developmentSignIn.hidden = !runtimeAuth.development_login;
     return undefined;
   });
 

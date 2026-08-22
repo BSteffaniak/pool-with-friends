@@ -5,6 +5,8 @@ use thiserror::Error;
 
 /// Canonical production cookie name.
 pub const SESSION_COOKIE_NAME: &str = "__Host-pwmtf_session";
+/// Local-development cookie name, intentionally unavailable in production policy.
+pub const DEVELOPMENT_SESSION_COOKIE_NAME: &str = "pwmtf_dev_session";
 
 /// Same-site policy emitted for the authentication cookie.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,6 +40,19 @@ impl SessionCookiePolicy {
         }
     }
 
+    /// Returns the explicitly insecure localhost development policy.
+    #[cfg(feature = "insecure")]
+    #[must_use]
+    pub fn development() -> Self {
+        Self {
+            name: DEVELOPMENT_SESSION_COOKIE_NAME.to_owned(),
+            path: "/".to_owned(),
+            same_site: SameSite::Lax,
+            secure: false,
+            http_only: true,
+        }
+    }
+
     /// Creates a validated custom policy for tests or local adapters.
     ///
     /// `__Host-` cookies must remain secure, have path `/`, and omit Domain.
@@ -54,13 +69,17 @@ impl SessionCookiePolicy {
         secure: bool,
         http_only: bool,
     ) -> Result<Self, CookieError> {
-        if !name.starts_with("__Host-")
+        let valid_name = if secure {
+            name.starts_with("__Host-")
+        } else {
+            name == DEVELOPMENT_SESSION_COOKIE_NAME
+        };
+        if !valid_name
             || name.len() > 128
             || !name
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
             || path != "/"
-            || !secure
             || !http_only
         {
             return Err(CookieError::InvalidPolicy);
@@ -88,23 +107,27 @@ impl SessionCookiePolicy {
         if max_age_seconds == 0 || max_age_seconds > i32::MAX as u64 {
             return Err(CookieError::InvalidLifetime);
         }
+        let secure = if self.secure { "; Secure" } else { "" };
         Ok(format!(
-            "{}={}; Path={}; Max-Age={max_age_seconds}; SameSite={}; Secure; HttpOnly; Priority=High",
+            "{}={}; Path={}; Max-Age={max_age_seconds}; SameSite={}{}; HttpOnly; Priority=High",
             self.name,
             token.expose(),
             self.path,
-            self.same_site_label()
+            self.same_site_label(),
+            secure
         ))
     }
 
     /// Emits a deletion header with the same security and scope attributes.
     #[must_use]
     pub fn clear_cookie(&self) -> String {
+        let secure = if self.secure { "; Secure" } else { "" };
         format!(
-            "{}=; Path={}; Max-Age=0; SameSite={}; Secure; HttpOnly; Priority=High",
+            "{}=; Path={}; Max-Age=0; SameSite={}{}; HttpOnly; Priority=High",
             self.name,
             self.path,
-            self.same_site_label()
+            self.same_site_label(),
+            secure
         )
     }
 
@@ -198,6 +221,18 @@ mod tests {
                 .unwrap(),
             token
         );
+    }
+
+    #[cfg(feature = "insecure")]
+    #[test]
+    fn development_cookie_is_explicitly_insecure_and_separate() {
+        let policy = SessionCookiePolicy::development();
+        let token = SessionToken::generate().unwrap();
+        let header = policy.set_cookie(&token, 3_600).unwrap();
+        assert!(header.starts_with("pwmtf_dev_session="));
+        assert!(!header.contains("Secure"));
+        assert!(header.contains("HttpOnly"));
+        assert!(!policy.clear_cookie().contains("Secure"));
     }
 
     #[test]

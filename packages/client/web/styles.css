@@ -139,12 +139,35 @@ body {
 
 #account-panel[hidden],
 #account-panel button[hidden],
-#google-sign-in[hidden] {
+#google-sign-in[hidden],
+#development-sign-in[hidden] {
   display: none;
 }
 
 #account-panel form {
   margin: 0;
+}
+
+#development-sign-in {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+#development-sign-in label {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+#development-sign-in input {
+  width: 10rem;
+  min-height: 2.75rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid #668879;
+  border-radius: 0.55rem;
+  color: var(--ink);
+  background: rgb(1 10 8 / 78%);
+  font: inherit;
 }
 
 #account-panel a,

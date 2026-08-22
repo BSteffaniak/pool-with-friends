@@ -66,6 +66,35 @@ With Nix:
 nix develop
 ```
 
+### Local two-player login
+
+PWMTF has an explicitly gated username-only login for manual local browser testing
+without Google credentials:
+
+```sh
+./scripts/build-wasm.sh
+PWMTF_DEV_MODE=true \
+PWMTF_CANONICAL_ORIGIN=http://127.0.0.1:8080 \
+PWMTF_BIND=127.0.0.1:8080 \
+PWMTF_DATABASE_PATH=./pwmtf.db \
+PWMTF_WEB_ROOT=./dist \
+cargo run -p pwmtf_server --features insecure --bin pwmtf-server
+```
+
+Open two browser profiles, enter different lowercase usernames, and use the
+normal challenge/invitation UI. These usernames create stable local handles and
+normal hash-only sessions, not Google identities.
+
+The route is compiled only by the non-default `insecure` feature. Startup also
+requires `PWMTF_DEV_MODE=true`, no Google credentials, and an exact loopback HTTP
+origin. An insecure build without development mode and a development-mode normal
+build both fail closed. Production builds cannot compile the route, require
+Google credentials, and retain Secure `__Host-` cookies.
+
+The browser client discovers authentication capabilities from the server before
+showing either login form. It never exposes the local form against a normal
+production build and hides Google when development mode is active.
+
 ## License
 
 PWMTF is licensed under the Mozilla Public License 2.0. See `LICENSE`.

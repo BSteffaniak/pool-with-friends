@@ -31,7 +31,10 @@ mod social_store;
 mod token;
 
 pub use command_store::SwitchyCommandJournal;
-pub use cookie::{CookieError, SESSION_COOKIE_NAME, SameSite, SessionCookiePolicy};
+pub use cookie::{
+    CookieError, DEVELOPMENT_SESSION_COOKIE_NAME, SESSION_COOKIE_NAME, SameSite,
+    SessionCookiePolicy,
+};
 pub use http::{
     CANONICAL_ORIGIN, HttpState, OIDC_CALLBACK_PATH, TransportError, router as http_router,
 };

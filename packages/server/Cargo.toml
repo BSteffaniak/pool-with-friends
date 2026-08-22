@@ -35,3 +35,4 @@ futures-lite = { workspace = true }
 [features]
 default          = []
 fail-on-warnings = []
+insecure         = []

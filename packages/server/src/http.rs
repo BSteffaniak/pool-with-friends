@@ -64,9 +64,11 @@ type PublishedSnapshot = (MatchId, SnapshotEnvelope);
 /// Runtime services required by native HTTP/OIDC/WebSocket entry points.
 pub struct HttpState {
     db: Arc<dyn Database>,
-    oidc: Arc<GoogleOidcClient>,
+    oidc: Option<Arc<GoogleOidcClient>>,
     sessions: SessionCookiePolicy,
     origins: BTreeSet<String>,
+    public_origin: String,
+    development_login: bool,
     subscriptions: Mutex<SubscriptionRegistry>,
     snapshot_sender: tokio::sync::broadcast::Sender<PublishedSnapshot>,
     matches: Mutex<MatchService<SwitchyCommandJournal>>,
@@ -323,6 +325,28 @@ impl HttpState {
         Self::new(db, oidc, [CANONICAL_ORIGIN])
     }
 
+    /// Creates explicitly insecure localhost state for username-only development login.
+    #[cfg(feature = "insecure")]
+    #[must_use]
+    pub fn development(db: Arc<dyn Database>, origin: &str) -> Self {
+        let matches = MatchService::new(SwitchyCommandJournal::new(Arc::clone(&db)));
+        let (snapshot_sender, _) = tokio::sync::broadcast::channel(SNAPSHOT_CHANNEL_CAPACITY);
+        Self {
+            db,
+            oidc: None,
+            sessions: SessionCookiePolicy::development(),
+            origins: BTreeSet::from([origin.to_owned()]),
+            public_origin: origin.to_owned(),
+            development_login: true,
+            subscriptions: Mutex::new(SubscriptionRegistry::default()),
+            snapshot_sender,
+            matches: Mutex::new(matches),
+            scheduler_healthy: AtomicBool::new(false),
+            scheduler_last_success_ms: AtomicU64::new(0),
+            web_root: None,
+        }
+    }
+
     /// Creates state with an explicit exact-origin allowlist for tests/local adapters.
     #[must_use]
     pub fn new(
@@ -334,9 +358,11 @@ impl HttpState {
         let (snapshot_sender, _) = tokio::sync::broadcast::channel(SNAPSHOT_CHANNEL_CAPACITY);
         Self {
             db,
-            oidc,
+            oidc: Some(oidc),
             sessions: SessionCookiePolicy::production(),
             origins: origins.into_iter().map(Into::into).collect(),
+            public_origin: CANONICAL_ORIGIN.to_owned(),
+            development_login: false,
             subscriptions: Mutex::new(SubscriptionRegistry::default()),
             snapshot_sender,
             matches: Mutex::new(matches),
@@ -373,9 +399,11 @@ impl HttpState {
         let (snapshot_sender, _) = tokio::sync::broadcast::channel(SNAPSHOT_CHANNEL_CAPACITY);
         Self {
             db,
-            oidc,
+            oidc: Some(oidc),
             sessions: SessionCookiePolicy::production(),
             origins: origins.into_iter().map(Into::into).collect(),
+            public_origin: CANONICAL_ORIGIN.to_owned(),
+            development_login: false,
             subscriptions: Mutex::new(SubscriptionRegistry::default()),
             snapshot_sender,
             matches: Mutex::new(matches),
@@ -387,14 +415,14 @@ impl HttpState {
 }
 
 /// Builds the native HTTP/OIDC/WebSocket router.
+#[allow(clippy::too_many_lines)]
 pub fn router(state: Arc<HttpState>) -> Router {
     let web_root = state.web_root().map(PathBuf::from);
-    let router = Router::new()
+    let mut router = Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(readiness))
         .route("/pwmtf-bundle-manifest.json", get(hidden_bundle_manifest))
-        .route("/auth/google/start", axum::routing::post(google_start))
-        .route(OIDC_CALLBACK_PATH, get(google_callback))
+        .route("/api/auth/runtime", get(runtime_auth))
         .route("/api/session", get(session_profile).delete(logout))
         .route("/api/profile/handle", axum::routing::put(set_handle))
         .route(
@@ -440,6 +468,21 @@ pub fn router(state: Arc<HttpState>) -> Router {
         .route("/api/{*path}", axum::routing::any(api_not_found))
         .route("/auth/{*path}", axum::routing::any(api_not_found))
         .route("/ws", get(websocket));
+    #[cfg(feature = "insecure")]
+    if state.development_login {
+        router = router.route("/auth/development", axum::routing::post(development_login));
+    } else {
+        router = router
+            .route("/auth/google/start", axum::routing::post(google_start))
+            .route(OIDC_CALLBACK_PATH, get(google_callback));
+    }
+    #[cfg(not(feature = "insecure"))]
+    {
+        router = router
+            .route("/auth/google/start", axum::routing::post(google_start))
+            .route(OIDC_CALLBACK_PATH, get(google_callback));
+    }
+    let router = router;
     let router = if let Some(root) = web_root {
         let index = ServeFile::new(root.join("index.html"));
         let assets = SetResponseHeader::overriding(
@@ -517,8 +560,22 @@ async fn api_not_found() -> StatusCode {
 }
 
 #[derive(Debug, serde::Serialize)]
+struct RuntimeAuth {
+    development_login: bool,
+    google_login: bool,
+}
+
+async fn runtime_auth(State(state): State<Arc<HttpState>>) -> axum::Json<RuntimeAuth> {
+    axum::Json(RuntimeAuth {
+        development_login: state.development_login,
+        google_login: state.oidc.is_some(),
+    })
+}
+
+#[derive(Debug, serde::Serialize)]
 struct SessionProfile {
     handle: Option<String>,
+    development_login: bool,
 }
 
 async fn session_profile(
@@ -527,7 +584,10 @@ async fn session_profile(
 ) -> Result<axum::Json<SessionProfile>, TransportError> {
     let account = authenticated_account(&state, &headers).await?;
     let handle = handle_for_account(&*state.db, account).await?;
-    Ok(axum::Json(session_profile_response(handle)))
+    Ok(axum::Json(session_profile_response(
+        handle,
+        state.development_login,
+    )))
 }
 
 async fn logout(
@@ -564,6 +624,50 @@ async fn authenticated_account(
         .ok_or(TransportError::Unauthenticated)
 }
 
+#[cfg(feature = "insecure")]
+#[derive(Debug, serde::Deserialize)]
+struct DevelopmentLoginRequest {
+    username: String,
+}
+
+#[cfg(feature = "insecure")]
+async fn development_login(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    payload: Result<axum::Json<DevelopmentLoginRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<Response, TransportError> {
+    if !state.development_login || state.oidc.is_some() {
+        return Err(TransportError::MatchNotFound);
+    }
+    ensure_json_bound(&headers)?;
+    validate_state_change_origin(&headers, &state.origins)?;
+    let request = payload.map_err(|_| TransportError::InvalidRequest)?.0;
+    let handle = Handle::new(&request.username).map_err(|_| TransportError::InvalidRequest)?;
+    let account = development_account_id(&handle);
+    assign_handle(&*state.db, account, &handle).await?;
+    let now = unix_millis()?;
+    let token = create_stored_session(
+        &*state.db,
+        crate::Session {
+            account,
+            expires_at: now.saturating_add(SESSION_LIFETIME_MS),
+            last_used_at: now,
+        },
+    )
+    .await?;
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(
+            &state
+                .sessions
+                .set_cookie(&token, SESSION_LIFETIME_MS / 1_000)?,
+        )
+        .map_err(|_| TransportError::Internal)?,
+    );
+    Ok(response)
+}
+
 async fn google_start(
     State(state): State<Arc<HttpState>>,
     headers: HeaderMap,
@@ -576,7 +680,8 @@ async fn google_start(
         now.saturating_add(OIDC_ATTEMPT_LIFETIME_MS),
     )
     .await?;
-    let location = state.oidc.authorization_url(attempt.attempt());
+    let oidc = state.oidc.as_ref().ok_or(TransportError::MatchNotFound)?;
+    let location = oidc.authorization_url(attempt.attempt());
     let mut response = Redirect::temporary(&location).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
@@ -630,8 +735,8 @@ async fn google_callback(
         unix_millis()?,
     )
     .await?;
-    let identity = state
-        .oidc
+    let oidc = state.oidc.as_ref().ok_or(TransportError::MatchNotFound)?;
+    let identity = oidc
         .exchange_callback(&query.code, &query.state, claimed.attempt())
         .await?;
     let account = account_id(&identity);
@@ -982,6 +1087,19 @@ fn parse_cookie<'a>(header: &'a str, wanted: &str) -> Result<&'a str, TransportE
     found.ok_or(TransportError::Unauthenticated)
 }
 
+#[cfg(feature = "insecure")]
+fn development_account_id(handle: &Handle) -> AccountId {
+    use sha2::{Digest as _, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"pwmtf-local-development");
+    hash.update([0]);
+    hash.update(handle.as_str().as_bytes());
+    let digest: [u8; 32] = hash.finalize().into();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    AccountId::new(u128::from_be_bytes(bytes))
+}
+
 fn account_id(identity: &crate::GoogleIdentity) -> AccountId {
     use sha2::{Digest as _, Sha256};
     let mut hash = Sha256::new();
@@ -1192,9 +1310,13 @@ impl IntoResponse for TransportError {
     }
 }
 
-fn session_profile_response(handle: Option<crate::Handle>) -> SessionProfile {
+fn session_profile_response(
+    handle: Option<crate::Handle>,
+    development_login: bool,
+) -> SessionProfile {
     SessionProfile {
         handle: handle.map(|handle| handle.as_str().to_owned()),
+        development_login,
     }
 }
 
@@ -1315,7 +1437,7 @@ async fn create_invitation_link(
     )
     .await?;
     Ok(axum::Json(InvitationResponse {
-        invitation_url: format!("{CANONICAL_ORIGIN}/?invite={}", token.expose()),
+        invitation_url: format!("{}/?invite={}", state.public_origin, token.expose()),
         expires_at_ms: expires_at,
     }))
 }
@@ -1690,10 +1812,27 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "insecure")]
+    #[test]
+    fn development_account_ids_are_stable_and_namespaced() {
+        let first = Handle::new("local_one").unwrap();
+        let second = Handle::new("local_two").unwrap();
+        assert_eq!(
+            development_account_id(&first),
+            development_account_id(&first)
+        );
+        assert_ne!(
+            development_account_id(&first),
+            development_account_id(&second)
+        );
+    }
+
     #[test]
     fn session_profile_exposes_only_public_profile_data() {
-        let profile = session_profile_response(Some(crate::Handle::new("player_one").unwrap()));
+        let profile =
+            session_profile_response(Some(crate::Handle::new("player_one").unwrap()), false);
         assert_eq!(profile.handle.as_deref(), Some("player_one"));
+        assert!(!profile.development_login);
     }
 
     #[test]

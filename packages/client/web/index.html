@@ -26,6 +26,11 @@
         <form id="google-sign-in" method="post" action="/auth/google/start">
           <button type="submit">Sign in with Google</button>
         </form>
+        <form id="development-sign-in" hidden>
+          <label for="development-username">Local username</label>
+          <input id="development-username" name="username" type="text" minlength="3" maxlength="24" pattern="[a-z][a-z0-9_]{2,23}" autocomplete="username" required />
+          <button type="submit">Sign in locally</button>
+        </form>
         <button id="sign-out" type="button" hidden>Sign out</button>
       </section>
       <section id="social-panel" hidden>

@@ -37,15 +37,30 @@ async fn run() -> Result<(), StartupError> {
         .await?
         .into();
     migrate(&*db).await?;
-    let oidc = Arc::new(
-        GoogleOidcClient::discover(
-            &configuration.google_client_id,
-            &configuration.google_client_secret,
-            &configuration.google_callback,
-        )
-        .await?,
-    );
-    let state = Arc::new(HttpState::production(db, oidc).with_web_root(configuration.web_root));
+    let state = if configuration.development_mode {
+        #[cfg(feature = "insecure")]
+        {
+            HttpState::development(db, &configuration.public_origin)
+                .with_web_root(configuration.web_root)
+        }
+        #[cfg(not(feature = "insecure"))]
+        unreachable!("development mode requires the insecure feature")
+    } else {
+        let client_id = configuration
+            .google_client_id
+            .as_deref()
+            .ok_or(StartupError::Configuration)?;
+        let client_secret = configuration
+            .google_client_secret
+            .as_deref()
+            .ok_or(StartupError::Configuration)?;
+        let oidc = Arc::new(
+            GoogleOidcClient::discover(client_id, client_secret, &configuration.google_callback)
+                .await?,
+        );
+        HttpState::production(db, oidc).with_web_root(configuration.web_root)
+    };
+    let state = Arc::new(state);
     state.recover_all_matches().await?;
     let (scheduler_shutdown, scheduler_signal) = watch::channel(false);
     let scheduler = tokio::spawn(scheduler_loop(Arc::clone(&state), scheduler_signal));
@@ -140,18 +155,24 @@ struct Configuration {
     bind: SocketAddr,
     database_path: PathBuf,
     web_root: PathBuf,
-    google_client_id: String,
-    google_client_secret: String,
+    google_client_id: Option<String>,
+    google_client_secret: Option<String>,
     google_callback: String,
+    #[cfg(feature = "insecure")]
+    public_origin: String,
+    development_mode: bool,
     expected_build_id: Option<String>,
     expected_source_hash: Option<String>,
 }
 
 impl Configuration {
     fn from_environment() -> Result<Self, StartupError> {
+        let development_mode = development_mode()?;
         let canonical_origin =
             environment("PWMTF_CANONICAL_ORIGIN").unwrap_or_else(|| CANONICAL_ORIGIN.to_owned());
-        if canonical_origin != CANONICAL_ORIGIN {
+        if development_mode {
+            validate_development_origin(&canonical_origin)?;
+        } else if canonical_origin != CANONICAL_ORIGIN {
             return Err(StartupError::Configuration);
         }
         let google_issuer =
@@ -159,11 +180,17 @@ impl Configuration {
         if google_issuer != GOOGLE_ISSUER {
             return Err(StartupError::Configuration);
         }
-        let callback =
-            environment("PWMTF_GOOGLE_CALLBACK").unwrap_or_else(|| DEFAULT_CALLBACK.to_owned());
-        if callback != DEFAULT_CALLBACK {
+        let callback = environment("PWMTF_GOOGLE_CALLBACK").unwrap_or_else(|| {
+            if development_mode {
+                format!("{canonical_origin}/auth/google/callback")
+            } else {
+                DEFAULT_CALLBACK.to_owned()
+            }
+        });
+        if !development_mode && callback != DEFAULT_CALLBACK {
             return Err(StartupError::Configuration);
         }
+        let (google_client_id, google_client_secret) = google_configuration(development_mode)?;
         Ok(Self {
             bind: environment("PWMTF_BIND")
                 .unwrap_or_else(|| DEFAULT_BIND.to_owned())
@@ -175,14 +202,58 @@ impl Configuration {
             web_root: environment("PWMTF_WEB_ROOT")
                 .unwrap_or_else(|| "/app/dist".to_owned())
                 .into(),
-            google_client_id: validate_secret_environment("PWMTF_GOOGLE_CLIENT_ID")?,
-            google_client_secret: validate_secret_environment("PWMTF_GOOGLE_CLIENT_SECRET")?,
+            google_client_id,
+            google_client_secret,
             google_callback: callback,
+            #[cfg(feature = "insecure")]
+            public_origin: canonical_origin,
+            development_mode,
             expected_build_id: optional_identity_environment("PWMTF_EXPECTED_BUILD_ID")?
                 .or_else(|| deployment_identity_file("/app/pwmtf-build-id")),
             expected_source_hash: optional_hash_environment("PWMTF_EXPECTED_SOURCE_HASH")?
                 .or_else(|| deployment_identity_file("/app/pwmtf-source-hash")),
         })
+    }
+}
+
+fn development_mode() -> Result<bool, StartupError> {
+    let enabled = environment("PWMTF_DEV_MODE").is_some_and(|value| value == "true");
+    validate_development_mode(enabled, cfg!(feature = "insecure"))
+}
+
+const fn validate_development_mode(
+    enabled: bool,
+    insecure_feature: bool,
+) -> Result<bool, StartupError> {
+    if enabled != insecure_feature {
+        return Err(StartupError::Configuration);
+    }
+    Ok(enabled)
+}
+
+fn validate_development_origin(origin: &str) -> Result<(), StartupError> {
+    let Some(authority) = origin.strip_prefix("http://") else {
+        return Err(StartupError::Configuration);
+    };
+    let host = authority.split(':').next().unwrap_or_default();
+    if !matches!(host, "127.0.0.1" | "localhost") || authority.contains(['/', '?', '#', '@']) {
+        return Err(StartupError::Configuration);
+    }
+    Ok(())
+}
+
+fn google_configuration(
+    development_mode: bool,
+) -> Result<(Option<String>, Option<String>), StartupError> {
+    let client_id = environment("PWMTF_GOOGLE_CLIENT_ID");
+    let client_secret = environment("PWMTF_GOOGLE_CLIENT_SECRET");
+    match (client_id, client_secret) {
+        (None, None) if development_mode => Ok((None, None)),
+        (Some(client_id), Some(client_secret)) if !development_mode => Ok((
+            Some(validate_secret_value(client_id)?),
+            Some(validate_secret_value(client_secret)?),
+        )),
+        _ => Err(StartupError::Configuration),
     }
 }
 
@@ -245,11 +316,6 @@ fn validate_web_bundle_identity(
         return Err(StartupError::BundleIdentity);
     }
     Ok(())
-}
-
-fn validate_secret_environment(name: &str) -> Result<String, StartupError> {
-    let value = environment(name).ok_or(StartupError::Configuration)?;
-    validate_secret_value(value)
 }
 
 fn validate_secret_value(value: String) -> Result<String, StartupError> {
@@ -343,6 +409,29 @@ mod tests {
                     .unwrap()
             );
         });
+    }
+
+    #[test]
+    fn development_mode_and_insecure_feature_must_agree() {
+        assert_eq!(validate_development_mode(false, false).unwrap(), false);
+        assert_eq!(validate_development_mode(true, true).unwrap(), true);
+        assert!(validate_development_mode(true, false).is_err());
+        assert!(validate_development_mode(false, true).is_err());
+    }
+
+    #[cfg(feature = "insecure")]
+    #[test]
+    fn development_configuration_is_loopback_and_excludes_google() {
+        assert!(validate_development_origin("http://127.0.0.1:8080").is_ok());
+        assert!(validate_development_origin("http://localhost:8080").is_ok());
+        for origin in [
+            "https://127.0.0.1:8080",
+            "http://0.0.0.0:8080",
+            "http://evil.example:8080",
+            "http://localhost:8080/path",
+        ] {
+            assert!(validate_development_origin(origin).is_err());
+        }
     }
 
     #[test]
