@@ -34,12 +34,19 @@ pub async fn pending_challenges_for(
                 .parse::<u128>()
                 .map(ChallengeId::new)
                 .map_err(|_| SocialStoreError::Malformed)?;
-            Ok((id, account(row, "from_account_id")?))
+            let challenger = account(row, "from_account_id")?;
+            if challenger == account_id {
+                return Err(SocialStoreError::Malformed);
+            }
+            Ok((id, challenger))
         })
         .collect()
 }
 
 /// Creates a pending exact-account challenge.
+///
+/// The duplicate check and insertion share one transaction; the schema's unique
+/// pending-pair index closes concurrent races.
 ///
 /// # Errors
 ///
@@ -54,23 +61,25 @@ pub async fn create_challenge(
     if from == to {
         return Err(SocialStoreError::SelfChallenge);
     }
-    let duplicate = db
+    let tx = db.begin_transaction().await?;
+    let duplicate = tx
         .select("challenges")
         .where_eq("from_account_id", from.value().to_string())
         .where_eq("to_account_id", to.value().to_string())
         .where_eq("status", "pending")
-        .execute(db)
+        .execute(&*tx)
         .await?;
     if !duplicate.is_empty() {
         return Err(SocialStoreError::DuplicateChallenge);
     }
-    db.insert("challenges")
+    tx.insert("challenges")
         .value("challenge_id", id.value().to_string())
         .value("from_account_id", from.value().to_string())
         .value("to_account_id", to.value().to_string())
         .value("status", "pending")
-        .execute(db)
+        .execute(&*tx)
         .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -103,6 +112,9 @@ pub async fn accept_challenge_into_lobby(
         player_one: account(row, "from_account_id")?,
         player_two: account(row, "to_account_id")?,
     };
+    if participants.player_one == participants.player_two {
+        return Err(SocialStoreError::Malformed);
+    }
     if actor != participants.player_two {
         return Err(SocialStoreError::Unauthorized);
     }
@@ -215,6 +227,13 @@ pub async fn revoke_invitation(
     if account(row, "creator_id")? != actor {
         return Err(SocialStoreError::Unauthorized);
     }
+    let revoked = integer(row, "revoked")?;
+    if revoked != 0 && revoked != 1 {
+        return Err(SocialStoreError::Malformed);
+    }
+    if revoked == 1 {
+        return Err(SocialStoreError::Revoked);
+    }
     if !is_null(row, "redeemed_lobby_id")? {
         return Err(SocialStoreError::AlreadyUsed);
     }
@@ -257,7 +276,11 @@ pub async fn redeem_invitation_into_lobby(
     if creator == redeemer {
         return Err(SocialStoreError::SelfInvitation);
     }
-    if integer(row, "revoked")? != 0 {
+    let revoked = integer(row, "revoked")?;
+    if revoked != 0 && revoked != 1 {
+        return Err(SocialStoreError::Malformed);
+    }
+    if revoked == 1 {
         return Err(SocialStoreError::Revoked);
     }
     if integer(row, "expires_at_ms")? <= to_i64(now)? {
@@ -455,6 +478,58 @@ mod tests {
                     (ChallengeId::new(20), AccountId::new(1)),
                 ]
             );
+            db.insert("challenges")
+                .value("challenge_id", "99")
+                .value("from_account_id", "3")
+                .value("to_account_id", "3")
+                .value("status", "pending")
+                .execute(&*db)
+                .await
+                .unwrap();
+            assert!(matches!(
+                pending_challenges_for(&*db, AccountId::new(3)).await,
+                Err(SocialStoreError::Malformed)
+            ));
+        });
+    }
+
+    #[test]
+    fn concurrent_duplicate_challenges_create_one_pending_record() {
+        block_on(async {
+            let db: std::sync::Arc<dyn Database> = database().await.into();
+            let first_db = std::sync::Arc::clone(&db);
+            let second_db = std::sync::Arc::clone(&db);
+            let (first, second) = futures_lite::future::zip(
+                async move {
+                    create_challenge(
+                        &*first_db,
+                        ChallengeId::new(30),
+                        AccountId::new(1),
+                        AccountId::new(2),
+                    )
+                    .await
+                },
+                async move {
+                    create_challenge(
+                        &*second_db,
+                        ChallengeId::new(31),
+                        AccountId::new(1),
+                        AccountId::new(2),
+                    )
+                    .await
+                },
+            )
+            .await;
+            assert!(first.is_ok() ^ second.is_ok());
+            assert_eq!(
+                db.select("challenges")
+                    .where_eq("status", "pending")
+                    .execute(&*db)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
         });
     }
 
@@ -579,6 +654,23 @@ mod tests {
                 )
                 .await,
                 Err(SocialStoreError::Revoked)
+            ));
+            db.update("invitations")
+                .value("revoked", 2_i64)
+                .where_eq("invitation_id", "2")
+                .execute(&*db)
+                .await
+                .unwrap();
+            assert!(matches!(
+                redeem_invitation_into_lobby(
+                    &*db,
+                    revoked,
+                    AccountId::new(2),
+                    LobbyId::new(31),
+                    50,
+                )
+                .await,
+                Err(SocialStoreError::Malformed)
             ));
 
             let expired = InvitationTokenHash::new([9; 32]);

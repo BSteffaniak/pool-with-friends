@@ -2,7 +2,10 @@
 
 use crate::{GoogleOidcError, OidcAttempt};
 use sha2::{Digest as _, Sha256};
-use switchy_database::{Database, query::FilterableQuery as _};
+use switchy_database::{
+    Database, boxed,
+    query::{FilterableQuery as _, where_eq, where_lte},
+};
 use thiserror::Error;
 
 const ATTEMPT_ID_BYTES: usize = 16;
@@ -193,16 +196,13 @@ pub async fn cleanup_oidc_attempts(
     db: &dyn Database,
     now: u64,
 ) -> Result<(), OidcAttemptStoreError> {
-    let now = to_i64(now)?;
-    let rows = db.select("oidc_attempts").execute(db).await?;
-    for row in rows {
-        if integer(&row, "expires_at_ms")? <= now || text(&row, "status")? == "consumed" {
-            db.delete("oidc_attempts")
-                .where_eq("attempt_id", text(&row, "attempt_id")?)
-                .execute(db)
-                .await?;
-        }
-    }
+    db.delete("oidc_attempts")
+        .where_or(boxed![
+            where_lte("expires_at_ms", to_i64(now)?),
+            where_eq("status", "consumed"),
+        ])
+        .execute(db)
+        .await?;
     Ok(())
 }
 
@@ -364,7 +364,12 @@ mod tests {
                     .unwrap()
                     .is_empty()
             );
+            let pending = create_oidc_attempt(&*db, 0, 100).await.unwrap();
             cleanup_oidc_attempts(&*db, 50).await.unwrap();
+            let rows = db.select("oidc_attempts").execute(&*db).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(text(&rows[0], "attempt_id").unwrap(), pending.attempt_id());
+            cleanup_oidc_attempts(&*db, 100).await.unwrap();
             assert!(
                 db.select("oidc_attempts")
                     .execute(&*db)

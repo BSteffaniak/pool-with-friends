@@ -45,5 +45,6 @@ sqlite3 "$database" ".timeout 30000" ".backup '$temporary'"
 sqlite3 "$temporary" "PRAGMA quick_check" | grep -qx ok
 sync "$temporary"
 mv "$temporary" "$backup"
+sync "$(dirname "$backup")"
 trap - EXIT HUP INT TERM
 printf '%s\n' "$backup"

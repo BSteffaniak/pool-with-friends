@@ -93,15 +93,15 @@ impl HttpState {
         Ok(count)
     }
 
-    /// Deletes expired and consumed durable OIDC attempts.
+    /// Deletes expired durable sessions and OIDC attempts.
     ///
     /// # Errors
     ///
-    /// Returns [`TransportError`] when stored attempt cleanup fails.
-    pub async fn cleanup_oidc_attempts(&self, now: u64) -> Result<(), TransportError> {
-        crate::cleanup_oidc_attempts(&*self.db, now)
-            .await
-            .map_err(Into::into)
+    /// Returns [`TransportError`] when either stored-record cleanup fails.
+    pub async fn cleanup_expired_auth_records(&self, now: u64) -> Result<(), TransportError> {
+        crate::cleanup_expired_sessions(&*self.db, now).await?;
+        crate::cleanup_oidc_attempts(&*self.db, now).await?;
+        Ok(())
     }
 
     /// Returns the next currently scheduled deadline.
@@ -140,14 +140,60 @@ impl HttpState {
         deadline: Option<crate::ScheduledDeadline>,
     ) -> Result<(), TransportError> {
         let mut matches = self.matches.lock().await;
-        if matches.participants(match_id).is_none() {
-            matches.insert_match(match_id, participants, state);
-            matches
-                .set_deadline(match_id, deadline)
-                .map_err(|_| TransportError::Recovery)?;
+        match matches.participants(match_id) {
+            Some(loaded) if loaded == participants => return Ok(()),
+            Some(_) => return Err(TransportError::Recovery),
+            None => {}
         }
+        matches
+            .load_initial_match(match_id, participants, state, deadline)
+            .map_err(|_| TransportError::Recovery)?;
         drop(matches);
         Ok(())
+    }
+
+    async fn ensure_match_loaded(
+        &self,
+        match_id: MatchId,
+        participants: Participants,
+    ) -> Result<(), TransportError> {
+        {
+            let matches = self.matches.lock().await;
+            match matches.participants(match_id) {
+                Some(loaded) if loaded == participants => return Ok(()),
+                Some(_) => return Err(TransportError::Recovery),
+                None => {}
+            }
+        }
+
+        let journal = SwitchyCommandJournal::new(Arc::clone(&self.db));
+        let records = crate::CommandJournal::load(&journal, match_id)
+            .await
+            .map_err(|_| TransportError::Recovery)?;
+        if records.is_empty() {
+            let (stored_participants, state, deadline) = journal
+                .initial_match(match_id)
+                .await
+                .map_err(|_| TransportError::Recovery)?;
+            if stored_participants != participants {
+                return Err(TransportError::Recovery);
+            }
+            self.load_match(match_id, participants, state, deadline)
+                .await?;
+            return Ok(());
+        }
+
+        let mut matches = self.matches.lock().await;
+        match matches.participants(match_id) {
+            Some(loaded) if loaded == participants => Ok(()),
+            Some(_) => Err(TransportError::Recovery),
+            None => matches
+                .recover_match(match_id, participants)
+                .await
+                .map_err(|_| TransportError::Recovery)?
+                .map(|_| ())
+                .ok_or(TransportError::Recovery),
+        }
     }
 
     /// Returns an initial/reconnect snapshot, recovering the durable match on
@@ -170,18 +216,8 @@ impl HttpState {
         if account != stored.player_one && account != stored.player_two {
             return Err(TransportError::InvalidSubscription);
         }
-        let mut matches = self.matches.lock().await;
-        match matches.participants(match_id) {
-            Some(loaded) if loaded == stored => {}
-            Some(_) => return Err(TransportError::Recovery),
-            None => {
-                matches
-                    .recover_match(match_id, stored)
-                    .await
-                    .map_err(|_| TransportError::Recovery)?
-                    .ok_or(TransportError::MatchNotFound)?;
-            }
-        }
+        self.ensure_match_loaded(match_id, stored).await?;
+        let matches = self.matches.lock().await;
         let snapshot = matches
             .snapshot(match_id)
             .map_err(|_| TransportError::MatchNotFound)?;
@@ -208,27 +244,7 @@ impl HttpState {
                 .participants(match_id)
                 .await
                 .map_err(|_| TransportError::Recovery)?;
-            let records = SwitchyCommandJournal::new(Arc::clone(&self.db));
-            let has_commands = !crate::CommandJournal::load(&records, match_id)
-                .await
-                .map_err(|_| TransportError::Recovery)?
-                .is_empty();
-            if has_commands {
-                let mut matches = self.matches.lock().await;
-                matches
-                    .recover_match(match_id, participants)
-                    .await
-                    .map_err(|_| TransportError::Recovery)?;
-                drop(matches);
-            } else {
-                let initial = SwitchyCommandJournal::new(Arc::clone(&self.db));
-                let (_, state, deadline) = initial
-                    .initial_match(match_id)
-                    .await
-                    .map_err(|_| TransportError::Recovery)?;
-                self.load_match(match_id, participants, state, deadline)
-                    .await?;
-            }
+            self.ensure_match_loaded(match_id, participants).await?;
             recovered += 1;
         }
         Ok(recovered)
@@ -584,23 +600,10 @@ async fn websocket(
     if account != durable_participants.player_one && account != durable_participants.player_two {
         return Err(TransportError::InvalidSubscription);
     }
-    let participants = {
-        let mut matches = state.matches.lock().await;
-        if let Some(loaded) = matches.participants(match_id) {
-            if loaded != durable_participants {
-                return Err(TransportError::Recovery);
-            }
-            loaded
-        } else {
-            matches
-                .recover_match(match_id, durable_participants)
-                .await
-                .map_err(|_| TransportError::Recovery)?
-                .ok_or(TransportError::MatchNotFound)?;
-            drop(matches);
-            durable_participants
-        }
-    };
+    state
+        .ensure_match_loaded(match_id, durable_participants)
+        .await?;
+    let participants = durable_participants;
     {
         let mut subscriptions = state.subscriptions.lock().await;
         subscriptions.connect(connection, account);
@@ -1197,13 +1200,13 @@ async fn accept_rematch_offer(
     let previous_match_id = MatchId::new(match_id);
     let new_match_id = MatchId::new(random_u128()?);
     let now = unix_millis()?;
-    let rematch = crate::accept_rematch(
+    let _rematch = crate::accept_rematch(
         &*state.db,
         previous_match_id,
         new_match_id,
         actor,
         pwmtf_game_domain::RackSeed::new(random_u64()?),
-        crate::DeadlineMillis::new(now.saturating_add(30_000)),
+        crate::DeadlineMillis::new(now),
     )
     .await?;
     let journal = SwitchyCommandJournal::new(Arc::clone(&state.db));
@@ -1211,20 +1214,8 @@ async fn accept_rematch_offer(
         .participants(new_match_id)
         .await
         .map_err(|_| TransportError::Recovery)?;
-    let active_player = rematch.active_player();
     state
-        .load_match(
-            new_match_id,
-            participants,
-            rematch,
-            Some(crate::ScheduledDeadline {
-                id: crate::DeadlineId {
-                    revision: 0,
-                    player: active_player,
-                },
-                due_at: crate::DeadlineMillis::new(now.saturating_add(30_000)),
-            }),
-        )
+        .ensure_match_loaded(new_match_id, participants)
         .await?;
     Ok(axum::Json(LobbyStatusResponse {
         lobby_id: String::new(),
@@ -1309,10 +1300,10 @@ async fn ready_waiting_lobby(
 ) -> Result<axum::Json<LobbyStatusResponse>, TransportError> {
     validate_state_change_origin(&headers, &state.origins)?;
     let actor = authenticated_account(&state, &headers).await?;
-    let record = ready_lobby(&*state.db, LobbyId::new(lobby_id), actor).await?;
-    let both_ready = lobby_ready(&*state.db, record.id, unix_millis()?).await?;
+    let now = unix_millis()?;
+    let record = ready_lobby(&*state.db, LobbyId::new(lobby_id), actor, now).await?;
+    let both_ready = lobby_ready(&*state.db, record.id, now).await?;
     let record = if both_ready {
-        let now = unix_millis()?;
         let state_match = pwmtf_game_domain::MatchState::new(
             pwmtf_game_domain::RulesProfile::standard(),
             pwmtf_game_domain::PhysicsProfile::standard(),
@@ -1326,10 +1317,18 @@ async fn ready_waiting_lobby(
                 revision: 0,
                 player: state_match.active_player(),
             },
-            due_at: crate::DeadlineMillis::new(now.saturating_add(30_000)),
+            due_at: crate::DeadlineMillis::after_turn(
+                crate::DeadlineMillis::new(now),
+                state_match.rules(),
+            ),
         };
         let match_id = MatchId::new(random_u128()?);
-        start_ready_lobby(&*state.db, record.id, match_id, &state_match, deadline).await?
+        let record =
+            start_ready_lobby(&*state.db, record.id, match_id, &state_match, deadline, now).await?;
+        state
+            .ensure_match_loaded(match_id, record.participants)
+            .await?;
+        record
     } else {
         record
     };

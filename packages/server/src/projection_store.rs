@@ -38,10 +38,7 @@ pub async fn rebuild_match_summaries(
     let mut summaries = Vec::new();
     for row in rows {
         let match_id = MatchId::new(parse_u128(&row, "match_id")?);
-        let participants = Participants {
-            player_one: AccountId::new(parse_u128(&row, "player_one_id")?),
-            player_two: AccountId::new(parse_u128(&row, "player_two_id")?),
-        };
+        let participants = decode_participants(&row)?;
         let revision = unsigned_integer(&row, "canonical_revision")?;
         let snapshot = decode_bytes(&text(&row, "canonical_snapshot")?)?;
         let checksum = parse_u64(&row, "canonical_checksum")?;
@@ -55,6 +52,9 @@ pub async fn rebuild_match_summaries(
         let MatchStatus::Completed(outcome) = state.status() else {
             continue;
         };
+        if revision == 0 {
+            return Err(ProjectionError::Malformed);
+        }
         let winner = match outcome.winner {
             Player::One => participants.player_one,
             Player::Two => participants.player_two,
@@ -98,13 +98,20 @@ pub async fn match_summary(
         .await?;
     match rows.as_slice() {
         [] => Ok(None),
-        [row] => Ok(Some(MatchSummary {
-            match_id,
-            winner: AccountId::new(parse_u128(row, "winner_account_id")?),
-            reason: decode_reason(&text(row, "completion_reason")?)?,
-            revision: unsigned_integer(row, "canonical_revision")?,
-            checksum: parse_u64(row, "canonical_checksum")?,
-        })),
+        [row] => {
+            let winner = AccountId::new(parse_u128(row, "winner_account_id")?);
+            let revision = unsigned_integer(row, "canonical_revision")?;
+            if revision == 0 {
+                return Err(ProjectionError::Malformed);
+            }
+            Ok(Some(MatchSummary {
+                match_id,
+                winner,
+                reason: decode_reason(&text(row, "completion_reason")?)?,
+                revision,
+                checksum: parse_u64(row, "canonical_checksum")?,
+            }))
+        }
         _ => Err(ProjectionError::Malformed),
     }
 }
@@ -137,6 +144,18 @@ fn decode_reason(value: &str) -> Result<CompletionReason, ProjectionError> {
         "illegal-eight-ball" => Ok(CompletionReason::IllegalEightBall),
         "concession" => Ok(CompletionReason::Concession),
         _ => Err(ProjectionError::Malformed),
+    }
+}
+
+fn decode_participants(row: &switchy_database::Row) -> Result<Participants, ProjectionError> {
+    let participants = Participants {
+        player_one: AccountId::new(parse_u128(row, "player_one_id")?),
+        player_two: AccountId::new(parse_u128(row, "player_two_id")?),
+    };
+    if participants.player_one == participants.player_two {
+        Err(ProjectionError::Malformed)
+    } else {
+        Ok(participants)
     }
 }
 
@@ -260,6 +279,22 @@ mod tests {
             assert_eq!(rebuilt.len(), 1);
             assert_eq!(rebuilt[0].winner, AccountId::new(2));
             assert_eq!(rebuilt[0].reason, CompletionReason::Concession);
+            db.update("matches")
+                .value("canonical_revision", 0_i64)
+                .where_eq("match_id", "9")
+                .execute(&*db)
+                .await
+                .unwrap();
+            assert!(matches!(
+                rebuild_match_summaries(&*db).await,
+                Err(ProjectionError::Malformed)
+            ));
+            db.update("matches")
+                .value("canonical_revision", 1_i64)
+                .where_eq("match_id", "9")
+                .execute(&*db)
+                .await
+                .unwrap();
             db.delete("match_summaries").execute(&*db).await.unwrap();
             assert_eq!(match_summary(&*db, MatchId::new(9)).await.unwrap(), None);
             rebuild_match_summaries(&*db).await.unwrap();
@@ -267,6 +302,16 @@ mod tests {
                 match_summary(&*db, MatchId::new(9)).await.unwrap(),
                 Some(rebuilt[0])
             );
+            db.update("match_summaries")
+                .value("canonical_revision", 0_i64)
+                .where_eq("match_id", "9")
+                .execute(&*db)
+                .await
+                .unwrap();
+            assert!(matches!(
+                match_summary(&*db, MatchId::new(9)).await,
+                Err(ProjectionError::Malformed)
+            ));
         });
     }
 }

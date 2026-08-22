@@ -82,10 +82,12 @@ impl BrowserTransport {
         if self.status != ConnectionStatus::Negotiating {
             return Err(TransportClientError::NotReady);
         }
-        let version = response
-            .parse::<u16>()
-            .map_err(|_| TransportClientError::Negotiation)?;
+        let version = response.parse::<u16>().map_err(|_| {
+            self.disconnected();
+            TransportClientError::Negotiation
+        })?;
         if version != PROTOCOL_VERSION {
+            self.disconnected();
             return Err(TransportClientError::Negotiation);
         }
         self.protocol_negotiated = true;
@@ -312,6 +314,11 @@ mod tests {
             transport.negotiated("2"),
             Err(TransportClientError::Negotiation)
         ));
+        assert_eq!(transport.status(), ConnectionStatus::Backoff);
+        assert_eq!(transport.retry_delay_ms(), 500);
+        transport.connecting();
+        let _ = transport.opened();
+        transport.negotiated("1").unwrap();
         assert!(transport.receive_snapshot(&[0, 1]).is_err());
     }
 

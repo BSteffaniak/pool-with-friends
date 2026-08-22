@@ -37,11 +37,32 @@ pub async fn assign_handle(
         return Err(ProfileStoreError::HandleConflict);
     }
 
-    tx.insert("account_profiles")
+    let insert = tx
+        .insert("account_profiles")
         .value("account_id", account_id)
         .value("handle", handle.as_str())
         .execute(&*tx)
-        .await?;
+        .await;
+    if let Err(error) = insert {
+        let account_rows = tx
+            .select("account_profiles")
+            .where_eq("account_id", account.value().to_string())
+            .execute(&*tx)
+            .await?;
+        if let Some(row) = exactly_one_or_none(&account_rows)? {
+            if text(row, "handle")? == handle.as_str() {
+                return Ok(());
+            }
+            return Err(ProfileStoreError::AccountConflict);
+        }
+        if let Some(owner) = account_for_handle(&*tx, handle).await? {
+            if owner == account {
+                return Ok(());
+            }
+            return Err(ProfileStoreError::HandleConflict);
+        }
+        return Err(ProfileStoreError::Database(error));
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -133,6 +154,64 @@ mod tests {
     use futures_lite::future::block_on;
 
     use super::*;
+
+    #[test]
+    fn concurrent_different_handles_for_one_account_have_one_stable_value() {
+        block_on(async {
+            let db: std::sync::Arc<dyn Database> = switchy_database_connection::builder()
+                .turso()
+                .with_in_memory()
+                .build()
+                .await
+                .expect("in-memory Turso opens")
+                .into();
+            crate::migrate(&*db).await.expect("schema migrates");
+            let first_db = std::sync::Arc::clone(&db);
+            let second_db = std::sync::Arc::clone(&db);
+            let first_handle = Handle::new("first_handle").unwrap();
+            let second_handle = Handle::new("second_handle").unwrap();
+            let (first, second) = futures_lite::future::zip(
+                async move { assign_handle(&*first_db, AccountId::new(1), &first_handle).await },
+                async move { assign_handle(&*second_db, AccountId::new(1), &second_handle).await },
+            )
+            .await;
+            assert!(first.is_ok() ^ second.is_ok());
+            let handle = handle_for_account(&*db, AccountId::new(1))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(handle.as_str() == "first_handle" || handle.as_str() == "second_handle");
+        });
+    }
+
+    #[test]
+    fn concurrent_handle_claims_have_one_stable_owner() {
+        block_on(async {
+            let db: std::sync::Arc<dyn Database> = switchy_database_connection::builder()
+                .turso()
+                .with_in_memory()
+                .build()
+                .await
+                .expect("in-memory Turso opens")
+                .into();
+            crate::migrate(&*db).await.expect("schema migrates");
+            let first_db = std::sync::Arc::clone(&db);
+            let second_db = std::sync::Arc::clone(&db);
+            let first_handle = Handle::new("raced_handle").unwrap();
+            let second_handle = first_handle.clone();
+            let (first, second) = futures_lite::future::zip(
+                async move { assign_handle(&*first_db, AccountId::new(1), &first_handle).await },
+                async move { assign_handle(&*second_db, AccountId::new(2), &second_handle).await },
+            )
+            .await;
+            assert!(first.is_ok() ^ second.is_ok());
+            let owner = account_for_handle(&*db, &Handle::new("raced_handle").unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(owner == AccountId::new(1) || owner == AccountId::new(2));
+        });
+    }
 
     #[test]
     fn switchy_handles_are_unique_stable_and_exactly_resolved() {

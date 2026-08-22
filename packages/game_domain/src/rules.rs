@@ -17,6 +17,7 @@ pub const MATCH_COMMAND_RESULT_VERSION: u16 = 1;
 pub const MATCH_STATE_VERSION: u16 = 1;
 /// Current launch rules profile version.
 pub const RULES_PROFILE_VERSION: u16 = 1;
+const TURN_DURATION_MILLIS_V1: u64 = 30_000;
 
 /// Immutable versioned 8-ball rules configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -50,6 +51,15 @@ impl RulesProfile {
     #[must_use]
     pub const fn version(self) -> u16 {
         self.version
+    }
+
+    /// Returns this profile's authoritative turn duration in milliseconds.
+    #[must_use]
+    pub const fn turn_duration_millis(self) -> u64 {
+        match self.version {
+            RULES_PROFILE_VERSION => TURN_DURATION_MILLIS_V1,
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -1657,6 +1667,7 @@ mod tests {
 
     #[test]
     fn unknown_rules_versions_fail_closed() {
+        assert_eq!(RulesProfile::standard().turn_duration_millis(), 30_000);
         assert_eq!(
             RulesProfile::new(2),
             Err(RulesProfileError::UnsupportedVersion(2))

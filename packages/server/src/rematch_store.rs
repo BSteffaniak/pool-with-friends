@@ -66,7 +66,10 @@ pub async fn offer_rematch(
     actor: AccountId,
 ) -> Result<(), RematchStoreError> {
     let tx = db.begin_transaction().await?;
-    let (_, participants, previous) = load_match(&*tx, previous_match_id).await?;
+    let (revision, participants, previous) = load_match(&*tx, previous_match_id).await?;
+    if revision == 0 {
+        return Err(RematchStoreError::Malformed);
+    }
     authorize(participants, actor)?;
     RematchMetadata::from_completed(previous_match_id.value(), &previous)
         .map_err(|_| RematchStoreError::NotCompleted)?;
@@ -113,10 +116,13 @@ pub async fn accept_rematch(
     new_match_id: MatchId,
     actor: AccountId,
     rack_seed: RackSeed,
-    initial_deadline: DeadlineMillis,
+    accepted_at: DeadlineMillis,
 ) -> Result<MatchState, RematchStoreError> {
     let tx = db.begin_transaction().await?;
     let (revision, participants, previous) = load_match(&*tx, previous_match_id).await?;
+    if revision == 0 {
+        return Err(RematchStoreError::Malformed);
+    }
     authorize(participants, actor)?;
     let offer_rows = tx
         .select("rematch_offers")
@@ -147,7 +153,7 @@ pub async fn accept_rematch(
             revision: 0,
             player: state.active_player(),
         },
-        due_at: initial_deadline,
+        due_at: DeadlineMillis::after_turn(accepted_at, state.rules()),
     };
     tx.insert("matches")
         .value("match_id", new_match_id.value().to_string())
@@ -176,8 +182,6 @@ pub async fn accept_rematch(
     if updated.len() != 1 {
         return Err(RematchStoreError::AlreadyAccepted);
     }
-    // The revision is read to ensure malformed persisted revision data fails closed.
-    let _ = revision;
     tx.commit().await?;
     Ok(state)
 }
@@ -239,14 +243,14 @@ async fn load_match(
     if state.checksum() != checksum {
         return Err(RematchStoreError::Malformed);
     }
-    Ok((
-        revision,
-        Participants {
-            player_one: AccountId::new(parse_u128(row, "player_one_id")?),
-            player_two: AccountId::new(parse_u128(row, "player_two_id")?),
-        },
-        state,
-    ))
+    let participants = Participants {
+        player_one: AccountId::new(parse_u128(row, "player_one_id")?),
+        player_two: AccountId::new(parse_u128(row, "player_two_id")?),
+    };
+    if participants.player_one == participants.player_two {
+        return Err(RematchStoreError::Malformed);
+    }
+    Ok((revision, participants, state))
 }
 
 const fn authorize(participants: Participants, actor: AccountId) -> Result<(), RematchStoreError> {
@@ -369,6 +373,14 @@ mod tests {
     }
 
     async fn insert_completed_match(db: &dyn Database, match_id: MatchId) -> MatchState {
+        insert_completed_match_at_revision(db, match_id, 1).await
+    }
+
+    async fn insert_completed_match_at_revision(
+        db: &dyn Database,
+        match_id: MatchId,
+        revision: u64,
+    ) -> MatchState {
         let mut previous = MatchState::new(
             RulesProfile::standard(),
             PhysicsProfile::standard(),
@@ -386,7 +398,7 @@ mod tests {
             .value("match_id", match_id.value().to_string())
             .value("player_one_id", "1")
             .value("player_two_id", "2")
-            .value("canonical_revision", 1_i64)
+            .value("canonical_revision", i64::try_from(revision).unwrap())
             .value("canonical_snapshot", encode_bytes(&previous.to_bytes()))
             .value("canonical_checksum", checksum_i64(previous.checksum()))
             .value(
@@ -401,6 +413,25 @@ mod tests {
             .await
             .unwrap();
         previous
+    }
+
+    #[test]
+    fn completed_snapshot_at_revision_zero_cannot_offer_a_rematch() {
+        block_on(async {
+            let db = database().await;
+            insert_completed_match_at_revision(&*db, MatchId::new(7), 0).await;
+            assert!(matches!(
+                offer_rematch(&*db, MatchId::new(7), AccountId::new(1)).await,
+                Err(RematchStoreError::Malformed)
+            ));
+            assert!(
+                db.select("rematch_offers")
+                    .execute(&*db)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        });
     }
 
     #[test]
@@ -497,6 +528,7 @@ mod tests {
                 .unwrap()
                 .remove(0);
             assert_eq!(text(&row, "previous_match_id").unwrap(), "9");
+            assert_eq!(integer(&row, "deadline_at_ms").unwrap(), 60_000);
             assert!(matches!(
                 accept_rematch(
                     &*db,

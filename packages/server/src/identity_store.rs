@@ -26,13 +26,21 @@ pub async fn link_google_identity(
         return Err(IdentityStoreError::Conflict);
     }
 
-    tx.insert("external_identities")
+    let insert = tx
+        .insert("external_identities")
         .value("identity_id", identity_key(identity))
         .value("issuer", identity.issuer())
         .value("subject", identity.subject())
         .value("account_id", account.value().to_string())
         .execute(&*tx)
-        .await?;
+        .await;
+    if let Err(error) = insert {
+        match account_for_google_identity(&*tx, identity).await? {
+            Some(existing) if existing == account => return Ok(()),
+            Some(_) => return Err(IdentityStoreError::Conflict),
+            None => return Err(IdentityStoreError::Database(error)),
+        }
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -101,6 +109,41 @@ mod tests {
     use futures_lite::future::block_on;
 
     use super::*;
+
+    #[test]
+    fn concurrent_identity_links_have_one_stable_owner() {
+        block_on(async {
+            let db: std::sync::Arc<dyn Database> = switchy_database_connection::builder()
+                .turso()
+                .with_in_memory()
+                .build()
+                .await
+                .expect("in-memory Turso opens")
+                .into();
+            crate::migrate(&*db).await.expect("schema migrates");
+            let identity =
+                GoogleIdentity::verified("https://accounts.google.com", "raced-subject").unwrap();
+            let first_identity = identity.clone();
+            let second_identity = identity.clone();
+            let first_db = std::sync::Arc::clone(&db);
+            let second_db = std::sync::Arc::clone(&db);
+            let (first, second) = futures_lite::future::zip(
+                async move {
+                    link_google_identity(&*first_db, &first_identity, AccountId::new(1)).await
+                },
+                async move {
+                    link_google_identity(&*second_db, &second_identity, AccountId::new(2)).await
+                },
+            )
+            .await;
+            assert!(first.is_ok() ^ second.is_ok());
+            let owner = account_for_google_identity(&*db, &identity)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(owner == AccountId::new(1) || owner == AccountId::new(2));
+        });
+    }
 
     #[test]
     fn switchy_google_identity_is_stable_idempotent_and_conflict_safe() {

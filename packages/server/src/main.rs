@@ -10,7 +10,7 @@ use thiserror::Error;
 const DEFAULT_BIND: &str = "0.0.0.0:8080";
 const DEFAULT_DATABASE_PATH: &str = "/data/pwmtf.db";
 const DEFAULT_CALLBACK: &str = "https://pwmtf.hyperchad.dev/auth/google/callback";
-const OIDC_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+const AUTH_RECORD_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
 #[tokio::main]
 async fn main() {
@@ -51,15 +51,15 @@ async fn run() -> Result<(), StartupError> {
 }
 
 async fn scheduler_loop(state: Arc<HttpState>) {
-    let mut next_oidc_cleanup = 0_u64;
+    let mut next_auth_cleanup = 0_u64;
     loop {
         let now = unix_millis();
-        if now >= next_oidc_cleanup {
-            if let Err(error) = state.cleanup_oidc_attempts(now).await {
-                eprintln!("OIDC attempt cleanup failed: {error}");
+        if now >= next_auth_cleanup {
+            if let Err(error) = state.cleanup_expired_auth_records(now).await {
+                eprintln!("expired authentication record cleanup failed: {error}");
             }
-            next_oidc_cleanup = now.saturating_add(
-                u64::try_from(OIDC_CLEANUP_INTERVAL.as_millis()).unwrap_or(u64::MAX),
+            next_auth_cleanup = now.saturating_add(
+                u64::try_from(AUTH_RECORD_CLEANUP_INTERVAL.as_millis()).unwrap_or(u64::MAX),
             );
         }
         if let Err(error) = state

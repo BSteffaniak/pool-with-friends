@@ -52,10 +52,7 @@ impl SwitchyCommandJournal {
         if integer(row, "canonical_revision").map_err(|_| JournalError)? != 0 {
             return Err(JournalError);
         }
-        let participants = Participants {
-            player_one: AccountId::new(parse_u128(row, "player_one_id").map_err(|_| JournalError)?),
-            player_two: AccountId::new(parse_u128(row, "player_two_id").map_err(|_| JournalError)?),
-        };
+        let participants = decode_participants(row).map_err(|_| JournalError)?;
         let snapshot = decode_bytes(&text(row, "canonical_snapshot").map_err(|_| JournalError)?)
             .map_err(|_| JournalError)?;
         let state = MatchState::from_bytes(&snapshot).map_err(|_| JournalError)?;
@@ -110,10 +107,7 @@ impl SwitchyCommandJournal {
         let [row] = rows.as_slice() else {
             return Err(JournalError);
         };
-        Ok(Participants {
-            player_one: AccountId::new(parse_u128(row, "player_one_id").map_err(|_| JournalError)?),
-            player_two: AccountId::new(parse_u128(row, "player_two_id").map_err(|_| JournalError)?),
-        })
+        decode_participants(row).map_err(|_| JournalError)
     }
 
     /// Creates a journal over an initialized shared Switchy database.
@@ -144,7 +138,7 @@ async fn commit_command(
     let envelope =
         CommandEnvelope::from_bytes(&command.frame).map_err(|_| CommandStoreError::Malformed)?;
     if envelope.command_id != command.command_id
-        || command.revision != envelope.expected_revision + 1
+        || envelope.expected_revision.checked_add(1) != Some(command.revision)
     {
         return Err(CommandStoreError::Malformed);
     }
@@ -281,7 +275,7 @@ fn decode_command(
         return Err(CommandStoreError::Malformed);
     }
     let revision = unsigned_integer(row, "revision")?;
-    if revision != envelope.expected_revision + 1 {
+    if envelope.expected_revision.checked_add(1) != Some(revision) {
         return Err(CommandStoreError::Malformed);
     }
     let snapshot = decode_bytes(&text(row, "snapshot")?)?;
@@ -305,6 +299,18 @@ fn decode_command(
         checksum,
         deadline,
     })
+}
+
+fn decode_participants(row: &switchy_database::Row) -> Result<Participants, CommandStoreError> {
+    let participants = Participants {
+        player_one: AccountId::new(parse_u128(row, "player_one_id")?),
+        player_two: AccountId::new(parse_u128(row, "player_two_id")?),
+    };
+    if participants.player_one == participants.player_two {
+        Err(CommandStoreError::Malformed)
+    } else {
+        Ok(participants)
+    }
 }
 
 fn pinned_match_configuration(
@@ -380,18 +386,18 @@ fn decode_deadline(
     }
 }
 
+/// Durable command persistence failure without retaining backend details.
 #[derive(Debug)]
-#[allow(dead_code)]
 enum CommandStoreError {
-    Database(switchy_database::DatabaseError),
+    Database,
     Malformed,
     StaleRevision,
     Overflow,
 }
 
 impl From<switchy_database::DatabaseError> for CommandStoreError {
-    fn from(value: switchy_database::DatabaseError) -> Self {
-        Self::Database(value)
+    fn from(_: switchy_database::DatabaseError) -> Self {
+        Self::Database
     }
 }
 
@@ -721,7 +727,7 @@ mod tests {
             );
             assert_eq!(recovered.deadline(MatchId::new(9)), accepted.deadline);
             let duplicate = recovered
-                .apply(MatchId::new(9), AccountId::new(1), command)
+                .apply_for_test(MatchId::new(9), AccountId::new(1), command)
                 .await
                 .unwrap();
             assert!(duplicate.duplicate);

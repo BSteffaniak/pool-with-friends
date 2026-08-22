@@ -18,13 +18,38 @@ pub async fn insert_session(
     if session.expires_at <= session.last_used_at {
         return Err(SessionStoreError::InvalidExpiration);
     }
-    db.insert("sessions")
-        .value("session_hash", encode_hash(token_hash))
+    let encoded_hash = encode_hash(token_hash);
+    let insert = db
+        .insert("sessions")
+        .value("session_hash", encoded_hash.clone())
         .value("account_id", session.account.value().to_string())
         .value("expires_at_ms", to_i64(session.expires_at)?)
         .value("last_used_at_ms", to_i64(session.last_used_at)?)
         .execute(db)
-        .await?;
+        .await;
+    if let Err(error) = insert {
+        let rows = db
+            .select("sessions")
+            .where_eq("session_hash", encoded_hash)
+            .execute(db)
+            .await?;
+        let [row] = rows.as_slice() else {
+            return Err(SessionStoreError::Database(error));
+        };
+        let account = row
+            .get("account_id")
+            .and_then(|value| value.as_str().map(ToOwned::to_owned))
+            .and_then(|value| value.parse::<u128>().ok());
+        let expires_at = row.get("expires_at_ms").and_then(|value| value.as_i64());
+        let last_used_at = row.get("last_used_at_ms").and_then(|value| value.as_i64());
+        if account == Some(session.account.value())
+            && expires_at == Some(to_i64(session.expires_at)?)
+            && last_used_at == Some(to_i64(session.last_used_at)?)
+        {
+            return Ok(());
+        }
+        return Err(SessionStoreError::TokenConflict);
+    }
     Ok(())
 }
 
@@ -68,7 +93,8 @@ pub async fn revoke_token(db: &dyn Database, token: &str) -> Result<(), SessionS
     revoke_session(db, token.hash()).await
 }
 
-/// Resolves an unexpired session hash from Switchy storage.
+/// Resolves an unexpired session hash from Switchy storage and atomically
+/// advances its last-use timestamp.
 ///
 /// # Errors
 ///
@@ -78,10 +104,12 @@ pub async fn resolve_session(
     token_hash: SessionTokenHash,
     now: u64,
 ) -> Result<Option<AccountId>, SessionStoreError> {
-    let rows = db
+    let tx = db.begin_transaction().await?;
+    let encoded_hash = encode_hash(token_hash);
+    let rows = tx
         .select("sessions")
-        .where_eq("session_hash", encode_hash(token_hash))
-        .execute(db)
+        .where_eq("session_hash", encoded_hash.clone())
+        .execute(&*tx)
         .await?;
     if rows.len() > 1 {
         return Err(SessionStoreError::Malformed);
@@ -97,14 +125,17 @@ pub async fn resolve_session(
         .get("last_used_at_ms")
         .and_then(|value| value.as_i64())
         .ok_or(SessionStoreError::Malformed)?;
-    if expires_at <= last_used_at || to_i64(now)? < last_used_at {
+    let now = to_i64(now)?;
+    if expires_at <= last_used_at || now < last_used_at {
         return Err(SessionStoreError::Malformed);
     }
-    if expires_at <= to_i64(now)? {
-        db.delete("sessions")
-            .where_eq("session_hash", encode_hash(token_hash))
-            .execute(db)
+    if expires_at <= now {
+        tx.delete("sessions")
+            .where_eq("session_hash", encoded_hash)
+            .where_eq("last_used_at_ms", last_used_at)
+            .execute(&*tx)
             .await?;
+        tx.commit().await?;
         return Ok(None);
     }
     let account = row
@@ -113,7 +144,60 @@ pub async fn resolve_session(
         .ok_or(SessionStoreError::Malformed)?
         .parse::<u128>()
         .map_err(|_| SessionStoreError::Malformed)?;
+    let updated = tx
+        .update("sessions")
+        .value("last_used_at_ms", now)
+        .where_eq("session_hash", encoded_hash)
+        .where_eq("last_used_at_ms", last_used_at)
+        .execute(&*tx)
+        .await?;
+    if updated.len() != 1 {
+        let current = tx
+            .select("sessions")
+            .where_eq("session_hash", encode_hash(token_hash))
+            .execute(&*tx)
+            .await?;
+        let [current] = current.as_slice() else {
+            return Err(SessionStoreError::ConcurrentUse);
+        };
+        let current_account = current
+            .get("account_id")
+            .and_then(|value| value.as_str().map(ToOwned::to_owned))
+            .ok_or(SessionStoreError::Malformed)?
+            .parse::<u128>()
+            .map_err(|_| SessionStoreError::Malformed)?;
+        let current_expiry = current
+            .get("expires_at_ms")
+            .and_then(|value| value.as_i64())
+            .ok_or(SessionStoreError::Malformed)?;
+        let current_last_used = current
+            .get("last_used_at_ms")
+            .and_then(|value| value.as_i64())
+            .ok_or(SessionStoreError::Malformed)?;
+        if current_account == account && current_expiry == expires_at && current_last_used == now {
+            return Ok(Some(AccountId::new(account)));
+        }
+        return Err(SessionStoreError::ConcurrentUse);
+    }
+    tx.commit().await?;
     Ok(Some(AccountId::new(account)))
+}
+
+/// Deletes every expired session by server-clock time.
+///
+/// # Errors
+///
+/// Returns [`SessionStoreError`] when the cutoff exceeds the portable schema or
+/// the cleanup query fails.
+pub async fn cleanup_expired_sessions(
+    db: &dyn Database,
+    now: u64,
+) -> Result<(), SessionStoreError> {
+    db.delete("sessions")
+        .where_lte("expires_at_ms", to_i64(now)?)
+        .execute(db)
+        .await?;
+    Ok(())
 }
 
 /// Revokes a session by deleting only its hash-indexed record.
@@ -147,6 +231,12 @@ pub enum SessionStoreError {
     /// Numeric value cannot be represented by the portable schema.
     #[error("session value exceeds portable schema bounds")]
     Overflow,
+    /// Session token hash already identifies different durable data.
+    #[error("session token hash conflict")]
+    TokenConflict,
+    /// Concurrent session use changed the record during resolution.
+    #[error("session was used concurrently")]
+    ConcurrentUse,
     /// Stored record is malformed.
     #[error("stored session is malformed")]
     Malformed,
@@ -170,6 +260,40 @@ mod tests {
     use futures_lite::future::block_on;
 
     use super::*;
+
+    #[test]
+    fn duplicate_session_insert_is_idempotent_but_conflicts_fail() {
+        block_on(async {
+            let db = switchy_database_connection::builder()
+                .turso()
+                .with_in_memory()
+                .build()
+                .await
+                .expect("in-memory Turso opens");
+            crate::migrate(&*db).await.expect("schema migrates");
+            let hash = SessionTokenHash::new([9; 32]);
+            let session = Session {
+                account: AccountId::new(7),
+                expires_at: 100,
+                last_used_at: 0,
+            };
+            insert_session(&*db, hash, session).await.unwrap();
+            insert_session(&*db, hash, session).await.unwrap();
+            assert!(matches!(
+                insert_session(
+                    &*db,
+                    hash,
+                    Session {
+                        account: AccountId::new(8),
+                        ..session
+                    },
+                )
+                .await,
+                Err(SessionStoreError::TokenConflict)
+            ));
+            assert_eq!(db.select("sessions").execute(&*db).await.unwrap().len(), 1);
+        });
+    }
 
     #[test]
     fn generated_session_persists_only_hash_and_resolves_raw_token() {
@@ -207,6 +331,76 @@ mod tests {
             );
             revoke_token(&*db, token.expose()).await.unwrap();
             assert_eq!(resolve_token(&*db, token.expose(), 50).await.unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn concurrent_same_timestamp_session_use_is_idempotent() {
+        block_on(async {
+            let db: std::sync::Arc<dyn Database> = switchy_database_connection::builder()
+                .turso()
+                .with_in_memory()
+                .build()
+                .await
+                .expect("in-memory Turso opens")
+                .into();
+            crate::migrate(&*db).await.expect("schema migrates");
+            let hash = SessionTokenHash::new([8; 32]);
+            insert_session(
+                &*db,
+                hash,
+                Session {
+                    account: AccountId::new(7),
+                    expires_at: 100,
+                    last_used_at: 0,
+                },
+            )
+            .await
+            .unwrap();
+            let first_db = std::sync::Arc::clone(&db);
+            let second_db = std::sync::Arc::clone(&db);
+            let (first, second) = futures_lite::future::zip(
+                async move { resolve_session(&*first_db, hash, 50).await },
+                async move { resolve_session(&*second_db, hash, 50).await },
+            )
+            .await;
+            assert_eq!(first.unwrap(), Some(AccountId::new(7)));
+            assert_eq!(second.unwrap(), Some(AccountId::new(7)));
+        });
+    }
+
+    #[test]
+    fn scheduled_cleanup_removes_all_expired_sessions() {
+        block_on(async {
+            let db = switchy_database_connection::builder()
+                .turso()
+                .with_in_memory()
+                .build()
+                .await
+                .expect("in-memory Turso opens");
+            crate::migrate(&*db).await.expect("schema migrates");
+            for (hash, expires_at) in [([1; 32], 100), ([2; 32], 101), ([3; 32], 99)] {
+                insert_session(
+                    &*db,
+                    SessionTokenHash::new(hash),
+                    Session {
+                        account: AccountId::new(42),
+                        expires_at,
+                        last_used_at: 0,
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            cleanup_expired_sessions(&*db, 100).await.unwrap();
+            let rows = db.select("sessions").execute(&*db).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0]
+                    .get("expires_at_ms")
+                    .and_then(|value| value.as_i64()),
+                Some(101)
+            );
         });
     }
 
@@ -278,6 +472,11 @@ mod tests {
             assert_eq!(
                 resolve_session(&*db, hash, 50).await.unwrap(),
                 Some(AccountId::new(42))
+            );
+            let row = db.select("sessions").execute(&*db).await.unwrap().remove(0);
+            assert_eq!(
+                row.get("last_used_at_ms").and_then(|value| value.as_i64()),
+                Some(50)
             );
             assert_eq!(resolve_session(&*db, hash, 100).await.unwrap(), None);
             assert!(
