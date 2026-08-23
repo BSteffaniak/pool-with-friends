@@ -1951,16 +1951,8 @@ async function refreshSocialState() {
     renderRematches(rematches);
     renderLobbyList(lobbies);
     const current = activeLobbyId === null ? null : String(activeLobbyId);
-    const candidate = lobbies.find((lobby) => lobby.status === "waiting")
-      ?? lobbies.find((lobby) => lobby.status === "started")
-      ?? null;
+    const candidate = lobbies.find((lobby) => lobby.status === "waiting") ?? null;
     if (candidate !== null && candidate.lobby_id !== current) {
-      if (candidate.status === "started" && candidate.match_id !== null) {
-        const url = new URL(window.location.href);
-        setMatchLocation(url, candidate.match_id);
-        window.location.assign(url);
-        return;
-      }
       enterLobby(candidate);
     }
   } catch (error) {
@@ -1971,7 +1963,7 @@ async function refreshSocialState() {
 }
 
 function startSocialPolling() {
-  if (socialPollTimer !== null) {
+  if (socialPollTimer !== null || new URLSearchParams(window.location.search).has("match")) {
     return;
   }
   const poll = async () => {

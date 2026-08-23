@@ -136,19 +136,6 @@ fn presentation_tier() -> &'static str {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn browser_match_requested() -> bool {
-    web_sys::window()
-        .and_then(|window| window.location().search().ok())
-        .is_some_and(|search| {
-            search
-                .trim_start_matches('?')
-                .split('&')
-                .filter_map(|pair| pair.split_once('='))
-                .any(|(key, value)| key == "match" && !value.is_empty())
-        })
-}
-
-#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 /// Connects the browser to an authorized same-origin match subscription.
 ///
@@ -432,9 +419,7 @@ fn setup(
     )
     .expect("built-in canonical match configuration is valid");
     #[cfg(target_arch = "wasm32")]
-    if !browser_match_requested() {
-        presentation.project(&initial);
-    }
+    presentation.project(&initial);
     #[cfg(not(target_arch = "wasm32"))]
     presentation.project(&initial);
     commands.spawn((
