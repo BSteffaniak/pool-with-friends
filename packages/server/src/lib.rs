@@ -50,7 +50,7 @@ pub use lobby::{
 };
 pub use lobby_store::{
     LobbyStoreError, cancel_lobby, connect_lobby, disconnect_lobby, heartbeat_lobby, load_lobby,
-    lobby_ready, ready_lobby, start_ready_lobby,
+    lobbies_for_account, lobby_ready, ready_lobby, start_ready_lobby,
 };
 pub use migrations::{migrate, migrations};
 pub use oidc::{GOOGLE_ISSUER, GoogleOidcClient, GoogleOidcError, OidcAttempt};

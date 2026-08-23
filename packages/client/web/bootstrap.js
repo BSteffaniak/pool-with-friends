@@ -15,6 +15,7 @@ const challengeForm = document.querySelector("#challenge-form");
 const challengeHandle = document.querySelector("#challenge-handle");
 const challengeList = document.querySelector("#challenge-list");
 const rematchList = document.querySelector("#rematch-list");
+const lobbyList = document.querySelector("#lobby-list");
 const offerRematchButton = document.querySelector("#offer-rematch");
 const concedeMatchButton = document.querySelector("#concede-match");
 const matchStatus = document.querySelector("#match-status");
@@ -1599,6 +1600,8 @@ let matchAccessRefreshPendingRevision = null;
 let activeLobbyId = null;
 let activeLobbyConnectionId = null;
 let lobbyPollTimer = null;
+let socialPollTimer = null;
+let socialRefreshInFlight = false;
 let wasmModule = null;
 
 function applyMatchAccess(access, requestedAtMs = Date.now(), receivedAtMs = Date.now()) {
@@ -1897,6 +1900,7 @@ function startMatchSocket(module) {
   window.addEventListener("pagehide", () => {
     window.clearInterval(monitor);
     stopLobbyPolling();
+    stopSocialPolling();
     void disconnectLobbyPresence().catch(() => {});
     if (matchReconnectTimer !== null) {
       window.clearTimeout(matchReconnectTimer);
@@ -1907,6 +1911,77 @@ function startMatchSocket(module) {
 }
 
 let runtimeAuth = { development_login: false, google_login: true };
+
+function renderLobbyList(lobbies) {
+  lobbyList.replaceChildren();
+  for (const lobby of lobbies) {
+    const row = document.createElement("div");
+    row.className = "social-row";
+    const label = document.createElement("span");
+    label.textContent = lobby.status === "started" ? "Started match" : "Waiting lobby";
+    const open = document.createElement("button");
+    open.type = "button";
+    open.textContent = "Open";
+    open.addEventListener("click", () => {
+      if (lobby.status === "started" && lobby.match_id !== null) {
+        const url = new URL(window.location.href);
+        setMatchLocation(url, lobby.match_id);
+        window.location.assign(url);
+      } else {
+        enterLobby(lobby);
+      }
+    });
+    row.append(label, open);
+    lobbyList.append(row);
+  }
+}
+
+async function refreshSocialState() {
+  if (socialRefreshInFlight || document.visibilityState === "hidden") {
+    return;
+  }
+  socialRefreshInFlight = true;
+  try {
+    await Promise.all([refreshChallenges(), refreshRematches()]);
+    const lobbies = await apiRequest("/api/lobbies");
+    renderLobbyList(lobbies);
+    const current = activeLobbyId === null ? null : String(activeLobbyId);
+    const candidate = lobbies.find((lobby) => lobby.status === "waiting")
+      ?? lobbies.find((lobby) => lobby.status === "started")
+      ?? null;
+    if (candidate !== null && candidate.lobby_id !== current) {
+      if (candidate.status === "started" && candidate.match_id !== null) {
+        const url = new URL(window.location.href);
+        setMatchLocation(url, candidate.match_id);
+        window.location.assign(url);
+        return;
+      }
+      enterLobby(candidate);
+    }
+  } catch (error) {
+    socialFailure(error);
+  } finally {
+    socialRefreshInFlight = false;
+  }
+}
+
+function startSocialPolling() {
+  if (socialPollTimer !== null) {
+    return;
+  }
+  const poll = async () => {
+    await refreshSocialState();
+    socialPollTimer = window.setTimeout(poll, 1_000);
+  };
+  socialPollTimer = window.setTimeout(poll, 1_000);
+}
+
+function stopSocialPolling() {
+  if (socialPollTimer !== null) {
+    window.clearTimeout(socialPollTimer);
+    socialPollTimer = null;
+  }
+}
 
 async function refreshSession() {
   const response = await fetch("/api/session", {
@@ -1920,6 +1995,7 @@ async function refreshSession() {
     developmentSignIn.hidden = !runtimeAuth.development_login;
     signOut.hidden = true;
     socialPanel.hidden = true;
+    stopSocialPolling();
     return;
   }
   if (!response.ok) {
@@ -1932,7 +2008,8 @@ async function refreshSession() {
   developmentSignIn.hidden = true;
   signOut.hidden = false;
   socialPanel.hidden = false;
-  await Promise.all([refreshChallenges(), refreshRematches()]);
+  await refreshSocialState();
+  startSocialPolling();
   return session;
 }
 
@@ -1990,11 +2067,6 @@ async function pollLobby() {
     return;
   }
   try {
-    if (activeLobbyConnectionId !== null) {
-      await apiRequest(`/api/lobbies/${activeLobbyId}/connections/${activeLobbyConnectionId}`, {
-        method: "POST",
-      });
-    }
     const lobby = await apiRequest(`/api/lobbies/${activeLobbyId}`);
     lobbyState.textContent =
       lobby.status === "waiting"
@@ -2004,6 +2076,7 @@ async function pollLobby() {
         : lobby.status;
     if (lobby.status === "started" && lobby.match_id !== null) {
       stopLobbyPolling();
+      activeLobbyConnectionId = null;
       const url = new URL(window.location.href);
       setMatchLocation(url, lobby.match_id);
       window.location.assign(url);
@@ -2012,8 +2085,15 @@ async function pollLobby() {
     if (lobby.status === "cancelled") {
       stopLobbyPolling();
       activeLobbyId = null;
+      activeLobbyConnectionId = null;
       cancelLobbyButton.hidden = true;
       readyLobbyButton.hidden = true;
+      return;
+    }
+    if (activeLobbyConnectionId !== null) {
+      await apiRequest(`/api/lobbies/${activeLobbyId}/connections/${activeLobbyConnectionId}`, {
+        method: "POST",
+      });
     }
   } catch (error) {
     socialFailure(error);
@@ -2024,14 +2104,21 @@ async function pollLobby() {
 }
 
 function enterLobby(lobby) {
+  const nextLobbyId = String(lobby.lobby_id);
+  if (activeLobbyId === nextLobbyId && activeLobbyConnectionId !== null) {
+    return;
+  }
   stopLobbyPolling();
-  activeLobbyId = lobby.lobby_id;
+  activeLobbyId = nextLobbyId;
   lobbyPanel.hidden = false;
   lobbyLabel.textContent = `Lobby ${lobby.lobby_id}`;
   lobbyState.textContent = "Waiting for both players";
   cancelLobbyButton.hidden = false;
   readyLobbyButton.hidden = false;
   socialStatus.textContent = `Joined waiting lobby ${lobby.lobby_id}.`;
+  if (activeLobbyId !== null && activeLobbyConnectionId === null) {
+    socialStatus.textContent = "Connecting to lobby…";
+  }
   void apiRequest(`/api/lobbies/${lobby.lobby_id}`, { method: "POST" })
     .then((connection) => {
       activeLobbyConnectionId = connection.connection_id;

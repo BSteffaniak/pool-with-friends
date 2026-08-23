@@ -325,6 +325,41 @@ async fn start_lobby_in_transaction(
     Ok(())
 }
 
+/// Returns durable lobbies belonging to one participant in stable identifier order.
+///
+/// # Errors
+///
+/// Returns [`LobbyStoreError`] for malformed records or database failures.
+pub async fn lobbies_for_account(
+    db: &dyn Database,
+    account: AccountId,
+) -> Result<Vec<LobbyRecord>, LobbyStoreError> {
+    let account_id = account.value().to_string();
+    let player_one = db
+        .select("waiting_lobbies")
+        .where_eq("player_one_id", account_id.clone())
+        .execute(db)
+        .await?;
+    let player_two = db
+        .select("waiting_lobbies")
+        .where_eq("player_two_id", account_id)
+        .execute(db)
+        .await?;
+    let mut records = player_one
+        .iter()
+        .chain(&player_two)
+        .map(decode_lobby)
+        .collect::<Result<Vec<_>, _>>()?;
+    records.sort_by_key(|record| record.id);
+    records.dedup_by_key(|record| record.id);
+    if records.iter().any(|record| {
+        account != record.participants.player_one && account != record.participants.player_two
+    }) {
+        return Err(LobbyStoreError::Malformed);
+    }
+    Ok(records)
+}
+
 /// Loads one durable waiting-lobby record.
 ///
 /// # Errors

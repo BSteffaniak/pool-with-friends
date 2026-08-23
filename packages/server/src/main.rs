@@ -413,8 +413,8 @@ mod tests {
 
     #[test]
     fn development_mode_and_insecure_feature_must_agree() {
-        assert_eq!(validate_development_mode(false, false).unwrap(), false);
-        assert_eq!(validate_development_mode(true, true).unwrap(), true);
+        assert!(!validate_development_mode(false, false).unwrap());
+        assert!(validate_development_mode(true, true).unwrap());
         assert!(validate_development_mode(true, false).is_err());
         assert!(validate_development_mode(false, true).is_err());
     }

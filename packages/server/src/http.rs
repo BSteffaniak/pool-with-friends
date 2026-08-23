@@ -28,9 +28,10 @@ use crate::{
     SwitchyCommandJournal, accept_challenge_into_lobby, account_for_handle, assign_handle,
     cancel_lobby, claim_oidc_attempt, connect_lobby, create_challenge, create_oidc_attempt,
     create_stored_session, disconnect_lobby, generate_invitation, handle_for_account,
-    heartbeat_lobby, link_google_identity, load_lobby, lobby_ready, offer_rematch,
-    pending_challenges_for, pending_rematches_for, ready_lobby, redeem_invitation_token_into_lobby,
-    resolve_session_token, revoke_session_token, start_ready_lobby,
+    heartbeat_lobby, link_google_identity, load_lobby, lobbies_for_account, lobby_ready,
+    offer_rematch, pending_challenges_for, pending_rematches_for, ready_lobby,
+    redeem_invitation_token_into_lobby, resolve_session_token, revoke_session_token,
+    start_ready_lobby,
 };
 use pwmtf_protocol::{
     CommandEnvelope, MAX_FRAME_BYTES, MAX_SNAPSHOT_FRAME_BYTES, SnapshotEnvelope, negotiate_version,
@@ -441,6 +442,7 @@ pub fn router(state: Arc<HttpState>) -> Router {
             "/api/invitations/redeem",
             axum::routing::post(redeem_invitation_link),
         )
+        .route("/api/lobbies", get(list_account_lobbies))
         .route(
             "/api/lobbies/{lobby_id}",
             get(lobby_status)
@@ -1469,6 +1471,24 @@ struct LobbyStatusResponse {
     match_id: Option<String>,
     both_ready: bool,
     connection_id: Option<String>,
+}
+
+async fn list_account_lobbies(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+) -> Result<axum::Json<Vec<LobbyStatusResponse>>, TransportError> {
+    let actor = authenticated_account(&state, &headers).await?;
+    let records = lobbies_for_account(&*state.db, actor).await?;
+    let mut response = Vec::with_capacity(records.len());
+    for record in records {
+        let both_ready = if record.status == crate::LobbyStatus::Waiting {
+            lobby_ready(&*state.db, record.id, unix_millis()?).await?
+        } else {
+            false
+        };
+        response.push(lobby_status_response(record, both_ready));
+    }
+    Ok(axum::Json(response))
 }
 
 #[derive(Debug, serde::Serialize)]

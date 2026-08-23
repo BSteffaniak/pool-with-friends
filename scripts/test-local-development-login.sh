@@ -81,4 +81,38 @@ curl --fail --silent --show-error --cookie "$tmp/cookies-two" \
     "http://127.0.0.1:$port/api/challenges" \
     | jq -e 'length == 1 and .[0].from_handle == "local_one"' >/dev/null
 
-printf '%s\n' "local username login and two-user social entry acceptance passed"
+invitation_url=$(curl --fail --silent --show-error --cookie "$tmp/cookies" \
+    --request POST --header "Origin: http://127.0.0.1:$port" \
+    --header "X-PWMTF-Origin: http://127.0.0.1:$port" \
+    "http://127.0.0.1:$port/api/invitations" | jq -r '.invitation_url')
+invitation_token=${invitation_url#*?invite=}
+lobby_id=$(curl --fail --silent --show-error --cookie "$tmp/cookies-two" \
+    --request POST --header "Origin: http://127.0.0.1:$port" \
+    --header "X-PWMTF-Origin: http://127.0.0.1:$port" \
+    --header 'Content-Type: application/json' \
+    --data "{\"token\":\"$invitation_token\"}" \
+    "http://127.0.0.1:$port/api/invitations/redeem" | jq -r '.lobby_id')
+curl --fail --silent --show-error --cookie "$tmp/cookies" \
+    "http://127.0.0.1:$port/api/lobbies" \
+    | jq -e --arg lobby "$lobby_id" 'any(.[]; .lobby_id == $lobby and .status == "waiting")' >/dev/null
+connection_one=$(curl --fail --silent --show-error --cookie "$tmp/cookies" \
+    --request POST --header "Origin: http://127.0.0.1:$port" \
+    --header "X-PWMTF-Origin: http://127.0.0.1:$port" \
+    "http://127.0.0.1:$port/api/lobbies/$lobby_id" | jq -r '.connection_id')
+connection_two=$(curl --fail --silent --show-error --cookie "$tmp/cookies-two" \
+    --request POST --header "Origin: http://127.0.0.1:$port" \
+    --header "X-PWMTF-Origin: http://127.0.0.1:$port" \
+    "http://127.0.0.1:$port/api/lobbies/$lobby_id" | jq -r '.connection_id')
+[ -n "$connection_one" ]
+[ -n "$connection_two" ]
+curl --fail --silent --show-error --cookie "$tmp/cookies" \
+    --request POST --header "Origin: http://127.0.0.1:$port" \
+    --header "X-PWMTF-Origin: http://127.0.0.1:$port" \
+    "http://127.0.0.1:$port/api/lobbies/$lobby_id/ready" >/dev/null
+match_id=$(curl --fail --silent --show-error --cookie "$tmp/cookies-two" \
+    --request POST --header "Origin: http://127.0.0.1:$port" \
+    --header "X-PWMTF-Origin: http://127.0.0.1:$port" \
+    "http://127.0.0.1:$port/api/lobbies/$lobby_id/ready" | jq -r '.match_id')
+[ "$match_id" != null ]
+
+printf '%s\n' "local username login, social discovery, lobby readiness, and match start acceptance passed"
