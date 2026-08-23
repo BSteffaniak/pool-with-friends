@@ -97,7 +97,7 @@ pub async fn accept_challenge_into_lobby(
     id: ChallengeId,
     actor: AccountId,
     lobby_id: LobbyId,
-) -> Result<Participants, SocialStoreError> {
+) -> Result<(Participants, LobbyId), SocialStoreError> {
     let tx = db.begin_transaction().await?;
     let rows = tx
         .select("challenges")
@@ -105,7 +105,22 @@ pub async fn accept_challenge_into_lobby(
         .execute(&*tx)
         .await?;
     let row = exactly_one(&rows)?;
-    if text(row, "status")? != "pending" {
+    let status = text(row, "status")?;
+    if let Some(lobby_id) = status.strip_prefix("accepted:") {
+        let lobby_id = lobby_id
+            .parse::<u128>()
+            .map(LobbyId::new)
+            .map_err(|_| SocialStoreError::Malformed)?;
+        let participants = Participants {
+            player_one: account(row, "from_account_id")?,
+            player_two: account(row, "to_account_id")?,
+        };
+        if actor != participants.player_two {
+            return Err(SocialStoreError::Unauthorized);
+        }
+        return Ok((participants, lobby_id));
+    }
+    if status != "pending" {
         return Err(SocialStoreError::AlreadyUsed);
     }
     let participants = Participants {
@@ -138,7 +153,7 @@ pub async fn accept_challenge_into_lobby(
         return Err(SocialStoreError::AlreadyUsed);
     }
     tx.commit().await?;
-    Ok(participants)
+    Ok((participants, lobby_id))
 }
 
 /// Generates an opaque invitation and persists only its hash, returning the raw
@@ -554,21 +569,31 @@ mod tests {
                 )
                 .await
                 .unwrap(),
-                Participants {
-                    player_one: AccountId::new(1),
-                    player_two: AccountId::new(2)
-                }
+                (
+                    Participants {
+                        player_one: AccountId::new(1),
+                        player_two: AccountId::new(2)
+                    },
+                    LobbyId::new(10)
+                )
             );
-            assert!(matches!(
+            assert_eq!(
                 accept_challenge_into_lobby(
                     &*db,
                     ChallengeId::new(1),
                     AccountId::new(2),
                     LobbyId::new(11)
                 )
-                .await,
-                Err(SocialStoreError::AlreadyUsed)
-            ));
+                .await
+                .unwrap(),
+                (
+                    Participants {
+                        player_one: AccountId::new(1),
+                        player_two: AccountId::new(2)
+                    },
+                    LobbyId::new(10)
+                )
+            );
             assert_eq!(
                 db.select("waiting_lobbies")
                     .execute(&*db)

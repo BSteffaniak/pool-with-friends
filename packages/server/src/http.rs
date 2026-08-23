@@ -1410,9 +1410,14 @@ async fn accept_challenge(
 ) -> Result<axum::Json<LobbyResponse>, TransportError> {
     validate_state_change_origin(&headers, &state.origins)?;
     let actor = authenticated_account(&state, &headers).await?;
-    let lobby_id = LobbyId::new(random_u128()?);
-    accept_challenge_into_lobby(&*state.db, ChallengeId::new(challenge_id), actor, lobby_id)
-        .await?;
+    let requested_lobby_id = LobbyId::new(random_u128()?);
+    let (_, lobby_id) = accept_challenge_into_lobby(
+        &*state.db,
+        ChallengeId::new(challenge_id),
+        actor,
+        requested_lobby_id,
+    )
+    .await?;
     Ok(axum::Json(lobby_response(lobby_id)))
 }
 

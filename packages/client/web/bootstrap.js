@@ -1942,8 +1942,13 @@ async function refreshSocialState() {
   }
   socialRefreshInFlight = true;
   try {
-    await Promise.all([refreshChallenges(), refreshRematches()]);
-    const lobbies = await apiRequest("/api/lobbies");
+    const [challenges, rematches, lobbies] = await Promise.all([
+      loadPendingChallenges(),
+      loadPendingRematches(),
+      apiRequest("/api/lobbies"),
+    ]);
+    renderChallenges(challenges);
+    renderRematches(rematches);
     renderLobbyList(lobbies);
     const current = activeLobbyId === null ? null : String(activeLobbyId);
     const candidate = lobbies.find((lobby) => lobby.status === "waiting")
@@ -1959,7 +1964,7 @@ async function refreshSocialState() {
       enterLobby(candidate);
     }
   } catch (error) {
-    socialFailure(error);
+    socialBackgroundFailure(error);
   } finally {
     socialRefreshInFlight = false;
   }
@@ -2037,6 +2042,10 @@ function apiRequest(path, options = {}) {
 function socialFailure(error) {
   console.error("PWMTF social operation failed", error);
   socialStatus.textContent = error instanceof Error ? error.message : "Operation failed";
+}
+
+function socialBackgroundFailure(error) {
+  console.error("PWMTF social refresh failed", error);
 }
 
 function stopLobbyPolling() {
@@ -2172,8 +2181,11 @@ async function acceptRematch(matchId) {
   }
 }
 
-async function refreshRematches() {
-  const rematches = await apiRequest("/api/rematches");
+async function loadPendingRematches() {
+  return apiRequest("/api/rematches");
+}
+
+function renderRematches(rematches) {
   rematchList.replaceChildren();
   if (rematches.length === 0) {
     rematchList.textContent = "No rematch offers.";
@@ -2190,6 +2202,10 @@ async function refreshRematches() {
     row.append(label, accept);
     rematchList.append(row);
   }
+}
+
+async function refreshRematches() {
+  renderRematches(await loadPendingRematches());
 }
 
 async function offerRematch(matchId) {
@@ -2216,19 +2232,28 @@ if (/^\d{1,39}$/.test(currentMatchId ?? "")) {
   offerRematchButton.hidden = true;
 }
 
-async function acceptChallenge(challengeId) {
+async function acceptChallenge(challengeId, button) {
+  if (button.disabled) {
+    return;
+  }
+  button.disabled = true;
   socialStatus.textContent = "Accepting challenge…";
   try {
     const lobby = await apiRequest(`/api/challenges/${challengeId}/accept`, { method: "POST" });
     enterLobby(lobby);
-    await refreshChallenges();
+    await refreshSocialState();
   } catch (error) {
     socialFailure(error);
+  } finally {
+    button.disabled = false;
   }
 }
 
-async function refreshChallenges() {
-  const challenges = await apiRequest("/api/challenges");
+async function loadPendingChallenges() {
+  return apiRequest("/api/challenges");
+}
+
+function renderChallenges(challenges) {
   challengeList.replaceChildren();
   if (challenges.length === 0) {
     challengeList.textContent = "No incoming challenges.";
@@ -2241,7 +2266,7 @@ async function refreshChallenges() {
     const accept = document.createElement("button");
     accept.type = "button";
     accept.textContent = "Accept";
-    accept.addEventListener("click", () => void acceptChallenge(challenge.challenge_id));
+    accept.addEventListener("click", () => void acceptChallenge(challenge.challenge_id, accept));
     row.append(label, accept);
     challengeList.append(row);
   }
@@ -2261,6 +2286,10 @@ handleForm.addEventListener("submit", async (event) => {
     socialFailure(error);
   }
 });
+
+async function refreshChallenges() {
+  renderChallenges(await loadPendingChallenges());
+}
 
 challengeForm.addEventListener("submit", async (event) => {
   event.preventDefault();
