@@ -1,0 +1,164 @@
+//! Geometric first-contact aiming aids, never authoritative shot simulation.
+use crate::{
+    BALL_RADIUS, CanonicalPresentation, PrototypeInput, canonical_to_world, sandbox::Sandbox,
+};
+use bevy::prelude::*;
+
+fn circle_hit(origin: Vec2, direction: Vec2, center: Vec2, radius: f32) -> Option<f32> {
+    let offset = center - origin;
+    let along = offset.dot(direction);
+    let perpendicular = along.mul_add(-along, offset.length_squared());
+    if along <= 0.0 || perpendicular > radius * radius {
+        return None;
+    }
+    let distance = along - (radius.mul_add(radius, -perpendicular)).max(0.0).sqrt();
+    (distance >= 0.0).then_some(distance)
+}
+
+fn rail_hit(origin: Vec2, direction: Vec2, segments: &[(Vec2, Vec2)]) -> f32 {
+    let mut nearest = 1400.0_f32;
+    for &(a, b) in segments {
+        let tangent = (b - a).normalize();
+        let normal = Vec2::new(-tangent.y, tangent.x);
+        let denominator = direction.dot(normal);
+        if denominator.abs() > 0.0001 {
+            for side in [-1.0_f32, 1.0] {
+                let distance = side.mul_add(BALL_RADIUS, (a - origin).dot(normal)) / denominator;
+                let along = (origin + direction * distance - a).dot(tangent);
+                if distance >= 0.0 && along >= 0.0 && along <= a.distance(b) {
+                    nearest = nearest.min(distance);
+                }
+            }
+        }
+        for endpoint in [a, b] {
+            if let Some(distance) = circle_hit(origin, direction, endpoint, BALL_RADIUS) {
+                nearest = nearest.min(distance);
+            }
+        }
+    }
+    nearest
+}
+
+fn first_hit(
+    origin: Vec2,
+    direction: Vec2,
+    balls: &std::collections::BTreeMap<u8, Vec2>,
+    rail_distance: f32,
+) -> (f32, Option<Vec2>) {
+    let mut distance = rail_distance;
+    let mut target = None;
+    for (&number, &center) in balls {
+        if number == 0 {
+            continue;
+        }
+        if let Some(hit) = circle_hit(origin, direction, center, BALL_RADIUS * 2.0)
+            && hit < distance
+        {
+            distance = hit;
+            target = Some(center);
+        }
+    }
+    (distance, target)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub fn draw(
+    mut gizmos: Gizmos,
+    presentation: Res<CanonicalPresentation>,
+    input: Res<PrototypeInput>,
+    sandbox: Res<Sandbox>,
+) {
+    let enabled = sandbox.enabled && !sandbox.moving;
+    #[cfg(target_arch = "wasm32")]
+    let enabled = enabled || crate::browser_transport::accepts_active_player_command();
+    if !enabled {
+        return;
+    }
+    #[cfg(target_arch = "wasm32")]
+    if input.placing_cue_ball {
+        return;
+    }
+    let Some(&origin) = presentation.target.get(&0) else {
+        return;
+    };
+    let direction = Vec2::from_angle(input.aim_angle);
+    let segments: Vec<_> = pwmtf_game_domain::TableGeometry::standard()
+        .cushion_segments()
+        .into_iter()
+        .map(|(a, b)| (canonical_to_world(a), canonical_to_world(b)))
+        .collect();
+    let (distance, target) = first_hit(
+        origin,
+        direction,
+        &presentation.target,
+        rail_hit(origin, direction, &segments).min(500.0),
+    );
+    let contact = origin + direction * distance;
+    let white = Color::srgba(0.96, 0.96, 0.86, 0.75);
+    if distance > BALL_RADIUS {
+        gizmos.line_2d(origin + direction * BALL_RADIUS, contact, white);
+    }
+    let Some(target) = target else {
+        return;
+    };
+    gizmos.circle_2d(contact, BALL_RADIUS, white);
+    let normal = (target - contact).normalize_or_zero();
+    let transfer = direction.dot(normal).clamp(0.0, 1.0);
+    let tangent = direction - normal * transfer;
+    let length = (transfer * 100.0).min(rail_hit(target, normal, &segments));
+    if length > BALL_RADIUS {
+        gizmos.line_2d(
+            target + normal * BALL_RADIUS,
+            target + normal * length,
+            Color::srgb(0.95, 0.72, 0.25),
+        );
+    }
+    if tangent.length() > 0.05 {
+        let heading = tangent.normalize();
+        let length = (tangent.length() * 80.0).min(rail_hit(contact, heading, &segments));
+        if length > BALL_RADIUS {
+            gizmos.line_2d(
+                contact + heading * BALL_RADIUS,
+                contact + heading * length,
+                white,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn nearest_ball_wins_and_balls_behind_are_ignored() {
+        let balls = [
+            (1, Vec2::new(100.0, 0.0)),
+            (2, Vec2::new(50.0, 0.0)),
+            (3, Vec2::new(-30.0, 0.0)),
+        ]
+        .into_iter()
+        .collect();
+        let (distance, target) = first_hit(Vec2::ZERO, Vec2::X, &balls, 200.0);
+        assert!((distance - (BALL_RADIUS.mul_add(-2.0, 50.0))).abs() < 0.001);
+        assert_eq!(target, Some(Vec2::new(50.0, 0.0)));
+        assert_eq!(first_hit(Vec2::ZERO, Vec2::X, &balls, 10.0).1, None);
+    }
+    #[test]
+    fn rail_contact_accounts_for_ball_radius() {
+        let distance = rail_hit(
+            Vec2::ZERO,
+            Vec2::X,
+            &[(Vec2::new(100.0, -50.0), Vec2::new(100.0, 50.0))],
+        );
+        assert!((distance - (100.0 - BALL_RADIUS)).abs() < 0.001);
+        assert!(
+            circle_hit(
+                Vec2::ZERO,
+                Vec2::X,
+                Vec2::new(100.0, BALL_RADIUS * 3.0),
+                BALL_RADIUS * 2.0
+            )
+            .is_none()
+        );
+    }
+}

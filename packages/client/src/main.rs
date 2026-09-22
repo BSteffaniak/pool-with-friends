@@ -6,6 +6,7 @@
 pub mod browser_transport;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::wasm_bindgen;
+mod aim_preview;
 mod ball_art;
 pub mod prediction;
 mod sandbox;
@@ -49,9 +50,6 @@ struct CanonicalBall(u8);
 
 #[derive(Component)]
 struct Cue;
-
-#[derive(Component)]
-struct AimGuide;
 
 #[derive(Component)]
 struct PowerFill;
@@ -475,6 +473,7 @@ fn main() {
                 rearm_input_after_valid_landscape,
                 update_sandbox,
                 update_input,
+                aim_preview::draw,
                 update_aim,
                 #[cfg(target_arch = "wasm32")]
                 synchronize_canonical_presentation,
@@ -561,12 +560,6 @@ fn setup(
         &mut ball_materials,
         &presentation,
     );
-    commands.spawn((
-        Sprite::from_color(Color::srgba(0.95, 0.95, 0.85, 0.68), Vec2::new(370.0, 3.0)),
-        Transform::from_xyz(-145.0, 0.0, 6.0),
-        AimGuide,
-        MatchControlChrome,
-    ));
     commands.spawn((
         Sprite::from_color(Color::srgb(0.72, 0.40, 0.13), Vec2::new(420.0, 11.0)),
         Transform::from_xyz(-552.0, 0.0, 7.0),
@@ -1126,12 +1119,8 @@ fn release_shot(input: &PrototypeInput) -> Result<(), wasm_bindgen::JsValue> {
 fn update_aim(
     presentation: Res<CanonicalPresentation>,
     input: Res<PrototypeInput>,
-    mut cue: Single<&mut Transform, (With<Cue>, Without<AimGuide>, Without<PowerFill>)>,
-    mut guide: Single<&mut Transform, (With<AimGuide>, Without<Cue>, Without<PowerFill>)>,
-    mut power: Single<
-        (&mut Sprite, &mut Transform),
-        (With<PowerFill>, Without<Cue>, Without<AimGuide>),
-    >,
+    mut cue: Single<&mut Transform, (With<Cue>, Without<PowerFill>)>,
+    mut power: Single<(&mut Sprite, &mut Transform), (With<PowerFill>, Without<Cue>)>,
 ) {
     let cue_ball = presentation
         .target
@@ -1141,8 +1130,6 @@ fn update_aim(
     let direction = Vec2::from_angle(input.aim_angle);
     cue.translation = (cue_ball - direction * input.power.mul_add(42.0, 222.0)).extend(7.0);
     cue.rotation = Quat::from_rotation_z(input.aim_angle);
-    guide.translation = (cue_ball + direction * 185.0).extend(6.0);
-    guide.rotation = Quat::from_rotation_z(input.aim_angle);
 
     let fill_height = POWER_BAR_HEIGHT * input.power;
     power.0.custom_size = Some(Vec2::new(30.0, fill_height));
