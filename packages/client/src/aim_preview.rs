@@ -4,14 +4,14 @@ use crate::{
 };
 use bevy::prelude::*;
 
-use std::sync::atomic::{AtomicBool, Ordering};
-static EXACT: AtomicBool = AtomicBool::new(false);
+use std::sync::atomic::{AtomicU8, Ordering};
+static MODE: AtomicU8 = AtomicU8::new(1);
 
-/// Selects canonical-solver previews; false retains the default geometric aid.
+/// Selects geometric (0), short physics (1), or full physics (2) guides.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
-pub fn set_exact_aim(enabled: bool) {
-    EXACT.store(enabled, Ordering::Relaxed);
+pub fn set_aim_mode(mode: u8) {
+    MODE.store(mode.min(2), Ordering::Relaxed);
 }
 
 fn circle_hit(origin: Vec2, direction: Vec2, center: Vec2, radius: f32) -> Option<f32> {
@@ -89,7 +89,8 @@ pub fn draw(
     if input.placing_cue_ball {
         return;
     }
-    if EXACT.load(Ordering::Relaxed) {
+    let mode = MODE.load(Ordering::Relaxed);
+    if mode != 0 {
         let state = if sandbox.enabled {
             Some((
                 sandbox.table.clone(),
@@ -113,6 +114,7 @@ pub fn draw(
                 physics,
                 geometry,
                 crate::practice_shot(&input),
+                mode == 1,
             );
         }
         return;
