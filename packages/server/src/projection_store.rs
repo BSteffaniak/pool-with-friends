@@ -176,10 +176,12 @@ fn parse_u64(row: &switchy_database::Row, column: &str) -> Result<u64, Projectio
     if let Some(value) = value.as_i64() {
         return Ok(u64::from_ne_bytes(value.to_ne_bytes()));
     }
-    value
-        .as_str()
-        .ok_or(ProjectionError::Malformed)?
-        .parse()
+    let text = value.as_str().ok_or(ProjectionError::Malformed)?;
+    text.parse::<u64>()
+        .or_else(|_| {
+            text.parse::<i64>()
+                .map(|signed| u64::from_ne_bytes(signed.to_ne_bytes()))
+        })
         .map_err(|_| ProjectionError::Malformed)
 }
 

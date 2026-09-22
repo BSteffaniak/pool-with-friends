@@ -19,14 +19,12 @@ pub use rules::{
     RulesProfileError, ShotResolution, VersionedMatchCommand,
 };
 
-/// Original canonical table schema (still used by stationary racks).
-/// Version-two moving snapshots additionally encode vertical-axis spin.
-pub const TABLE_STATE_VERSION: u16 = 1;
+/// Canonical table schema, including complete rolling and vertical spin state.
+pub const TABLE_STATE_VERSION: u16 = 2;
 mod motion;
 
 /// Current built-in physics profile version.
 pub const PHYSICS_PROFILE_VERSION: u16 = 2;
-const MICRO_UNITS_PER_UNIT: i64 = 1_000_000;
 const TRIG_SCALE: i64 = 1_000_000;
 const CORDIC_GAIN_INVERSE: i64 = 607_253;
 const CORDIC_ANGLES: [i64; 29] = [
@@ -318,7 +316,7 @@ impl PhysicsProfile {
         collision_restitution_millionths: u32,
         settling_speed_per_second: Scalar,
     ) -> Result<Self, PhysicsProfileError> {
-        if version != 1 && version != PHYSICS_PROFILE_VERSION {
+        if version != PHYSICS_PROFILE_VERSION {
             return Err(PhysicsProfileError::UnsupportedVersion(version));
         }
         if ticks_per_second == 0 || maximum_ticks == 0 {
@@ -361,16 +359,6 @@ impl PhysicsProfile {
             cushion_restitution_millionths: 820_000,
             collision_restitution_millionths: 960_000,
             settling_speed_per_second: Scalar(8_000),
-        }
-    }
-
-    /// Historical profile retained for exact version-one replay.
-    #[must_use]
-    pub const fn legacy() -> Self {
-        Self {
-            version: 1,
-            rolling_deceleration_per_second_squared: Scalar(1_200_000),
-            ..Self::standard()
         }
     }
 
@@ -452,10 +440,10 @@ pub struct BallState {
     pub position: Vector,
     /// Linear velocity per second.
     pub velocity: Vector,
-    /// Version one: legacy side/top response. Version two: horizontal
+    /// Horizontal
     /// rolling surface velocity `(R*omega_y, -R*omega_x)`, in micro-metres/s.
     pub angular_velocity: Vector,
-    /// Version-two vertical-axis spin expressed as `R*omega_z`, in micro-metres/s.
+    /// Vertical-axis spin expressed as `R*omega_z`, in micro-metres/s.
     pub side_spin: Scalar,
     /// Whether the ball has entered a pocket and left play.
     pub pocketed: bool,
@@ -494,19 +482,15 @@ impl VersionedTableState {
     ///
     /// Returns [`TableStateError`] for an unsupported version, empty or
     /// oversized state, duplicate identifiers, out-of-bounds balls, overlapping
-    /// in-play balls, moving pocketed balls, or vertical spin that cannot be
-    /// represented by the requested version-one schema.
+    /// in-play balls or moving pocketed balls.
     pub fn new(
         version: u16,
         geometry: TableGeometry,
         tick: u32,
         mut balls: Vec<BallState>,
     ) -> Result<Self, TableStateError> {
-        if version != TABLE_STATE_VERSION && version != 2 {
+        if version != TABLE_STATE_VERSION {
             return Err(TableStateError::UnsupportedVersion(version));
-        }
-        if version == 1 && balls.iter().any(|ball| ball.side_spin.0 != 0) {
-            return Err(TableStateError::UnrepresentableSpin);
         }
         if balls.is_empty() || balls.len() > MAX_BALLS {
             return Err(TableStateError::InvalidBallCount(balls.len()));
@@ -590,9 +574,7 @@ impl VersionedTableState {
             ] {
                 bytes.extend_from_slice(&value.to_be_bytes());
             }
-            if self.version >= 2 {
-                bytes.extend_from_slice(&ball.side_spin.0.to_be_bytes());
-            }
+            bytes.extend_from_slice(&ball.side_spin.0.to_be_bytes());
         }
         bytes
     }
@@ -610,7 +592,7 @@ impl VersionedTableState {
     ) -> Result<Self, TableStateDecodeError> {
         let mut reader = ByteReader::new(bytes);
         let version = reader.read_u16()?;
-        if version != 1 && version != 2 {
+        if version != TABLE_STATE_VERSION {
             return Err(TableStateDecodeError::State(
                 TableStateError::UnsupportedVersion(version),
             ));
@@ -635,7 +617,7 @@ impl VersionedTableState {
                 position: Vector::from_micros(reader.read_i64()?, reader.read_i64()?),
                 velocity: Vector::from_micros(reader.read_i64()?, reader.read_i64()?),
                 angular_velocity: Vector::from_micros(reader.read_i64()?, reader.read_i64()?),
-                side_spin: Scalar::from_micros(if version >= 2 { reader.read_i64()? } else { 0 }),
+                side_spin: Scalar::from_micros(reader.read_i64()?),
                 pocketed,
             });
         }
@@ -649,9 +631,6 @@ impl VersionedTableState {
 /// Invalid canonical table state.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum TableStateError {
-    /// Version one cannot persist the additional vertical spin component.
-    #[error("vertical spin requires table schema version two")]
-    UnrepresentableSpin,
     /// Snapshot version is unsupported.
     #[error("unsupported table state version {0}")]
     UnsupportedVersion(u16),
@@ -957,19 +936,8 @@ pub fn advance_tick(
     mut state: VersionedTableState,
 ) -> Result<TickResult, SimulationError> {
     state.tick = state.tick.saturating_add(1);
-    if profile.version >= 2 {
-        state.version = 2;
-    }
     let mut kinds = Vec::new();
-    if profile.version >= 2 {
-        motion::advance(geometry, profile, &mut state, &mut kinds);
-    } else {
-        integrate(&mut state.balls, profile);
-        resolve_pockets(&mut state.balls, geometry, &mut kinds);
-        resolve_cushions(&mut state.balls, geometry, profile, &mut kinds);
-        resolve_ball_contacts(&mut state.balls, geometry, profile, &mut kinds);
-        apply_rolling_deceleration(&mut state.balls, profile);
-    }
+    motion::advance(geometry, profile, &mut state, &mut kinds);
     kinds.sort_unstable_by_key(|event| event_sort_key(*event));
     let mut events = Vec::with_capacity(kinds.len() + 1);
     for (sequence, kind) in kinds.into_iter().enumerate() {
@@ -1055,22 +1023,7 @@ pub fn start_shot(
     }
 
     state.balls[cue_index].velocity = shot_velocity(profile, command);
-    state.balls[cue_index].angular_velocity = Vector::from_micros(
-        mul_div(
-            profile.maximum_speed_per_second.0,
-            i64::from(command.spin.side),
-            10_000,
-        ),
-        mul_div(
-            profile.maximum_speed_per_second.0,
-            i64::from(command.spin.vertical),
-            10_000,
-        ),
-    );
-    if profile.version >= 2 && command.power.units() != 0 {
-        state.version = 2;
-        motion::strike(&mut state.balls[cue_index], command);
-    }
+    motion::strike(&mut state.balls[cue_index], command);
     Ok(state)
 }
 
@@ -1167,14 +1120,6 @@ fn cordic_quarter_turn(mut angle: i64) -> (i64, i64) {
     (x, y)
 }
 
-fn integrate(balls: &mut [BallState], profile: PhysicsProfile) {
-    let ticks = i64::from(profile.ticks_per_second);
-    for ball in balls.iter_mut().filter(|ball| !ball.pocketed) {
-        ball.position.x.0 += ball.velocity.x.0 / ticks;
-        ball.position.y.0 += ball.velocity.y.0 / ticks;
-    }
-}
-
 fn resolve_pockets(
     balls: &mut [BallState],
     geometry: TableGeometry,
@@ -1191,104 +1136,6 @@ fn resolve_pockets(
             events.push(SimulationEventKind::BallPocketed {
                 ball: ball.id,
                 pocket,
-            });
-        }
-    }
-}
-
-fn resolve_cushions(
-    balls: &mut [BallState],
-    geometry: TableGeometry,
-    profile: PhysicsProfile,
-    events: &mut Vec<SimulationEventKind>,
-) {
-    let max_x = geometry.half_width.0 - geometry.ball_radius.0;
-    let max_y = geometry.half_height.0 - geometry.ball_radius.0;
-    for ball in balls.iter_mut().filter(|ball| !ball.pocketed) {
-        let side_transfer = ball.angular_velocity.x.0 / i64::from(profile.ticks_per_second);
-        if ball.position.x.0 < -max_x || ball.position.x.0 > max_x {
-            ball.position.x.0 = ball.position.x.0.clamp(-max_x, max_x);
-            ball.velocity.y.0 += side_transfer;
-            ball.velocity.x.0 = -mul_div(
-                ball.velocity.x.0,
-                i64::from(profile.cushion_restitution_millionths),
-                MICRO_UNITS_PER_UNIT,
-            );
-            events.push(SimulationEventKind::CushionContact {
-                ball: ball.id,
-                axis: CushionAxis::Horizontal,
-            });
-        }
-        if ball.position.y.0 < -max_y || ball.position.y.0 > max_y {
-            ball.position.y.0 = ball.position.y.0.clamp(-max_y, max_y);
-            ball.velocity.x.0 -= side_transfer;
-            ball.velocity.y.0 = -mul_div(
-                ball.velocity.y.0,
-                i64::from(profile.cushion_restitution_millionths),
-                MICRO_UNITS_PER_UNIT,
-            );
-            events.push(SimulationEventKind::CushionContact {
-                ball: ball.id,
-                axis: CushionAxis::Vertical,
-            });
-        }
-    }
-}
-
-fn resolve_ball_contacts(
-    balls: &mut [BallState],
-    geometry: TableGeometry,
-    profile: PhysicsProfile,
-    events: &mut Vec<SimulationEventKind>,
-) {
-    let diameter = geometry.ball_radius.0 * 2;
-    let diameter_squared = squared_i128(diameter);
-    for first_index in 0..balls.len() {
-        let (first_slice, second_slice) = balls.split_at_mut(first_index + 1);
-        let first = &mut first_slice[first_index];
-        if first.pocketed {
-            continue;
-        }
-        for second in second_slice.iter_mut().filter(|ball| !ball.pocketed) {
-            let dx = second.position.x.0 - first.position.x.0;
-            let dy = second.position.y.0 - first.position.y.0;
-            let distance_squared = squared_i128(dx) + squared_i128(dy);
-            if distance_squared > diameter_squared {
-                continue;
-            }
-            let relative_x = second.velocity.x.0 - first.velocity.x.0;
-            let relative_y = second.velocity.y.0 - first.velocity.y.0;
-            let relative_normal =
-                i128::from(relative_x) * i128::from(dx) + i128::from(relative_y) * i128::from(dy);
-            if relative_normal >= 0 {
-                separate_overlap(first, second, diameter, dx, dy, distance_squared);
-                continue;
-            }
-            let impulse_numerator = -(relative_normal
-                * i128::from(
-                    MICRO_UNITS_PER_UNIT + i64::from(profile.collision_restitution_millionths),
-                ));
-            let impulse_denominator = 2 * distance_squared * i128::from(MICRO_UNITS_PER_UNIT);
-            if impulse_denominator == 0 {
-                continue;
-            }
-            let factor = impulse_numerator / impulse_denominator;
-            let impulse_x = i64::try_from(factor * i128::from(dx)).unwrap_or(0);
-            let impulse_y = i64::try_from(factor * i128::from(dy)).unwrap_or(0);
-            first.velocity.x.0 -= impulse_x;
-            first.velocity.y.0 -= impulse_y;
-            second.velocity.x.0 += impulse_x;
-            second.velocity.y.0 += impulse_y;
-            let vertical_transfer = first.angular_velocity.y.0 / 4;
-            second.velocity.x.0 +=
-                mul_div(vertical_transfer, dx, integer_sqrt(distance_squared).max(1));
-            second.velocity.y.0 +=
-                mul_div(vertical_transfer, dy, integer_sqrt(distance_squared).max(1));
-            first.angular_velocity.y.0 -= vertical_transfer;
-            separate_overlap(first, second, diameter, dx, dy, distance_squared);
-            events.push(SimulationEventKind::BallContact {
-                first: first.id,
-                second: second.id,
             });
         }
     }
@@ -1320,39 +1167,6 @@ fn separate_overlap(
     second.position.y.0 += correction_y - correction_y / 2;
 }
 
-fn apply_rolling_deceleration(balls: &mut [BallState], profile: PhysicsProfile) {
-    let decrement =
-        profile.rolling_deceleration_per_second_squared.0 / i64::from(profile.ticks_per_second);
-    for ball in balls.iter_mut().filter(|ball| !ball.pocketed) {
-        let angular_speed_squared =
-            squared_i128(ball.angular_velocity.x.0) + squared_i128(ball.angular_velocity.y.0);
-        if angular_speed_squared > 0 {
-            let angular_speed = integer_sqrt(angular_speed_squared);
-            if angular_speed <= decrement {
-                ball.angular_velocity = Vector::ZERO;
-            } else {
-                let next_angular_speed = angular_speed - decrement;
-                ball.angular_velocity.x.0 =
-                    mul_div(ball.angular_velocity.x.0, next_angular_speed, angular_speed);
-                ball.angular_velocity.y.0 =
-                    mul_div(ball.angular_velocity.y.0, next_angular_speed, angular_speed);
-            }
-        }
-        let speed_squared = squared_i128(ball.velocity.x.0) + squared_i128(ball.velocity.y.0);
-        if speed_squared == 0 {
-            continue;
-        }
-        let speed = integer_sqrt(speed_squared);
-        if speed <= decrement.max(profile.settling_speed_per_second.0) {
-            ball.velocity = Vector::ZERO;
-        } else {
-            let next_speed = speed - decrement;
-            ball.velocity.x.0 = mul_div(ball.velocity.x.0, next_speed, speed);
-            ball.velocity.y.0 = mul_div(ball.velocity.y.0, next_speed, speed);
-        }
-    }
-}
-
 fn is_settled(balls: &[BallState], profile: PhysicsProfile) -> bool {
     let threshold_squared = squared_i128(profile.settling_speed_per_second.0);
     balls.iter().all(|ball| {
@@ -1362,7 +1176,7 @@ fn is_settled(balls: &[BallState], profile: PhysicsProfile) -> bool {
                 && squared_i128(ball.angular_velocity.x.0)
                     + squared_i128(ball.angular_velocity.y.0)
                     <= threshold_squared
-                && (profile.version == 1 || squared_i128(ball.side_spin.0) <= threshold_squared))
+                && squared_i128(ball.side_spin.0) <= threshold_squared)
     })
 }
 

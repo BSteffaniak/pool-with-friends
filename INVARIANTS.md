@@ -39,6 +39,14 @@ An accepted challenge creates a durable waiting lobby with no automatic expirati
 
 Canonical wire commands, snapshots, and persisted payloads carry explicit versions. Readers reject unknown versions rather than guessing. Supported historical records remain replayable, and snapshot-plus-tail replay converges with full canonical replay.
 
+## Development physics compatibility reset
+
+The user explicitly retired all pre-current development matches: none are valid
+or need replay support. Maintain one current physics solver only. Reject retired
+physics profiles and table schemas instead of guessing or silently migrating
+records. This decision does not authorize deleting account or database data.
+Future compatibility changes still require an explicit architectural decision.
+
 ## Persistence portability
 
 Application schema and query access use Switchy builders rather than application-owned raw SQL or backend-specific branches. Read projections are derived and rebuildable and never become a second gameplay source of truth.

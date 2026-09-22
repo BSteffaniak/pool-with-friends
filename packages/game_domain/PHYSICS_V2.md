@@ -1,8 +1,9 @@
 # Physics version two
 
-New matches and solo practice use physics profile 2. Profile 1 remains executable
-with its original coefficients, arithmetic, event ordering, and snapshot layout.
-A regression checks the pre-change 12,000-shot corpus checksum.
+New matches, multiplayer simulation, and solo practice use one physics solver.
+The user explicitly retired all previous development matches. Physics profile 1
+and table schema 1 are rejected; the historical solver and replay checksum test
+have been removed. No database data is deleted by this change.
 
 ## Implemented
 
@@ -16,8 +17,8 @@ A regression checks the pre-change 12,000-shot corpus checksum.
   act through cloth contact rather than identifier-dependent object-ball boosts.
 - Ball contact friction 0.05 and cushion friction 0.20, with bounded tangential
   impulses coupled to vertical spin. Restitution remains 0.96 / 0.82.
-- Version-two table snapshots serialize the extra spin component. Version-one
-  stationary racks and historical snapshots remain readable.
+- All table snapshots, including stationary racks, use schema 2 and serialize
+  the complete spin state. Retired schema 1 is rejected.
 - Practice honors spin input and interpolates between adjacent canonical ticks,
   removing exponential position chasing from practice playback.
 
@@ -29,7 +30,8 @@ Sources for calibration ranges and contact mechanics:
 These constants are candidate calibration, not a claim of measured agreement
 with a particular physical table. Tests cover low-speed momentum transfer,
 sliding-to-rolling speed, rolling deceleration, draw/follow, spin persistence,
-identifier symmetry, cushion restitution, and historical replay.
+identifier symmetry, cushion restitution, retired-version rejection, and a
+full fixed-tick rolling-distance test (0.5 m/s travels about 1.25 m in 5 s).
 
 ## Still outstanding
 

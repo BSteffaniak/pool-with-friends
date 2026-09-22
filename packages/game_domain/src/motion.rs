@@ -1,4 +1,4 @@
-//! Version-two fixed-point contact mechanics. Version one remains in lib.rs.
+//! The canonical fixed-point contact and cloth mechanics.
 use super::{
     BallState, CushionAxis, PhysicsProfile, Scalar, SimulationEventKind, TableGeometry, Vector,
     VersionedShotCommand, VersionedTableState, integer_sqrt, mul_div, resolve_pockets,
@@ -211,32 +211,6 @@ mod tests {
     use super::*;
     use crate::BallId;
     #[test]
-    fn legacy_corpus_checksum_is_unchanged() {
-        let mut checksum = 0_u64;
-        for _ in 0..1000 {
-            for fixture in crate::corpus::qualification_corpus() {
-                let result = crate::simulate_shot(
-                    TableGeometry::standard(),
-                    PhysicsProfile::legacy(),
-                    fixture.state,
-                    fixture.command,
-                )
-                .unwrap();
-                checksum = checksum.rotate_left(7).wrapping_add(
-                    result
-                        .state
-                        .to_bytes()
-                        .into_iter()
-                        .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-                            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
-                        }),
-                );
-            }
-        }
-        assert_eq!(checksum, 0x04e7_4a68_d607_74a1);
-    }
-
-    #[test]
     fn rolling_resistance_and_spin_snapshot_are_calibrated() {
         let mut ball = BallState::stationary(BallId::CUE, Vector::ZERO);
         ball.velocity.x.0 = 1_000_000;
@@ -315,6 +289,57 @@ mod tests {
         assert_eq!(cue.velocity.x.0, -820_000);
         assert!(cue.velocity.y.0 < 0);
         assert!(cue.side_spin.0 < 300_000);
+    }
+
+    #[test]
+    fn rolling_half_metre_per_second_travels_over_a_metre_before_stopping() {
+        let geometry = TableGeometry::standard();
+        let mut ball = BallState::stationary(BallId::CUE, Vector::from_micros(-800_000, 200_000));
+        ball.velocity.x.0 = 500_000;
+        ball.angular_velocity = ball.velocity;
+        let mut state =
+            VersionedTableState::new(crate::TABLE_STATE_VERSION, geometry, 0, vec![ball]).unwrap();
+        let mut seconds = 0.0;
+        for tick in 1..=2400 {
+            let result = crate::advance_tick(geometry, PhysicsProfile::standard(), state).unwrap();
+            state = result.state;
+            if tick == 240 {
+                assert!((state.balls[0].velocity.x.0 - 400_000).abs() < 1000);
+            }
+            if result.settled {
+                seconds = f64::from(tick) / 240.0;
+                break;
+            }
+        }
+        let distance = state.balls[0].position.x.0 + 800_000;
+        assert!((4.8..5.1).contains(&seconds), "stopped at {seconds}s");
+        assert!(
+            (1_230_000..1_260_000).contains(&distance),
+            "travelled {distance} micrometres"
+        );
+    }
+
+    #[test]
+    fn retired_physics_and_table_versions_are_rejected() {
+        let current = PhysicsProfile::standard();
+        assert!(
+            PhysicsProfile::new(
+                1,
+                current.ticks_per_second,
+                current.maximum_ticks,
+                current.maximum_speed_per_second,
+                current.rolling_deceleration_per_second_squared,
+                current.cushion_restitution_millionths,
+                current.collision_restitution_millionths,
+                current.settling_speed_per_second
+            )
+            .is_err()
+        );
+        let state =
+            crate::standard_rack(TableGeometry::standard(), crate::RackSeed::new(42)).unwrap();
+        let mut bytes = state.to_bytes();
+        bytes[..2].copy_from_slice(&1_u16.to_be_bytes());
+        assert!(VersionedTableState::from_bytes(TableGeometry::standard(), &bytes).is_err());
     }
 
     #[test]
