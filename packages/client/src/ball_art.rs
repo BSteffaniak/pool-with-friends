@@ -115,6 +115,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn visual_radius_matches_projected_physics_on_both_axes() {
+        use pwmtf_game_domain::{TableGeometry, Vector};
+        let radius = TableGeometry::standard().ball_radius().micros();
+        let center = crate::canonical_to_world(Vector::ZERO);
+        for offset in [
+            Vector::from_micros(radius, 0),
+            Vector::from_micros(0, radius),
+        ] {
+            let projected_radius = crate::canonical_to_world(offset).distance(center);
+            assert!((projected_radius - BALL_RADIUS).abs() < 0.0001);
+        }
+    }
+
+    #[test]
+    fn canonical_rack_has_no_overlapping_visible_ball_bodies() {
+        use pwmtf_game_domain::{RackSeed, TableGeometry, standard_rack};
+        let rack = standard_rack(TableGeometry::standard(), RackSeed::new(42)).unwrap();
+        for (index, ball) in rack.balls().iter().enumerate() {
+            for other in &rack.balls()[index + 1..] {
+                let distance = crate::canonical_to_world(ball.position)
+                    .distance(crate::canonical_to_world(other.position));
+                assert!(distance + 0.0001 >= BALL_RADIUS * 2.0);
+            }
+        }
+    }
+
+    #[test]
     fn overlapping_balls_have_unique_stable_depths_below_the_aiming_guide() {
         // Every ball may occupy the same XY position; order must depend only on
         // its stable identity, not spawn order, movement, or material updates.

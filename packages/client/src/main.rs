@@ -21,7 +21,14 @@ const DESIGN_SIZE: Vec2 = Vec2::new(1280.0, 720.0);
 const TABLE_CENTER_X: f32 = -55.0;
 const TABLE_SIZE: Vec2 = Vec2::new(960.0, 480.0);
 const CUSHION: f32 = 34.0;
-const BALL_RADIUS: f32 = 13.0;
+// Use the same geometry and scale as canonical_to_world; artwork must not
+// introduce a second, independently tuned collision radius.
+#[allow(clippy::cast_precision_loss)]
+const BALL_RADIUS: f32 = {
+    let geometry = pwmtf_game_domain::TableGeometry::standard();
+    geometry.ball_radius().micros() as f32 / geometry.half_width().micros() as f32
+        * (TABLE_SIZE.x / 2.0)
+};
 const POWER_BAR_HEIGHT: f32 = 300.0;
 const POWER_ZONE_START: f32 = 0.82;
 const SPIN_ZONE_CENTER: Vec2 = Vec2::new(105.0, 105.0);
