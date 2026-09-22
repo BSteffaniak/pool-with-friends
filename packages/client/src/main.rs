@@ -392,10 +392,19 @@ fn practice_shot(input: &PrototypeInput) -> pwmtf_game_domain::VersionedShotComm
     let aim = (turns * f32::from(Aim::STEPS_PER_TURN)).round() as u16 % Aim::STEPS_PER_TURN;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let power = (input.power.clamp(0.0, 1.0) * f32::from(ShotPower::MAX)).round() as u16;
+    #[cfg(target_arch = "wasm32")]
+    #[allow(clippy::cast_possible_truncation)]
+    let spin = {
+        let offset = input.spin.clamp_length_max(0.999);
+        Spin::new((offset.x * 10_000.0) as i16, (offset.y * 10_000.0) as i16)
+            .expect("bounded spin disc")
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let spin = Spin::CENTER;
     VersionedShotCommand::new(
         Aim::new(aim).expect("bounded aim"),
         ShotPower::new(power).expect("bounded power"),
-        Spin::CENTER,
+        spin,
     )
 }
 
@@ -415,9 +424,12 @@ fn update_sandbox(
         if ball.pocketed {
             presentation.pocketed.insert(ball.id.number());
         } else {
-            presentation
-                .target
-                .insert(ball.id.number(), canonical_to_world(ball.position));
+            presentation.target.insert(
+                ball.id.number(),
+                sandbox
+                    .presentation_position(ball.id)
+                    .expect("present practice ball"),
+            );
         }
     }
     presentation.status = Some(
@@ -782,9 +794,14 @@ fn update_match_control_visibility(
 fn interpolate_canonical_balls(
     time: Res<Time>,
     presentation: Res<CanonicalPresentation>,
+    sandbox: Res<sandbox::Sandbox>,
     mut balls: Query<(&CanonicalBall, &mut Transform, &mut Visibility)>,
 ) {
-    let blend = (time.delta_secs() * 18.0).clamp(0.0, 1.0);
+    let blend = if sandbox.enabled {
+        1.0
+    } else {
+        (time.delta_secs() * 18.0).clamp(0.0, 1.0)
+    };
     for (ball, mut transform, mut visibility) in &mut balls {
         if presentation.pocketed.contains(&ball.0) {
             *visibility = Visibility::Hidden;

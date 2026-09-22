@@ -1,0 +1,350 @@
+//! Version-two fixed-point contact mechanics. Version one remains in lib.rs.
+use super::{
+    BallState, CushionAxis, PhysicsProfile, Scalar, SimulationEventKind, TableGeometry, Vector,
+    VersionedShotCommand, VersionedTableState, integer_sqrt, mul_div, resolve_pockets,
+    separate_overlap, squared_i128,
+};
+
+pub fn strike(ball: &mut BallState, command: VersionedShotCommand) {
+    // Cue offset produces surface speed 5/2 times the translational impulse.
+    ball.angular_velocity = Vector::from_micros(
+        mul_div(ball.velocity.x.0, i64::from(command.spin.vertical), 4_000),
+        mul_div(ball.velocity.y.0, i64::from(command.spin.vertical), 4_000),
+    );
+    ball.side_spin = Scalar::from_micros(mul_div(
+        speed(ball.velocity),
+        -i64::from(command.spin.side),
+        4_000,
+    ));
+}
+
+fn speed(v: Vector) -> i64 {
+    integer_sqrt(squared_i128(v.x.0) + squared_i128(v.y.0))
+}
+
+pub fn advance(
+    geometry: TableGeometry,
+    profile: PhysicsProfile,
+    state: &mut VersionedTableState,
+    events: &mut Vec<SimulationEventKind>,
+) {
+    // Four substeps bound displacement at maximum shot speed, improving thin
+    // contacts without changing the externally visible fixed-tick boundary.
+    let substeps = 4;
+    let frequency = i64::from(profile.ticks_per_second) * substeps;
+    for _ in 0..substeps {
+        for ball in state.balls.iter_mut().filter(|ball| !ball.pocketed) {
+            ball.position.x.0 += ball.velocity.x.0 / frequency;
+            ball.position.y.0 += ball.velocity.y.0 / frequency;
+        }
+        resolve_pockets(&mut state.balls, geometry, events);
+        cushions(&mut state.balls, geometry, profile, events);
+        // Revisit contacts so impulses propagate through a tight rack rather
+        // than being limited to one identifier-ordered sweep.
+        for _ in 0..4 {
+            contacts(&mut state.balls, geometry, profile, events);
+        }
+        for ball in state.balls.iter_mut().filter(|ball| !ball.pocketed) {
+            cloth(ball, profile, frequency);
+        }
+    }
+    for ball in state.balls.iter_mut().filter(|ball| ball.pocketed) {
+        ball.angular_velocity = Vector::ZERO;
+        ball.side_spin = Scalar::from_micros(0);
+    }
+}
+
+fn cloth(ball: &mut BallState, profile: PhysicsProfile, frequency: i64) {
+    let slip = Vector::from_micros(
+        ball.velocity.x.0 - ball.angular_velocity.x.0,
+        ball.velocity.y.0 - ball.angular_velocity.y.0,
+    );
+    let slipping = speed(slip);
+    if slipping > 0 {
+        // mu_slide=0.20; I=2/5 mR². Slip decays 7/2 times as
+        // quickly as translation; clamp the impulse exactly at natural roll.
+        let impulse = (1_962_000 / frequency).min(mul_div(slipping, 2, 7));
+        if impulse > 0 {
+            let dx = mul_div(slip.x.0, impulse, slipping);
+            let dy = mul_div(slip.y.0, impulse, slipping);
+            ball.velocity.x.0 -= dx;
+            ball.velocity.y.0 -= dy;
+            ball.angular_velocity.x.0 += mul_div(dx, 5, 2);
+            ball.angular_velocity.y.0 += mul_div(dy, 5, 2);
+        }
+    }
+    if slipping <= 7 {
+        let velocity = speed(ball.velocity);
+        let decrement = (profile.rolling_deceleration_per_second_squared.0 / frequency).max(1);
+        if velocity <= decrement.max(profile.settling_speed_per_second.0) {
+            ball.velocity = Vector::ZERO;
+        } else {
+            ball.velocity.x.0 = mul_div(ball.velocity.x.0, velocity - decrement, velocity);
+            ball.velocity.y.0 = mul_div(ball.velocity.y.0, velocity - decrement, velocity);
+        }
+        ball.angular_velocity = ball.velocity;
+    }
+    // 10 rad/s² vertical spin decay at the standard ball radius.
+    let decay = 285_750 / frequency;
+    ball.side_spin.0 -= ball.side_spin.0.signum() * ball.side_spin.0.abs().min(decay);
+}
+
+fn contacts(
+    balls: &mut [BallState],
+    geometry: TableGeometry,
+    profile: PhysicsProfile,
+    events: &mut Vec<SimulationEventKind>,
+) {
+    let diameter = geometry.ball_radius.0 * 2;
+    for index in 0..balls.len() {
+        let (first_slice, rest) = balls.split_at_mut(index + 1);
+        let first = &mut first_slice[index];
+        if first.pocketed {
+            continue;
+        }
+        for second in rest.iter_mut().filter(|ball| !ball.pocketed) {
+            let dx = second.position.x.0 - first.position.x.0;
+            let dy = second.position.y.0 - first.position.y.0;
+            let squared = squared_i128(dx) + squared_i128(dy);
+            if squared > squared_i128(diameter) {
+                continue;
+            }
+            let distance = integer_sqrt(squared).max(1);
+            let relative = i128::from(second.velocity.x.0 - first.velocity.x.0) * i128::from(dx)
+                + i128::from(second.velocity.y.0 - first.velocity.y.0) * i128::from(dy);
+            if relative < 0 && squared > 0 {
+                let numerator =
+                    -relative * i128::from(1_000_000 + profile.collision_restitution_millionths);
+                let denominator = 2 * squared * 1_000_000;
+                // Multiply BEFORE division; preserve sub-millimetre/s nudges.
+                let ix = i64::try_from(numerator * i128::from(dx) / denominator).unwrap_or(0);
+                let iy = i64::try_from(numerator * i128::from(dy) / denominator).unwrap_or(0);
+                first.velocity.x.0 -= ix;
+                first.velocity.y.0 -= iy;
+                second.velocity.x.0 += ix;
+                second.velocity.y.0 += iy;
+                let tangent = mul_div(second.velocity.x.0 - first.velocity.x.0, -dy, distance)
+                    + mul_div(second.velocity.y.0 - first.velocity.y.0, dx, distance)
+                    - first.side_spin.0
+                    - second.side_spin.0;
+                let normal_impulse = speed(Vector::from_micros(ix, iy));
+                let friction = (tangent / 7).clamp(-normal_impulse / 20, normal_impulse / 20);
+                let tx = mul_div(friction, -dy, distance);
+                let ty = mul_div(friction, dx, distance);
+                first.velocity.x.0 += tx;
+                first.velocity.y.0 += ty;
+                second.velocity.x.0 -= tx;
+                second.velocity.y.0 -= ty;
+                first.side_spin.0 += mul_div(friction, 5, 2);
+                second.side_spin.0 += mul_div(friction, 5, 2);
+                events.push(SimulationEventKind::BallContact {
+                    first: first.id,
+                    second: second.id,
+                });
+            }
+            separate_overlap(first, second, diameter, dx, dy, squared);
+        }
+    }
+}
+
+fn cushions(
+    balls: &mut [BallState],
+    geometry: TableGeometry,
+    profile: PhysicsProfile,
+    events: &mut Vec<SimulationEventKind>,
+) {
+    let max_x = geometry.half_width.0 - geometry.ball_radius.0;
+    let max_y = geometry.half_height.0 - geometry.ball_radius.0;
+    for ball in balls.iter_mut().filter(|ball| !ball.pocketed) {
+        for (horizontal, limit) in [(true, max_x), (false, max_y)] {
+            let position = if horizontal {
+                ball.position.x.0
+            } else {
+                ball.position.y.0
+            };
+            if position.abs() <= limit {
+                continue;
+            }
+            let sign = position.signum();
+            let (normal, tangent) = if horizontal {
+                (ball.velocity.x.0 * sign, ball.velocity.y.0 * sign)
+            } else {
+                (ball.velocity.y.0 * sign, -ball.velocity.x.0 * sign)
+            };
+            if horizontal {
+                ball.position.x.0 = sign * limit;
+            } else {
+                ball.position.y.0 = sign * limit;
+            }
+            if normal <= 0 {
+                continue;
+            }
+            let rebound = mul_div(
+                normal,
+                i64::from(profile.cushion_restitution_millionths),
+                1_000_000,
+            );
+            let friction = mul_div(tangent + ball.side_spin.0, 2, 7)
+                .clamp(-(normal + rebound) / 5, (normal + rebound) / 5);
+            if horizontal {
+                ball.velocity.x.0 = -sign * rebound;
+                ball.velocity.y.0 -= sign * friction;
+            } else {
+                ball.velocity.y.0 = -sign * rebound;
+                ball.velocity.x.0 += sign * friction;
+            }
+            ball.side_spin.0 -= mul_div(friction, 5, 2);
+            events.push(SimulationEventKind::CushionContact {
+                ball: ball.id,
+                axis: if horizontal {
+                    CushionAxis::Horizontal
+                } else {
+                    CushionAxis::Vertical
+                },
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::BallId;
+    #[test]
+    fn legacy_corpus_checksum_is_unchanged() {
+        let mut checksum = 0_u64;
+        for _ in 0..1000 {
+            for fixture in crate::corpus::qualification_corpus() {
+                let result = crate::simulate_shot(
+                    TableGeometry::standard(),
+                    PhysicsProfile::legacy(),
+                    fixture.state,
+                    fixture.command,
+                )
+                .unwrap();
+                checksum = checksum.rotate_left(7).wrapping_add(
+                    result
+                        .state
+                        .to_bytes()
+                        .into_iter()
+                        .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+                            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                        }),
+                );
+            }
+        }
+        assert_eq!(checksum, 0x04e7_4a68_d607_74a1);
+    }
+
+    #[test]
+    fn rolling_resistance_and_spin_snapshot_are_calibrated() {
+        let mut ball = BallState::stationary(BallId::CUE, Vector::ZERO);
+        ball.velocity.x.0 = 1_000_000;
+        ball.angular_velocity = ball.velocity;
+        ball.side_spin.0 = 100_000;
+        let state = VersionedTableState::new(2, TableGeometry::standard(), 0, vec![ball]).unwrap();
+        assert_eq!(
+            VersionedTableState::from_bytes(TableGeometry::standard(), &state.to_bytes()).unwrap(),
+            state
+        );
+        for _ in 0..960 {
+            cloth(&mut ball, PhysicsProfile::standard(), 960);
+        }
+        assert!((ball.velocity.x.0 - 900_000).abs() < 1000);
+        assert_eq!(ball.angular_velocity, ball.velocity);
+        assert_eq!(ball.side_spin.0, 0);
+    }
+
+    #[test]
+    fn follow_and_draw_act_on_cue_ball_after_impact() {
+        for sign in [-1, 1] {
+            let mut cue = BallState::stationary(BallId::CUE, Vector::ZERO);
+            cue.angular_velocity.x.0 = sign * 500_000;
+            for _ in 0..100 {
+                cloth(&mut cue, PhysicsProfile::standard(), 960);
+            }
+            assert_eq!(cue.velocity.x.0.signum(), sign);
+            assert!(cue.velocity.x.0.abs() > 100_000);
+        }
+    }
+
+    #[test]
+    fn collision_response_is_independent_of_identifier_order() {
+        let geometry = TableGeometry::standard();
+        let mut a = BallState::stationary(BallId::CUE, Vector::ZERO);
+        let mut b = BallState::stationary(
+            BallId::new(1).unwrap(),
+            Vector::from_micros(geometry.ball_radius.0 * 2, 0),
+        );
+        a.velocity = Vector::from_micros(1_000_000, 200_000);
+        a.side_spin.0 = 300_000;
+        b.side_spin.0 = -100_000;
+        let mut forward = vec![a, b];
+        let mut reversed = vec![b, a];
+        contacts(
+            &mut forward,
+            geometry,
+            PhysicsProfile::standard(),
+            &mut Vec::new(),
+        );
+        contacts(
+            &mut reversed,
+            geometry,
+            PhysicsProfile::standard(),
+            &mut Vec::new(),
+        );
+        assert_eq!(forward[0], reversed[1]);
+        assert_eq!(forward[1], reversed[0]);
+    }
+
+    #[test]
+    fn cushions_retain_normal_restitution_and_respond_to_english() {
+        let geometry = TableGeometry::standard();
+        let mut cue = BallState::stationary(
+            BallId::CUE,
+            Vector::from_micros(geometry.half_width.0, 200_000),
+        );
+        cue.velocity.x.0 = 1_000_000;
+        cue.side_spin.0 = 300_000;
+        cushions(
+            std::slice::from_mut(&mut cue),
+            geometry,
+            PhysicsProfile::standard(),
+            &mut Vec::new(),
+        );
+        assert_eq!(cue.velocity.x.0, -820_000);
+        assert!(cue.velocity.y.0 < 0);
+        assert!(cue.side_spin.0 < 300_000);
+    }
+
+    #[test]
+    fn soft_contact_transfers_momentum_without_truncation() {
+        let geometry = TableGeometry::standard();
+        let mut balls = vec![
+            BallState::stationary(BallId::CUE, Vector::ZERO),
+            BallState::stationary(
+                BallId::new(1).unwrap(),
+                Vector::from_micros(geometry.ball_radius.0 * 2, 0),
+            ),
+        ];
+        balls[0].velocity.x.0 = 20_000;
+        contacts(
+            &mut balls,
+            geometry,
+            PhysicsProfile::standard(),
+            &mut Vec::new(),
+        );
+        assert_eq!(balls[0].velocity.x.0, 400);
+        assert_eq!(balls[1].velocity.x.0, 19_600);
+    }
+    #[test]
+    fn sliding_center_hit_transitions_to_five_sevenths_speed() {
+        let mut ball = BallState::stationary(BallId::CUE, Vector::ZERO);
+        ball.velocity.x.0 = 1_000_000;
+        for _ in 0..150 {
+            cloth(&mut ball, PhysicsProfile::standard(), 960);
+        }
+        assert!((ball.velocity.x.0 - 714_286).abs() < 4_000);
+        assert!((ball.velocity.x.0 - ball.angular_velocity.x.0).abs() <= 7);
+    }
+}

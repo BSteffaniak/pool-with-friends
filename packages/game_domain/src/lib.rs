@@ -19,10 +19,13 @@ pub use rules::{
     RulesProfileError, ShotResolution, VersionedMatchCommand,
 };
 
-/// Current schema version for canonical table snapshots.
+/// Original canonical table schema (still used by stationary racks).
+/// Version-two moving snapshots additionally encode vertical-axis spin.
 pub const TABLE_STATE_VERSION: u16 = 1;
+mod motion;
+
 /// Current built-in physics profile version.
-pub const PHYSICS_PROFILE_VERSION: u16 = 1;
+pub const PHYSICS_PROFILE_VERSION: u16 = 2;
 const MICRO_UNITS_PER_UNIT: i64 = 1_000_000;
 const TRIG_SCALE: i64 = 1_000_000;
 const CORDIC_GAIN_INVERSE: i64 = 607_253;
@@ -315,7 +318,7 @@ impl PhysicsProfile {
         collision_restitution_millionths: u32,
         settling_speed_per_second: Scalar,
     ) -> Result<Self, PhysicsProfileError> {
-        if version != PHYSICS_PROFILE_VERSION {
+        if version != 1 && version != PHYSICS_PROFILE_VERSION {
             return Err(PhysicsProfileError::UnsupportedVersion(version));
         }
         if ticks_per_second == 0 || maximum_ticks == 0 {
@@ -354,10 +357,20 @@ impl PhysicsProfile {
             ticks_per_second: 240,
             maximum_ticks: 14_400,
             maximum_speed_per_second: Scalar(7_500_000),
-            rolling_deceleration_per_second_squared: Scalar(1_200_000),
+            rolling_deceleration_per_second_squared: Scalar(100_000),
             cushion_restitution_millionths: 820_000,
             collision_restitution_millionths: 960_000,
             settling_speed_per_second: Scalar(8_000),
+        }
+    }
+
+    /// Historical profile retained for exact version-one replay.
+    #[must_use]
+    pub const fn legacy() -> Self {
+        Self {
+            version: 1,
+            rolling_deceleration_per_second_squared: Scalar(1_200_000),
+            ..Self::standard()
         }
     }
 
@@ -439,9 +452,11 @@ pub struct BallState {
     pub position: Vector,
     /// Linear velocity per second.
     pub velocity: Vector,
-    /// Canonical angular response from cue contact and subsequent interactions.
-    /// Horizontal is side English; vertical is top/back spin.
+    /// Version one: legacy side/top response. Version two: horizontal
+    /// rolling surface velocity `(R*omega_y, -R*omega_x)`, in micro-metres/s.
     pub angular_velocity: Vector,
+    /// Version-two vertical-axis spin expressed as `R*omega_z`, in micro-metres/s.
+    pub side_spin: Scalar,
     /// Whether the ball has entered a pocket and left play.
     pub pocketed: bool,
 }
@@ -455,6 +470,7 @@ impl BallState {
             position,
             velocity: Vector::ZERO,
             angular_velocity: Vector::ZERO,
+            side_spin: Scalar::from_micros(0),
             pocketed: false,
         }
     }
@@ -478,15 +494,19 @@ impl VersionedTableState {
     ///
     /// Returns [`TableStateError`] for an unsupported version, empty or
     /// oversized state, duplicate identifiers, out-of-bounds balls, overlapping
-    /// in-play balls, or moving pocketed balls.
+    /// in-play balls, moving pocketed balls, or vertical spin that cannot be
+    /// represented by the requested version-one schema.
     pub fn new(
         version: u16,
         geometry: TableGeometry,
         tick: u32,
         mut balls: Vec<BallState>,
     ) -> Result<Self, TableStateError> {
-        if version != TABLE_STATE_VERSION {
+        if version != TABLE_STATE_VERSION && version != 2 {
             return Err(TableStateError::UnsupportedVersion(version));
+        }
+        if version == 1 && balls.iter().any(|ball| ball.side_spin.0 != 0) {
+            return Err(TableStateError::UnrepresentableSpin);
         }
         if balls.is_empty() || balls.len() > MAX_BALLS {
             return Err(TableStateError::InvalidBallCount(balls.len()));
@@ -570,6 +590,9 @@ impl VersionedTableState {
             ] {
                 bytes.extend_from_slice(&value.to_be_bytes());
             }
+            if self.version >= 2 {
+                bytes.extend_from_slice(&ball.side_spin.0.to_be_bytes());
+            }
         }
         bytes
     }
@@ -587,6 +610,11 @@ impl VersionedTableState {
     ) -> Result<Self, TableStateDecodeError> {
         let mut reader = ByteReader::new(bytes);
         let version = reader.read_u16()?;
+        if version != 1 && version != 2 {
+            return Err(TableStateDecodeError::State(
+                TableStateError::UnsupportedVersion(version),
+            ));
+        }
         let tick = reader.read_u32()?;
         let count = usize::from(reader.read_u8()?);
         if count == 0 || count > MAX_BALLS {
@@ -607,6 +635,7 @@ impl VersionedTableState {
                 position: Vector::from_micros(reader.read_i64()?, reader.read_i64()?),
                 velocity: Vector::from_micros(reader.read_i64()?, reader.read_i64()?),
                 angular_velocity: Vector::from_micros(reader.read_i64()?, reader.read_i64()?),
+                side_spin: Scalar::from_micros(if version >= 2 { reader.read_i64()? } else { 0 }),
                 pocketed,
             });
         }
@@ -620,6 +649,9 @@ impl VersionedTableState {
 /// Invalid canonical table state.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum TableStateError {
+    /// Version one cannot persist the additional vertical spin component.
+    #[error("vertical spin requires table schema version two")]
+    UnrepresentableSpin,
     /// Snapshot version is unsupported.
     #[error("unsupported table state version {0}")]
     UnsupportedVersion(u16),
@@ -925,12 +957,19 @@ pub fn advance_tick(
     mut state: VersionedTableState,
 ) -> Result<TickResult, SimulationError> {
     state.tick = state.tick.saturating_add(1);
-    integrate(&mut state.balls, profile);
+    if profile.version >= 2 {
+        state.version = 2;
+    }
     let mut kinds = Vec::new();
-    resolve_pockets(&mut state.balls, geometry, &mut kinds);
-    resolve_cushions(&mut state.balls, geometry, profile, &mut kinds);
-    resolve_ball_contacts(&mut state.balls, geometry, profile, &mut kinds);
-    apply_rolling_deceleration(&mut state.balls, profile);
+    if profile.version >= 2 {
+        motion::advance(geometry, profile, &mut state, &mut kinds);
+    } else {
+        integrate(&mut state.balls, profile);
+        resolve_pockets(&mut state.balls, geometry, &mut kinds);
+        resolve_cushions(&mut state.balls, geometry, profile, &mut kinds);
+        resolve_ball_contacts(&mut state.balls, geometry, profile, &mut kinds);
+        apply_rolling_deceleration(&mut state.balls, profile);
+    }
     kinds.sort_unstable_by_key(|event| event_sort_key(*event));
     let mut events = Vec::with_capacity(kinds.len() + 1);
     for (sequence, kind) in kinds.into_iter().enumerate() {
@@ -948,6 +987,7 @@ pub fn advance_tick(
         for ball in &mut state.balls {
             ball.velocity = Vector::ZERO;
             ball.angular_velocity = Vector::ZERO;
+            ball.side_spin = Scalar::from_micros(0);
         }
         let sequence = u16::try_from(events.len()).unwrap_or(u16::MAX);
         push_event(
@@ -1027,6 +1067,10 @@ pub fn start_shot(
             10_000,
         ),
     );
+    if profile.version >= 2 && command.power.units() != 0 {
+        state.version = 2;
+        motion::strike(&mut state.balls[cue_index], command);
+    }
     Ok(state)
 }
 
@@ -1317,7 +1361,8 @@ fn is_settled(balls: &[BallState], profile: PhysicsProfile) -> bool {
                 <= threshold_squared
                 && squared_i128(ball.angular_velocity.x.0)
                     + squared_i128(ball.angular_velocity.y.0)
-                    <= threshold_squared)
+                    <= threshold_squared
+                && (profile.version == 1 || squared_i128(ball.side_spin.0) <= threshold_squared))
     })
 }
 
@@ -1500,6 +1545,7 @@ mod tests {
                 position: Vector::from_micros(-300_000, 20_000),
                 velocity: Vector::from_micros(1_000_000, 200_000),
                 angular_velocity: Vector::from_micros(100_000, -100_000),
+                side_spin: Scalar::from_micros(0),
                 pocketed: false,
             }],
         )

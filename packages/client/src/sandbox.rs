@@ -8,6 +8,7 @@ use pwmtf_game_domain::{
 #[derive(Resource)]
 pub struct Sandbox {
     pub enabled: bool,
+    previous: VersionedTableState,
     pub table: VersionedTableState,
     pub moving: bool,
     elapsed: f64,
@@ -19,6 +20,7 @@ impl Default for Sandbox {
     fn default() -> Self {
         Self {
             enabled: practice_enabled(),
+            previous: rack(42),
             table: rack(42),
             moving: false,
             elapsed: 0.0,
@@ -59,6 +61,7 @@ impl Sandbox {
             return;
         }
         if let Ok(table) = start_shot(PhysicsProfile::standard(), self.table.clone(), command) {
+            self.previous = table.clone();
             self.table = table;
             self.moving = true;
             self.elapsed = 0.0;
@@ -76,6 +79,7 @@ impl Sandbox {
         while self.elapsed >= step && self.moving {
             self.elapsed -= step;
             self.ticks += 1;
+            self.previous = self.table.clone();
             match advance_tick(TableGeometry::standard(), profile, self.table.clone()) {
                 Ok(result) => {
                     self.table = result.state;
@@ -92,9 +96,27 @@ impl Sandbox {
         }
     }
 
+    /// Interpolates between adjacent physics ticks rather than chasing state.
+    pub fn presentation_position(
+        &self,
+        id: pwmtf_game_domain::BallId,
+    ) -> Option<bevy::prelude::Vec2> {
+        let current = self.table.ball(id)?;
+        let target = crate::canonical_to_world(current.position);
+        if !self.moving {
+            return Some(target);
+        }
+        let previous = self.previous.ball(id)?;
+        #[allow(clippy::cast_possible_truncation)]
+        let alpha = (self.elapsed * f64::from(PhysicsProfile::standard().ticks_per_second()))
+            .clamp(0.0, 1.0) as f32;
+        Some(crate::canonical_to_world(previous.position).lerp(target, alpha))
+    }
+
     fn reset(&mut self) {
         self.seed = self.seed.wrapping_add(1);
         self.table = rack(self.seed);
+        self.previous = self.table.clone();
         self.moving = false;
         self.ticks = 0;
     }
