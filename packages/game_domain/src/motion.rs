@@ -39,6 +39,7 @@ pub fn advance(
         }
         resolve_pockets(&mut state.balls, geometry, events);
         cushions(&mut state.balls, geometry, profile, events);
+        jaws(&mut state.balls, geometry, profile, events);
         // Revisit contacts so impulses propagate through a tight rack rather
         // than being limited to one identifier-ordered sweep.
         for _ in 0..4 {
@@ -147,6 +148,49 @@ fn contacts(
     }
 }
 
+fn jaws(
+    balls: &mut [BallState],
+    geometry: TableGeometry,
+    profile: PhysicsProfile,
+    events: &mut Vec<SimulationEventKind>,
+) {
+    let (centers, radius) = geometry.pocket_jaws();
+    let contact_radius = radius.0 + geometry.ball_radius.0;
+    for ball in balls.iter_mut().filter(|ball| !ball.pocketed) {
+        for center in &centers {
+            let dx = ball.position.x.0 - center.x.0;
+            let dy = ball.position.y.0 - center.y.0;
+            let squared = squared_i128(dx) + squared_i128(dy);
+            if squared >= squared_i128(contact_radius) || squared == 0 {
+                continue;
+            }
+            let distance = integer_sqrt(squared).max(1);
+            let normal =
+                mul_div(ball.velocity.x.0, dx, distance) + mul_div(ball.velocity.y.0, dy, distance);
+            ball.position.x.0 = center.x.0 + mul_div(dx, contact_radius + 2, distance);
+            ball.position.y.0 = center.y.0 + mul_div(dy, contact_radius + 2, distance);
+            if normal >= 0 {
+                continue;
+            }
+            let impulse = mul_div(
+                -normal,
+                1_000_000 + i64::from(profile.cushion_restitution_millionths),
+                1_000_000,
+            );
+            ball.velocity.x.0 += mul_div(impulse, dx, distance);
+            ball.velocity.y.0 += mul_div(impulse, dy, distance);
+            events.push(SimulationEventKind::CushionContact {
+                ball: ball.id,
+                axis: if dx.abs() > dy.abs() {
+                    CushionAxis::Horizontal
+                } else {
+                    CushionAxis::Vertical
+                },
+            });
+        }
+    }
+}
+
 fn cushions(
     balls: &mut [BallState],
     geometry: TableGeometry,
@@ -157,6 +201,14 @@ fn cushions(
     let max_y = geometry.half_height.0 - geometry.ball_radius.0;
     for ball in balls.iter_mut().filter(|ball| !ball.pocketed) {
         for (horizontal, limit) in [(true, max_x), (false, max_y)] {
+            let along = if horizontal {
+                ball.position.y
+            } else {
+                ball.position.x
+            };
+            if geometry.rail_opening(!horizontal, along) {
+                continue;
+            }
             let position = if horizontal {
                 ball.position.x.0
             } else {
@@ -340,6 +392,62 @@ mod tests {
         let mut bytes = state.to_bytes();
         bytes[..2].copy_from_slice(&1_u16.to_be_bytes());
         assert!(VersionedTableState::from_bytes(TableGeometry::standard(), &bytes).is_err());
+    }
+
+    #[test]
+    fn pocket_mouth_accepts_center_shots_and_jaws_reject_off_center_shots() {
+        let geometry = TableGeometry::standard();
+        let profile = PhysicsProfile::standard();
+        let mut centered = BallState::stationary(BallId::CUE, Vector::from_micros(0, 600_000));
+        centered.velocity.y.0 = 500_000;
+        cushions(
+            std::slice::from_mut(&mut centered),
+            geometry,
+            profile,
+            &mut Vec::new(),
+        );
+        assert_eq!(centered.velocity.y.0, 500_000);
+        let mut clipped = BallState::stationary(BallId::CUE, Vector::from_micros(60_000, 603_000));
+        clipped.velocity.y.0 = 500_000;
+        jaws(
+            std::slice::from_mut(&mut clipped),
+            geometry,
+            profile,
+            &mut Vec::new(),
+        );
+        assert!(clipped.velocity.y.0 < 0);
+        assert!(clipped.velocity.x.0 < 0);
+    }
+
+    #[test]
+    fn every_pocket_accepts_a_centered_approach_and_roundtrips_until_capture() {
+        let geometry = TableGeometry::standard();
+        for pocket in crate::PocketId::ALL {
+            let center = crate::pocket_position(pocket, geometry);
+            let x = center.x.0.signum();
+            let y = center.y.0.signum();
+            let mut ball = BallState::stationary(
+                BallId::CUE,
+                Vector::from_micros(center.x.0 - x * 100_000, center.y.0 - y * 100_000),
+            );
+            ball.velocity = Vector::from_micros(x * 500_000, y * 500_000);
+            let mut state =
+                VersionedTableState::new(crate::TABLE_STATE_VERSION, geometry, 0, vec![ball])
+                    .unwrap();
+            for _ in 0..100 {
+                state = crate::advance_tick(geometry, PhysicsProfile::standard(), state)
+                    .unwrap()
+                    .state;
+                assert_eq!(
+                    VersionedTableState::from_bytes(geometry, &state.to_bytes()).unwrap(),
+                    state
+                );
+                if state.balls[0].pocketed {
+                    break;
+                }
+            }
+            assert!(state.balls[0].pocketed, "missed {pocket:?}");
+        }
     }
 
     #[test]

@@ -24,7 +24,7 @@ pub const TABLE_STATE_VERSION: u16 = 2;
 mod motion;
 
 /// Current built-in physics profile version.
-pub const PHYSICS_PROFILE_VERSION: u16 = 2;
+pub const PHYSICS_PROFILE_VERSION: u16 = 3;
 const TRIG_SCALE: i64 = 1_000_000;
 const CORDIC_GAIN_INVERSE: i64 = 607_253;
 const CORDIC_ANGLES: [i64; 29] = [
@@ -249,6 +249,47 @@ impl TableGeometry {
     #[must_use]
     pub const fn pocket_radius(self) -> Scalar {
         self.pocket_radius
+    }
+
+    /// Returns rounded cushion-jaw centers and their shared physical radius.
+    /// Straight rail openings terminate at these centers; presentation uses
+    /// these exact dimensions rather than separately authored pocket shapes.
+    #[must_use]
+    pub fn pocket_jaws(self) -> (Vec<Vector>, Scalar) {
+        let radius = self.pocket_radius.0 * 2 / 5;
+        let side = self.pocket_radius.0 * 3 / 2;
+        let corner = self.pocket_radius.0 * 9 / 5;
+        let inset = radius / 2;
+        let mut centers = Vec::with_capacity(12);
+        for sign_y in [-1, 1] {
+            for sign_x in [-1, 1] {
+                centers.push(Vector::from_micros(
+                    sign_x * side,
+                    sign_y * (self.half_height.0 + inset),
+                ));
+                centers.push(Vector::from_micros(
+                    sign_x * (self.half_width.0 - corner),
+                    sign_y * (self.half_height.0 + inset),
+                ));
+                centers.push(Vector::from_micros(
+                    sign_x * (self.half_width.0 + inset),
+                    sign_y * (self.half_height.0 - corner),
+                ));
+            }
+        }
+        (centers, Scalar::from_micros(radius))
+    }
+
+    /// Whether a coordinate along a horizontal/vertical rail is in a pocket mouth.
+    #[must_use]
+    pub const fn rail_opening(self, horizontal: bool, along: Scalar) -> bool {
+        let corner = self.pocket_radius.0 * 9 / 5;
+        if horizontal {
+            along.0.abs() < self.pocket_radius.0 * 3 / 2
+                || along.0.abs() > self.half_width.0 - corner
+        } else {
+            along.0.abs() > self.half_height.0 - corner
+        }
     }
 
     /// Returns the initial production-candidate table geometry.
@@ -1125,7 +1166,7 @@ fn resolve_pockets(
     geometry: TableGeometry,
     events: &mut Vec<SimulationEventKind>,
 ) {
-    let radius_squared = squared_i128(geometry.pocket_radius.0);
+    let radius_squared = squared_i128(geometry.pocket_radius.0 - geometry.ball_radius.0 / 2);
     for ball in balls.iter_mut().filter(|ball| !ball.pocketed) {
         if let Some(pocket) = PocketId::ALL.into_iter().find(|pocket| {
             squared_distance(ball.position, pocket_position(*pocket, geometry)) <= radius_squared
@@ -1206,10 +1247,14 @@ const fn event_sort_key(event: SimulationEventKind) -> (u8, u8, u8, u8) {
 const fn inside_playable_bounds(position: Vector, geometry: TableGeometry) -> bool {
     let max_x = geometry.half_width.0 - geometry.ball_radius.0;
     let max_y = geometry.half_height.0 - geometry.ball_radius.0;
-    position.x.0 >= -max_x
-        && position.x.0 <= max_x
-        && position.y.0 >= -max_y
-        && position.y.0 <= max_y
+    (position.x.0.abs() <= geometry.half_width.0
+        && position.y.0.abs() <= geometry.half_height.0
+        && ((position.x.0.abs() > max_x && geometry.rail_opening(false, position.y))
+            || (position.y.0.abs() > max_y && geometry.rail_opening(true, position.x))))
+        || (position.x.0 >= -max_x
+            && position.x.0 <= max_x
+            && position.y.0 >= -max_y
+            && position.y.0 <= max_y)
 }
 
 const fn pocket_position(pocket: PocketId, geometry: TableGeometry) -> Vector {

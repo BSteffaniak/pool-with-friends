@@ -493,6 +493,7 @@ fn setup(
     mut presentation: ResMut<CanonicalPresentation>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut ball_materials: ResMut<Assets<ball_art::BallMaterial>>,
+    mut pocket_materials: ResMut<Assets<ColorMaterial>>,
 ) {
     let initial = pwmtf_game_domain::MatchState::new(
         pwmtf_game_domain::RulesProfile::standard(),
@@ -550,12 +551,7 @@ fn setup(
 
     spawn_table_details(&mut commands);
 
-    for pocket in pocket_positions() {
-        commands.spawn((
-            Sprite::from_color(Color::srgb(0.015, 0.018, 0.016), Vec2::splat(46.0)),
-            Transform::from_translation(pocket.extend(3.0)),
-        ));
-    }
+    spawn_pocket_art(&mut commands, &mut meshes, &mut pocket_materials);
 
     ball_art::spawn(
         &mut commands,
@@ -810,6 +806,45 @@ fn interpolate_canonical_balls(
             let current = transform.translation.truncate();
             transform.translation = current.lerp(*target, blend).extend(transform.translation.z);
         }
+    }
+}
+
+fn spawn_pocket_art(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ColorMaterial>,
+) {
+    let geometry = pwmtf_game_domain::TableGeometry::standard();
+    #[allow(clippy::cast_precision_loss)]
+    let scale = TABLE_SIZE.x / (2.0 * geometry.half_width().micros() as f32);
+    #[allow(clippy::cast_precision_loss)]
+    let radius = geometry.pocket_radius().micros() as f32 * scale;
+    let rim = meshes.add(Circle::new(radius + 4.0));
+    let well = meshes.add(Circle::new(radius));
+    let lip = materials.add(ColorMaterial::from_color(Color::srgb(0.11, 0.07, 0.035)));
+    let dark = materials.add(ColorMaterial::from_color(Color::srgb(0.008, 0.011, 0.009)));
+    for pocket in pocket_positions() {
+        commands.spawn((
+            Mesh2d(rim.clone()),
+            MeshMaterial2d(lip.clone()),
+            Transform::from_translation(pocket.extend(2.5)),
+        ));
+        commands.spawn((
+            Mesh2d(well.clone()),
+            MeshMaterial2d(dark.clone()),
+            Transform::from_translation(pocket.extend(2.6)),
+        ));
+    }
+    let (jaws, jaw_radius) = geometry.pocket_jaws();
+    #[allow(clippy::cast_precision_loss)]
+    let jaw = meshes.add(Circle::new(jaw_radius.micros() as f32 * scale));
+    let rubber = materials.add(ColorMaterial::from_color(Color::srgb(0.025, 0.29, 0.15)));
+    for center in jaws {
+        commands.spawn((
+            Mesh2d(jaw.clone()),
+            MeshMaterial2d(rubber.clone()),
+            Transform::from_translation(canonical_to_world(center).extend(2.8)),
+        ));
     }
 }
 
