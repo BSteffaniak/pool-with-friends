@@ -1605,6 +1605,10 @@ let socialPollTimer = null;
 let socialRefreshInFlight = false;
 let wasmModule = null;
 const aimMode = document.querySelector("#aim-mode");
+const unlimitedAimRange = document.querySelector("#unlimited-aim-range");
+unlimitedAimRange.addEventListener("change", () => {
+  wasmModule?.set_unlimited_aim_range(unlimitedAimRange.checked);
+});
 aimMode.addEventListener("change", () => {
   wasmModule?.set_aim_mode(Number(aimMode.value));
 });
@@ -2440,6 +2444,7 @@ try {
   wasmModule = await import("./pwmtf_client.js");
   await wasmModule.default();
   wasmModule.set_aim_mode(Number(aimMode.value));
+  wasmModule.set_unlimited_aim_range(unlimitedAimRange.checked);
   await sessionReady;
   if (matchPlayerSeat !== null) {
     wasmModule.set_match_player(matchPlayerSeat);

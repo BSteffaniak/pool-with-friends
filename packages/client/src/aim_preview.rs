@@ -6,6 +6,19 @@ use bevy::prelude::*;
 
 use std::sync::atomic::{AtomicU8, Ordering};
 static MODE: AtomicU8 = AtomicU8::new(1);
+static UNLIMITED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub const GUIDE_LENGTH: f32 = 500.0;
+
+pub fn unlimited_range() -> bool {
+    UNLIMITED.load(Ordering::Relaxed)
+}
+
+/// Allows short projections beyond the visible incoming aim line.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_unlimited_aim_range(enabled: bool) {
+    UNLIMITED.store(enabled, Ordering::Relaxed);
+}
 
 /// Selects geometric (0), short physics (1), or full physics (2) guides.
 #[cfg(target_arch = "wasm32")]
@@ -132,12 +145,20 @@ pub fn draw(
         origin,
         direction,
         &presentation.target,
-        rail_hit(origin, direction, &segments).min(500.0),
+        rail_hit(origin, direction, &segments).min(if unlimited_range() {
+            f32::INFINITY
+        } else {
+            GUIDE_LENGTH
+        }),
     );
     let contact = origin + direction * distance;
     let white = Color::srgba(0.96, 0.96, 0.86, 0.75);
     if distance > BALL_RADIUS {
-        gizmos.line_2d(origin + direction * BALL_RADIUS, contact, white);
+        gizmos.line_2d(
+            origin + direction * BALL_RADIUS,
+            origin + direction * distance.min(GUIDE_LENGTH),
+            white,
+        );
     }
     let Some(target) = target else {
         return;

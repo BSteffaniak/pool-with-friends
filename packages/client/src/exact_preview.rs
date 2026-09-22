@@ -25,6 +25,7 @@ pub struct ExactPreview {
     published_contact: Option<Vec2>,
     contact_tick: Option<u32>,
     mode: bool,
+    unlimited: bool,
 }
 
 fn clip_segment(start: Vec2, end: Vec2, used: &mut f32, budget: f32) -> Option<Vec2> {
@@ -120,9 +121,12 @@ impl ExactPreview {
         }
         // A short trajectory, generated in bounded work slices while aiming.
         // Only complete ticks are drawn; never substitute a geometric estimate.
+        let unlimited = crate::aim_preview::unlimited_range();
+        let range_changed = unlimited != self.unlimited;
+        self.unlimited = unlimited;
         let computing = self.moving.is_some();
         self.compute(physics, geometry, compact);
-        if computing && self.moving.is_none() {
+        if (computing || range_changed) && self.moving.is_none() {
             self.publish(compact);
         }
         for &(number, a, b) in &self.published {
@@ -257,7 +261,23 @@ impl ExactPreview {
             self.published_contact = None;
             return;
         }
-        let mut lines = average_paths(&self.short_lines);
+        let in_range = self.unlimited
+            || self
+                .key
+                .as_ref()
+                .and_then(|(table, _, _, _)| {
+                    table.balls().iter().find(|ball| ball.id.number() == 0)
+                })
+                .zip(self.contact)
+                .is_some_and(|(cue, contact)| {
+                    crate::canonical_to_world(cue.position).distance(contact)
+                        <= crate::aim_preview::GUIDE_LENGTH
+                });
+        let mut lines = if in_range {
+            average_paths(&self.short_lines)
+        } else {
+            Vec::new()
+        };
         if let Some((table, _, _, _)) = &self.key
             && let Some(cue) = table.balls().iter().find(|ball| ball.id.number() == 0)
         {
@@ -270,7 +290,7 @@ impl ExactPreview {
                     .map(|line| line.2)
             }) {
                 let direction = (end - origin).normalize_or_zero();
-                let length = origin.distance(end).min(500.0);
+                let length = origin.distance(end).min(crate::aim_preview::GUIDE_LENGTH);
                 if length > crate::BALL_RADIUS {
                     lines.push((
                         0,
@@ -281,13 +301,45 @@ impl ExactPreview {
             }
         }
         self.published = lines;
-        self.published_contact = self.contact.filter(|_| self.object.is_some());
+        self.published_contact = self.contact.filter(|_| self.object.is_some() && in_range);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn compact_range_gates_outgoing_lines_and_marker_but_not_incoming() {
+        let geometry = TableGeometry::standard();
+        let table =
+            pwmtf_game_domain::standard_rack(geometry, pwmtf_game_domain::RackSeed::new(42))
+                .unwrap();
+        let origin = crate::canonical_to_world(table.balls()[0].position);
+        let mut preview = ExactPreview {
+            key: Some((
+                table,
+                PhysicsProfile::standard(),
+                geometry,
+                crate::practice_shot(&crate::PrototypeInput::default()),
+            )),
+            object: Some(1),
+            ..Default::default()
+        };
+        for (distance, expected) in [(499.0, true), (500.0, true), (501.0, false)] {
+            let contact = origin + Vec2::X * distance;
+            preview.contact = Some(contact);
+            preview.short_lines = vec![(1, contact, contact + Vec2::X * 10.0)];
+            preview.publish(true);
+            assert_eq!(preview.published_contact.is_some(), expected);
+            assert_eq!(preview.published.iter().any(|line| line.0 == 1), expected);
+            assert!(preview.published.iter().any(|line| line.0 == 0));
+        }
+        preview.unlimited = true;
+        preview.publish(true);
+        assert!(preview.published_contact.is_some());
+        assert!(preview.published.iter().any(|line| line.0 == 1));
+    }
+
     #[test]
     fn secondary_contacts_stop_only_involved_paths_and_stay_stopped() {
         use pwmtf_game_domain::{BallId, CushionAxis, SimulationEvent, SimulationEventKind};
