@@ -83,7 +83,18 @@ struct PrototypeInput {
     #[cfg(target_arch = "wasm32")]
     placement_sent_during_contact: bool,
     active_touch: Option<u64>,
+    pointer_contact: PointerContact,
     touch_rearm_blocked: bool,
+}
+
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum PointerContact {
+    #[default]
+    None,
+    Aim,
+    Power,
+    #[cfg(target_arch = "wasm32")]
+    Auxiliary,
 }
 
 impl PrototypeInput {
@@ -111,6 +122,7 @@ impl Default for PrototypeInput {
             #[cfg(target_arch = "wasm32")]
             placement_sent_during_contact: false,
             active_touch: None,
+            pointer_contact: PointerContact::None,
             touch_rearm_blocked: false,
         }
     }
@@ -409,6 +421,8 @@ fn setup(
     mut commands: Commands,
     presentation_tier: Res<PresentationTier>,
     mut presentation: ResMut<CanonicalPresentation>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     let initial = pwmtf_game_domain::MatchState::new(
         pwmtf_game_domain::RulesProfile::standard(),
@@ -473,10 +487,15 @@ fn setup(
         ));
     }
 
-    spawn_rack(&mut commands);
+    let ball_mesh = meshes.add(Circle::new(BALL_RADIUS));
+    let cue_ball_material = materials.add(ColorMaterial::from_color(WHITE));
+    let ball_materials = ball_colors().map(|color| materials.add(ColorMaterial::from_color(color)));
+
+    spawn_rack(&mut commands, &ball_mesh, &ball_materials);
 
     commands.spawn((
-        Sprite::from_color(WHITE, Vec2::splat(BALL_RADIUS * 2.0)),
+        Mesh2d(ball_mesh),
+        MeshMaterial2d(cue_ball_material),
         Transform::from_xyz(-330.0, 0.0, 4.0),
         CanonicalBall(0),
     ));
@@ -554,7 +573,7 @@ fn spawn_overlay(commands: &mut Commands, presentation_tier: &str) {
         TurnStatus,
     ));
     commands.spawn((
-        Text::new("Drag to aim · pull the right rail for power · release to shoot"),
+        Text::new("Drag to aim | pull the right rail for power | release to shoot"),
         TextFont::from_font_size(17.0),
         TextColor(Color::srgb(0.76, 0.82, 0.78)),
         Node {
@@ -735,8 +754,8 @@ fn pocket_positions() -> [Vec2; 6] {
     ]
 }
 
-fn spawn_rack(commands: &mut Commands) {
-    const COLORS: [Color; 15] = [
+const fn ball_colors() -> [Color; 15] {
+    [
         Color::srgb(0.96, 0.75, 0.08),
         Color::srgb(0.10, 0.30, 0.85),
         Color::srgb(0.88, 0.12, 0.10),
@@ -752,7 +771,14 @@ fn spawn_rack(commands: &mut Commands) {
         Color::srgb(0.95, 0.38, 0.04),
         Color::srgb(0.08, 0.47, 0.20),
         Color::srgb(0.50, 0.12, 0.08),
-    ];
+    ]
+}
+
+fn spawn_rack(
+    commands: &mut Commands,
+    ball_mesh: &Handle<Mesh>,
+    ball_materials: &[Handle<ColorMaterial>; 15],
+) {
     let spacing = BALL_RADIUS * 2.05;
     let mut index = 0;
     for column in 0_u8..5 {
@@ -762,7 +788,8 @@ fn spawn_rack(commands: &mut Commands) {
             let x = (column * spacing).mul_add(0.87, 205.0);
             let y = (row - column / 2.0) * spacing;
             commands.spawn((
-                Sprite::from_color(COLORS[index], Vec2::splat(BALL_RADIUS * 2.0)),
+                Mesh2d(ball_mesh.clone()),
+                MeshMaterial2d(ball_materials[index].clone()),
                 Transform::from_xyz(x, y, 4.0),
                 CanonicalBall(u8::try_from(index + 1).expect("rack has fifteen balls")),
             ));
@@ -794,6 +821,20 @@ fn input_position(
     }
 
     mouse_is_pressed.then(|| window.cursor_position()).flatten()
+}
+
+fn classify_pointer_contact(cursor: Vec2, window_size: Vec2) -> PointerContact {
+    if cursor.x > window_size.x * POWER_ZONE_START {
+        return PointerContact::Power;
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let spin_offset = (cursor - SPIN_ZONE_CENTER) / SPIN_ZONE_RADIUS;
+        if spin_offset.length_squared() <= 1.0 || selected_pocket(cursor, window_size).is_some() {
+            return PointerContact::Auxiliary;
+        }
+    }
+    PointerContact::Aim
 }
 
 #[allow(clippy::needless_pass_by_ref_mut)]
@@ -931,14 +972,17 @@ fn update_input(
         *was_pressed = any_pressed;
         return;
     }
+    let started_contact = !*was_pressed && any_pressed;
     if *was_pressed && !any_pressed {
         #[cfg(target_arch = "wasm32")]
         {
-            if !input.placement_sent_during_contact {
+            if input.pointer_contact == PointerContact::Aim && !input.placement_sent_during_contact
+            {
                 let _ = release_shot(&input);
             }
             input.placement_sent_during_contact = false;
         }
+        input.pointer_contact = PointerContact::None;
     }
     *was_pressed = any_pressed;
     if !any_pressed {
@@ -949,6 +993,10 @@ fn update_input(
     let Some(cursor) = input_position(&window, mouse_is_pressed, &touches, &mut input) else {
         return;
     };
+    if started_contact {
+        input.pointer_contact =
+            classify_pointer_contact(cursor, Vec2::new(window.width(), window.height()));
+    }
     let mut placement_sent_during_contact = false;
     update_from_pointer(
         &mut input,
@@ -988,12 +1036,15 @@ fn release_shot(input: &PrototypeInput) -> Result<(), wasm_bindgen::JsValue> {
     send_shot_command(aim, power, spin_side, spin_vertical, called_pocket)
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 fn update_aim(
     input: Res<PrototypeInput>,
-    mut cue: Single<&mut Transform, (With<Cue>, Without<AimGuide>)>,
-    mut guide: Single<&mut Transform, (With<AimGuide>, Without<Cue>)>,
-    mut power: Single<(&mut Sprite, &mut Transform), With<PowerFill>>,
+    mut cue: Single<&mut Transform, (With<Cue>, Without<AimGuide>, Without<PowerFill>)>,
+    mut guide: Single<&mut Transform, (With<AimGuide>, Without<Cue>, Without<PowerFill>)>,
+    mut power: Single<
+        (&mut Sprite, &mut Transform),
+        (With<PowerFill>, Without<Cue>, Without<AimGuide>),
+    >,
 ) {
     let cue_ball = Vec2::new(-330.0, 0.0);
     let direction = Vec2::from_angle(input.aim_angle);
