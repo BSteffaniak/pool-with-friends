@@ -45,6 +45,12 @@ pub struct RollingSurface {
     hidden: bool,
 }
 
+// Transparent surfaces need distinct sort keys even at identical XY positions.
+// Keep all balls above the pockets (Z=3) and below the aiming guide (Z=6).
+fn ball_depth(number: u8) -> f32 {
+    f32::from(number).mul_add(0.01, 4.0)
+}
+
 pub fn spawn(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -60,7 +66,7 @@ pub fn spawn(
                 orientation: Quat::IDENTITY.to_array().into(),
                 number: Vec4::new(f32::from(number), 0.0, 0.0, 0.0),
             })),
-            Transform::from_translation(position.extend(4.0)),
+            Transform::from_translation(position.extend(ball_depth(number))),
             CanonicalBall(number),
             RollingSurface {
                 previous: position,
@@ -107,6 +113,22 @@ pub fn update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlapping_balls_have_unique_stable_depths_below_the_aiming_guide() {
+        // Every ball may occupy the same XY position; order must depend only on
+        // its stable identity, not spawn order, movement, or material updates.
+        let mut depths: Vec<_> = (0..=15)
+            .rev()
+            .map(|number| (number, ball_depth(number)))
+            .collect();
+        depths.sort_by(|left, right| left.1.total_cmp(&right.1));
+        for (expected, (number, depth)) in (0..=15).zip(&depths) {
+            assert_eq!(expected, *number);
+            assert!(*depth > 3.0 && *depth < 6.0);
+        }
+        assert!(depths.windows(2).all(|pair| pair[0].1 < pair[1].1));
+    }
 
     #[test]
     fn rolling_distance_and_direction_follow_sphere_geometry() {
