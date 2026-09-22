@@ -444,6 +444,7 @@ fn main() {
             }),
             ..default()
         }))
+        .add_plugins(ball_art::BallArtPlugin)
         .add_systems(Startup, setup)
         .add_systems(
             Update,
@@ -459,6 +460,7 @@ fn main() {
                 update_turn_status,
                 update_match_control_visibility,
                 interpolate_canonical_balls,
+                ball_art::update,
             )
                 .chain(),
         )
@@ -470,7 +472,8 @@ fn setup(
     mut commands: Commands,
     presentation_tier: Res<PresentationTier>,
     mut presentation: ResMut<CanonicalPresentation>,
-    mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut ball_materials: ResMut<Assets<ball_art::BallMaterial>>,
 ) {
     let initial = pwmtf_game_domain::MatchState::new(
         pwmtf_game_domain::RulesProfile::standard(),
@@ -535,7 +538,12 @@ fn setup(
         ));
     }
 
-    ball_art::spawn(&mut commands, &mut images, &presentation);
+    ball_art::spawn(
+        &mut commands,
+        &mut meshes,
+        &mut ball_materials,
+        &presentation,
+    );
     commands.spawn((
         Sprite::from_color(Color::srgba(0.95, 0.95, 0.85, 0.68), Vec2::new(370.0, 3.0)),
         Transform::from_xyz(-145.0, 0.0, 6.0),
