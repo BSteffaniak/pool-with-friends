@@ -6,13 +6,13 @@
 pub mod browser_transport;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::wasm_bindgen;
+mod ball_art;
 pub mod prediction;
 mod sandbox;
 pub mod transport;
 
 use bevy::{
     camera::{OrthographicProjection, Projection, ScalingMode},
-    color::palettes::css::WHITE,
     prelude::*,
     window::{PresentMode, WindowFocused, WindowResolution},
 };
@@ -470,8 +470,7 @@ fn setup(
     mut commands: Commands,
     presentation_tier: Res<PresentationTier>,
     mut presentation: ResMut<CanonicalPresentation>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     let initial = pwmtf_game_domain::MatchState::new(
         pwmtf_game_domain::RulesProfile::standard(),
@@ -536,18 +535,7 @@ fn setup(
         ));
     }
 
-    let ball_mesh = meshes.add(Circle::new(BALL_RADIUS));
-    let cue_ball_material = materials.add(ColorMaterial::from_color(WHITE));
-    let ball_materials = ball_colors().map(|color| materials.add(ColorMaterial::from_color(color)));
-
-    spawn_rack(&mut commands, &ball_mesh, &ball_materials);
-
-    commands.spawn((
-        Mesh2d(ball_mesh),
-        MeshMaterial2d(cue_ball_material),
-        Transform::from_xyz(-330.0, 0.0, 4.0),
-        CanonicalBall(0),
-    ));
+    ball_art::spawn(&mut commands, &mut images, &presentation);
     commands.spawn((
         Sprite::from_color(Color::srgba(0.95, 0.95, 0.85, 0.68), Vec2::new(370.0, 3.0)),
         Transform::from_xyz(-145.0, 0.0, 6.0),
@@ -803,50 +791,6 @@ fn pocket_positions() -> [Vec2; 6] {
         Vec2::new(TABLE_CENTER_X, half.y),
         Vec2::new(TABLE_CENTER_X + half.x, half.y),
     ]
-}
-
-const fn ball_colors() -> [Color; 15] {
-    [
-        Color::srgb(0.96, 0.75, 0.08),
-        Color::srgb(0.10, 0.30, 0.85),
-        Color::srgb(0.88, 0.12, 0.10),
-        Color::srgb(0.40, 0.12, 0.58),
-        Color::srgb(0.95, 0.38, 0.04),
-        Color::srgb(0.08, 0.47, 0.20),
-        Color::srgb(0.50, 0.12, 0.08),
-        Color::srgb(0.04, 0.04, 0.04),
-        Color::srgb(0.96, 0.75, 0.08),
-        Color::srgb(0.10, 0.30, 0.85),
-        Color::srgb(0.88, 0.12, 0.10),
-        Color::srgb(0.40, 0.12, 0.58),
-        Color::srgb(0.95, 0.38, 0.04),
-        Color::srgb(0.08, 0.47, 0.20),
-        Color::srgb(0.50, 0.12, 0.08),
-    ]
-}
-
-fn spawn_rack(
-    commands: &mut Commands,
-    ball_mesh: &Handle<Mesh>,
-    ball_materials: &[Handle<ColorMaterial>; 15],
-) {
-    let spacing = BALL_RADIUS * 2.05;
-    let mut index = 0;
-    for column in 0_u8..5 {
-        for row in 0_u8..=column {
-            let column = f32::from(column);
-            let row = f32::from(row);
-            let x = (column * spacing).mul_add(0.87, 205.0);
-            let y = (row - column / 2.0) * spacing;
-            commands.spawn((
-                Mesh2d(ball_mesh.clone()),
-                MeshMaterial2d(ball_materials[index].clone()),
-                Transform::from_xyz(x, y, 4.0),
-                CanonicalBall(u8::try_from(index + 1).expect("rack has fifteen balls")),
-            ));
-            index += 1;
-        }
-    }
 }
 
 fn input_position(
