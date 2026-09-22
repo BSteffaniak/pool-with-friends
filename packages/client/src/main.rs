@@ -458,7 +458,9 @@ fn main() {
                 resolution: WindowResolution::new(1280, 720),
                 present_mode: PresentMode::AutoVsync,
                 fit_canvas_to_parent: true,
-                prevent_default_event_handling: true,
+                // Preserve browser shortcuts (Cmd/Ctrl-R, Tab, developer tools).
+                // CSS touch-action handles gesture suppression independently.
+                prevent_default_event_handling: false,
                 ..default()
             }),
             ..default()
