@@ -206,6 +206,17 @@ button:focus-visible,
 a:focus-visible,
 input:focus-visible,
 select:focus-visible,
+#aim-mode-control {
+  position: absolute;
+  z-index: 3;
+  bottom: 0.75rem;
+  left: 0.75rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: 0.5rem;
+  color: var(--ink);
+  background: var(--panel);
+}
+
 #pwmtf-canvas:focus-visible {
   outline: 0.2rem solid var(--focus);
   outline-offset: 0.16rem;

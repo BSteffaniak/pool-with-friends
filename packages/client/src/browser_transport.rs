@@ -279,6 +279,20 @@ pub fn predicted_checksum() -> Option<u64> {
     })
 }
 
+/// Returns an isolated solver input for optional exact aiming previews.
+#[must_use]
+pub fn preview_state() -> Option<(
+    pwmtf_game_domain::VersionedTableState,
+    pwmtf_game_domain::PhysicsProfile,
+    pwmtf_game_domain::TableGeometry,
+)> {
+    TRANSPORT.with(|transport| {
+        let transport = transport.borrow();
+        let state = transport.prediction()?.predicted();
+        Some((state.table().clone(), state.physics(), state.geometry()))
+    })
+}
+
 /// Returns one predicted canonical ball's position and pocket state.
 #[must_use]
 pub fn predicted_ball(number: u8) -> Option<(pwmtf_game_domain::Vector, bool)> {

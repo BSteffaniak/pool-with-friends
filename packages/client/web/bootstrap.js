@@ -1604,6 +1604,10 @@ let lobbyPollTimer = null;
 let socialPollTimer = null;
 let socialRefreshInFlight = false;
 let wasmModule = null;
+const aimMode = document.querySelector("#aim-mode");
+aimMode.addEventListener("change", () => {
+  wasmModule?.set_exact_aim(aimMode.value === "exact");
+});
 
 function applyMatchAccess(access, requestedAtMs = Date.now(), receivedAtMs = Date.now()) {
   if (
@@ -2435,6 +2439,7 @@ try {
   }
   wasmModule = await import("./pwmtf_client.js");
   await wasmModule.default();
+  wasmModule.set_exact_aim(aimMode.value === "exact");
   await sessionReady;
   if (matchPlayerSeat !== null) {
     wasmModule.set_match_player(matchPlayerSeat);

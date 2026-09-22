@@ -4,6 +4,16 @@ use crate::{
 };
 use bevy::prelude::*;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+static EXACT: AtomicBool = AtomicBool::new(false);
+
+/// Selects canonical-solver previews; false retains the default geometric aid.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_exact_aim(enabled: bool) {
+    EXACT.store(enabled, Ordering::Relaxed);
+}
+
 fn circle_hit(origin: Vec2, direction: Vec2, center: Vec2, radius: f32) -> Option<f32> {
     let offset = center - origin;
     let along = offset.dot(direction);
@@ -67,6 +77,7 @@ pub fn draw(
     presentation: Res<CanonicalPresentation>,
     input: Res<PrototypeInput>,
     sandbox: Res<Sandbox>,
+    mut exact: ResMut<crate::exact_preview::ExactPreview>,
 ) {
     let enabled = sandbox.enabled && !sandbox.moving;
     #[cfg(target_arch = "wasm32")]
@@ -76,6 +87,34 @@ pub fn draw(
     }
     #[cfg(target_arch = "wasm32")]
     if input.placing_cue_ball {
+        return;
+    }
+    if EXACT.load(Ordering::Relaxed) {
+        let state = if sandbox.enabled {
+            Some((
+                sandbox.table.clone(),
+                pwmtf_game_domain::PhysicsProfile::standard(),
+                pwmtf_game_domain::TableGeometry::standard(),
+            ))
+        } else {
+            #[cfg(target_arch = "wasm32")]
+            {
+                crate::browser_transport::preview_state()
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                None
+            }
+        };
+        if let Some((table, physics, geometry)) = state {
+            exact.draw(
+                &mut gizmos,
+                table,
+                physics,
+                geometry,
+                crate::practice_shot(&input),
+            );
+        }
         return;
     }
     let Some(&origin) = presentation.target.get(&0) else {

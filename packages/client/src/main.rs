@@ -8,6 +8,7 @@ pub mod browser_transport;
 use wasm_bindgen::prelude::wasm_bindgen;
 mod aim_preview;
 mod ball_art;
+mod exact_preview;
 pub mod prediction;
 mod sandbox;
 pub mod transport;
@@ -447,6 +448,7 @@ fn main() {
         .insert_resource(PresentationTier(presentation_tier))
         .init_resource::<PrototypeInput>()
         .init_resource::<CanonicalPresentation>()
+        .init_resource::<exact_preview::ExactPreview>()
         .init_resource::<sandbox::Sandbox>()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -1093,17 +1095,7 @@ fn update_input(
 
 #[cfg(target_arch = "wasm32")]
 fn release_shot(input: &PrototypeInput) -> Result<(), wasm_bindgen::JsValue> {
-    let turns = input.aim_angle.rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let aim = (turns * f32::from(pwmtf_game_domain::Aim::STEPS_PER_TURN)).round() as u16
-        % pwmtf_game_domain::Aim::STEPS_PER_TURN;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let power =
-        (input.power.clamp(0.0, 1.0) * f32::from(pwmtf_game_domain::ShotPower::MAX)).round() as u16;
-    #[allow(clippy::cast_possible_truncation)]
-    let spin_side = (input.spin.x.clamp(-1.0, 1.0) * 10_000.0).round() as i16;
-    #[allow(clippy::cast_possible_truncation)]
-    let spin_vertical = (input.spin.y.clamp(-1.0, 1.0) * 10_000.0).round() as i16;
+    let shot = practice_shot(input);
     let called_pocket = input.called_pocket.map_or(0, |pocket| match pocket {
         pwmtf_game_domain::PocketId::TopLeft => 1,
         pwmtf_game_domain::PocketId::TopCenter => 2,
@@ -1112,7 +1104,13 @@ fn release_shot(input: &PrototypeInput) -> Result<(), wasm_bindgen::JsValue> {
         pwmtf_game_domain::PocketId::BottomCenter => 5,
         pwmtf_game_domain::PocketId::BottomRight => 6,
     });
-    send_shot_command(aim, power, spin_side, spin_vertical, called_pocket)
+    send_shot_command(
+        shot.aim.steps(),
+        shot.power.units(),
+        shot.spin.side,
+        shot.spin.vertical,
+        called_pocket,
+    )
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
