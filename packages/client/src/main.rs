@@ -8,6 +8,7 @@ pub mod browser_transport;
 use wasm_bindgen::prelude::wasm_bindgen;
 mod aim_preview;
 mod ball_art;
+mod cue_art;
 mod exact_preview;
 pub mod prediction;
 mod sandbox;
@@ -497,6 +498,7 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut ball_materials: ResMut<Assets<ball_art::BallMaterial>>,
     mut pocket_materials: ResMut<Assets<ColorMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     let initial = pwmtf_game_domain::MatchState::new(
         pwmtf_game_domain::RulesProfile::standard(),
@@ -562,12 +564,7 @@ fn setup(
         &mut ball_materials,
         &presentation,
     );
-    commands.spawn((
-        Sprite::from_color(Color::srgb(0.72, 0.40, 0.13), Vec2::new(420.0, 11.0)),
-        Transform::from_xyz(-552.0, 0.0, 7.0),
-        Cue,
-        MatchControlChrome,
-    ));
+    cue_art::spawn(&mut commands, &mut images);
 
     spawn_rectangle(
         &mut commands,
