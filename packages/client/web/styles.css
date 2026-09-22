@@ -232,10 +232,19 @@ select:focus-visible,
   -webkit-backdrop-filter: blur(1rem);
 }
 
-#social-panel > strong {
+#social-panel > summary {
+  cursor: pointer;
   color: var(--gold);
   font-size: 1.1rem;
   letter-spacing: 0.02em;
+}
+
+#social-panel[open] > :not(summary) {
+  margin-top: 0.7rem;
+}
+
+#social-panel:not([open]) > :not(summary) {
+  display: none;
 }
 
 #social-panel[hidden] {

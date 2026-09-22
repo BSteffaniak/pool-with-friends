@@ -989,19 +989,17 @@ pub enum SimulationError {
     EventLimitExceeded,
 }
 
-/// Simulates one complete bounded shot using canonical fixed-point state.
+/// Starts a bounded shot without advancing time, for fixed-tick playback.
 ///
 /// # Errors
 ///
-/// Returns [`SimulationError`] for an unsupported command, invalid starting
-/// phase, missing or pocketed cue ball, event overflow, or a shot that does not
-/// settle within the profile's tick bound.
-pub fn simulate_shot(
-    geometry: TableGeometry,
+/// Returns [`SimulationError`] for an unsupported command version, a moving
+/// table, or an absent or pocketed cue ball.
+pub fn start_shot(
     profile: PhysicsProfile,
     mut state: VersionedTableState,
     command: VersionedShotCommand,
-) -> Result<SimulationResult, SimulationError> {
+) -> Result<VersionedTableState, SimulationError> {
     if command.version != VersionedShotCommand::VERSION {
         return Err(SimulationError::UnsupportedCommandVersion(command.version));
     }
@@ -1029,6 +1027,22 @@ pub fn simulate_shot(
             10_000,
         ),
     );
+    Ok(state)
+}
+
+/// Simulates a complete bounded shot using canonical fixed-tick physics.
+///
+/// # Errors
+///
+/// Returns [`SimulationError`] if the command or table cannot start a shot,
+/// the event limit is exceeded, or the shot fails to settle in time.
+pub fn simulate_shot(
+    geometry: TableGeometry,
+    profile: PhysicsProfile,
+    state: VersionedTableState,
+    command: VersionedShotCommand,
+) -> Result<SimulationResult, SimulationError> {
+    let mut state = start_shot(profile, state, command)?;
     let mut events = Vec::new();
     push_event(
         &mut events,

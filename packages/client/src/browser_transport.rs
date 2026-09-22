@@ -218,6 +218,7 @@ pub fn accepts_active_player_command() -> bool {
 }
 
 /// Returns and clears whether the authoritative server rejected the latest command.
+#[must_use]
 pub fn take_command_rejected() -> bool {
     TRANSPORT.with(|transport| transport.borrow_mut().take_command_rejected())
 }

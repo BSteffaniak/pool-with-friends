@@ -9,6 +9,7 @@ const developmentSignIn = document.querySelector("#development-sign-in");
 const developmentUsername = document.querySelector("#development-username");
 const signOut = document.querySelector("#sign-out");
 const socialPanel = document.querySelector("#social-panel");
+socialPanel.open = new URLSearchParams(window.location.search).has("match");
 const handleForm = document.querySelector("#handle-form");
 const handleInput = document.querySelector("#handle-input");
 const challengeForm = document.querySelector("#challenge-form");
@@ -2105,31 +2106,38 @@ async function pollLobby() {
 }
 
 function enterLobby(lobby) {
+  socialPanel.open = true;
   const nextLobbyId = String(lobby.lobby_id);
   if (activeLobbyId === nextLobbyId && activeLobbyConnectionId !== null) {
     return;
   }
   stopLobbyPolling();
+  void disconnectLobbyPresence().catch(socialFailure);
   activeLobbyId = nextLobbyId;
   lobbyPanel.hidden = false;
   lobbyLabel.textContent = `Lobby ${lobby.lobby_id}`;
   lobbyState.textContent = "Waiting for both players";
   cancelLobbyButton.hidden = false;
   readyLobbyButton.hidden = false;
+  readyLobbyButton.disabled = true;
   socialStatus.textContent = `Joined waiting lobby ${lobby.lobby_id}.`;
   if (activeLobbyId !== null && activeLobbyConnectionId === null) {
     socialStatus.textContent = "Connecting to lobby…";
   }
   void apiRequest(`/api/lobbies/${lobby.lobby_id}`, { method: "POST" })
     .then((connection) => {
+      if (activeLobbyId !== nextLobbyId) {
+        return apiRequest(`/api/lobbies/${nextLobbyId}/connections/${connection.connection_id}`, { method: "DELETE" });
+      }
       activeLobbyConnectionId = connection.connection_id;
+      readyLobbyButton.disabled = false;
       return pollLobby();
     })
     .catch(socialFailure);
 }
 
 readyLobbyButton.addEventListener("click", async () => {
-  if (activeLobbyId === null) {
+  if (activeLobbyId === null || activeLobbyConnectionId === null) {
     return;
   }
   readyLobbyButton.disabled = true;

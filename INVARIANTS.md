@@ -6,6 +6,15 @@ These are durable conditions of a valid Pool with More Than Friends implementati
 
 Only the native server's canonical match aggregate decides accepted commands, simulation state, pockets, groups, fouls, turns, deadlines, ball-in-hand, concessions, and results. Client, transport, render, prediction, interpolation, cache, and projection state never become gameplay authority.
 
+## Disposable solo practice
+
+The home page runs an immediately playable, browser-local sandbox using the
+Rust domain physics. This is an explicit exception to server authority and durable
+command acceptance for solo practice only: no identity, transport, persistence,
+turns, competitive results, or multiplayer state are involved. Scratches restore
+the cue ball and clearing all object balls starts a fresh rack. Opening a match
+URL disables practice; a disconnected match never falls back to local authority.
+
 ## Domain independence
 
 Canonical 8-ball rules and billiards physics are renderer- and infrastructure-independent. The game domain does not depend on Bevy, ECS query order, browser APIs, networking, HTTP, identity, persistence, Switchy, or deployment adapters.

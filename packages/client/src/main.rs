@@ -7,6 +7,7 @@ pub mod browser_transport;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::wasm_bindgen;
 pub mod prediction;
+mod sandbox;
 pub mod transport;
 
 use bevy::{
@@ -232,6 +233,7 @@ pub fn match_accepts_active_player_command() -> bool {
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 /// Returns and clears whether authority rejected the latest gameplay command.
+#[must_use]
 pub fn match_command_rejected() -> bool {
     browser_transport::take_command_rejected()
 }
@@ -376,6 +378,51 @@ fn random_command_id() -> Result<pwmtf_protocol::CommandId, wasm_bindgen::JsValu
     Ok(pwmtf_protocol::CommandId::new(bytes))
 }
 
+fn practice_shot(input: &PrototypeInput) -> pwmtf_game_domain::VersionedShotCommand {
+    use pwmtf_game_domain::{Aim, ShotPower, Spin, VersionedShotCommand};
+    let turns = input.aim_angle.rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let aim = (turns * f32::from(Aim::STEPS_PER_TURN)).round() as u16 % Aim::STEPS_PER_TURN;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let power = (input.power.clamp(0.0, 1.0) * f32::from(ShotPower::MAX)).round() as u16;
+    VersionedShotCommand::new(
+        Aim::new(aim).expect("bounded aim"),
+        ShotPower::new(power).expect("bounded power"),
+        Spin::CENTER,
+    )
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn update_sandbox(
+    time: Res<Time>,
+    mut sandbox: ResMut<sandbox::Sandbox>,
+    mut presentation: ResMut<CanonicalPresentation>,
+) {
+    if !sandbox.enabled {
+        return;
+    }
+    sandbox.update(time.delta_secs_f64());
+    presentation.target.clear();
+    presentation.pocketed.clear();
+    for ball in sandbox.table.balls() {
+        if ball.pocketed {
+            presentation.pocketed.insert(ball.id.number());
+        } else {
+            presentation
+                .target
+                .insert(ball.id.number(), canonical_to_world(ball.position));
+        }
+    }
+    presentation.status = Some(
+        if sandbox.moving {
+            "Practice · balls rolling…"
+        } else {
+            "Practice · drag to aim, release to shoot · power on the right"
+        }
+        .into(),
+    );
+}
+
 fn main() {
     let presentation_tier = presentation_tier();
     App::new()
@@ -383,6 +430,7 @@ fn main() {
         .insert_resource(PresentationTier(presentation_tier))
         .init_resource::<PrototypeInput>()
         .init_resource::<CanonicalPresentation>()
+        .init_resource::<sandbox::Sandbox>()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: format!("Pool with More Than Friends · {presentation_tier} tier"),
@@ -403,6 +451,7 @@ fn main() {
                 cancel_input_on_focus_loss,
                 update_orientation,
                 rearm_input_after_valid_landscape,
+                update_sandbox,
                 update_input,
                 update_aim,
                 #[cfg(target_arch = "wasm32")]
@@ -704,6 +753,7 @@ fn update_turn_status(
 
 #[allow(clippy::needless_pass_by_value)]
 fn update_match_control_visibility(
+    sandbox: Res<sandbox::Sandbox>,
     presentation: Res<CanonicalPresentation>,
     mut controls: Query<&mut Visibility, With<MatchControlChrome>>,
 ) {
@@ -711,9 +761,10 @@ fn update_match_control_visibility(
         return;
     }
     #[cfg(target_arch = "wasm32")]
-    let local_may_act = browser_transport::accepts_active_player_command();
+    let local_may_act =
+        (sandbox.enabled && !sandbox.moving) || browser_transport::accepts_active_player_command();
     #[cfg(not(target_arch = "wasm32"))]
-    let local_may_act = presentation.active_player.is_some();
+    let local_may_act = sandbox.enabled && !sandbox.moving;
     let visibility = if local_may_act {
         Visibility::Inherited
     } else {
@@ -961,22 +1012,33 @@ fn update_input(
     touches: Res<Touches>,
     mut input: ResMut<PrototypeInput>,
     mut was_pressed: Local<bool>,
+    mut sandbox: ResMut<sandbox::Sandbox>,
+    presentation: Res<CanonicalPresentation>,
 ) {
     let mouse_is_pressed = mouse.pressed(MouseButton::Left);
     let any_pressed = mouse_is_pressed || touches.iter().next().is_some();
     #[cfg(target_arch = "wasm32")]
-    if !browser_transport::accepts_active_player_command() {
+    if !(browser_transport::accepts_active_player_command() || sandbox.enabled && !sandbox.moving) {
         if any_pressed {
             input.release_active_touch(true);
         }
         *was_pressed = any_pressed;
         return;
     }
+    if sandbox.enabled && sandbox.moving {
+        *was_pressed = any_pressed;
+        return;
+    }
     let started_contact = !*was_pressed && any_pressed;
     if *was_pressed && !any_pressed {
+        if sandbox.enabled && input.pointer_contact == PointerContact::Aim {
+            sandbox.shoot(practice_shot(&input));
+        }
         #[cfg(target_arch = "wasm32")]
         {
-            if input.pointer_contact == PointerContact::Aim && !input.placement_sent_during_contact
+            if !sandbox.enabled
+                && input.pointer_contact == PointerContact::Aim
+                && !input.placement_sent_during_contact
             {
                 let _ = release_shot(&input);
             }
@@ -1004,6 +1066,17 @@ fn update_input(
         Vec2::new(window.width(), window.height()),
         &mut placement_sent_during_contact,
     );
+    if input.pointer_contact == PointerContact::Aim {
+        let window_size = Vec2::new(window.width(), window.height());
+        let scale = (window_size / DESIGN_SIZE).min_element();
+        let world = Vec2::new(
+            cursor.x - window_size.x / 2.0,
+            window_size.y / 2.0 - cursor.y,
+        ) / scale;
+        let cue = presentation.target.get(&0).copied().unwrap_or(Vec2::ZERO);
+        let direction = world - cue;
+        input.aim_angle = direction.y.atan2(direction.x);
+    }
     #[cfg(target_arch = "wasm32")]
     {
         input.placement_sent_during_contact |= placement_sent_during_contact;
@@ -1038,6 +1111,7 @@ fn release_shot(input: &PrototypeInput) -> Result<(), wasm_bindgen::JsValue> {
 
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 fn update_aim(
+    presentation: Res<CanonicalPresentation>,
     input: Res<PrototypeInput>,
     mut cue: Single<&mut Transform, (With<Cue>, Without<AimGuide>, Without<PowerFill>)>,
     mut guide: Single<&mut Transform, (With<AimGuide>, Without<Cue>, Without<PowerFill>)>,
@@ -1046,7 +1120,11 @@ fn update_aim(
         (With<PowerFill>, Without<Cue>, Without<AimGuide>),
     >,
 ) {
-    let cue_ball = Vec2::new(-330.0, 0.0);
+    let cue_ball = presentation
+        .target
+        .get(&0)
+        .copied()
+        .unwrap_or(Vec2::new(-330.0, 0.0));
     let direction = Vec2::from_angle(input.aim_angle);
     cue.translation = (cue_ball - direction * input.power.mul_add(42.0, 222.0)).extend(7.0);
     cue.rotation = Quat::from_rotation_z(input.aim_angle);
