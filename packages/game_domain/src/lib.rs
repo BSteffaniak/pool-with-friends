@@ -24,7 +24,7 @@ pub const TABLE_STATE_VERSION: u16 = 2;
 mod motion;
 
 /// Current built-in physics profile version.
-pub const PHYSICS_PROFILE_VERSION: u16 = 3;
+pub const PHYSICS_PROFILE_VERSION: u16 = 4;
 const TRIG_SCALE: i64 = 1_000_000;
 const CORDIC_GAIN_INVERSE: i64 = 607_253;
 const CORDIC_ANGLES: [i64; 29] = [
@@ -251,33 +251,45 @@ impl TableGeometry {
         self.pocket_radius
     }
 
-    /// Returns rounded cushion-jaw centers and their shared physical radius.
-    /// Straight rail openings terminate at these centers; presentation uses
-    /// these exact dimensions rather than separately authored pocket shapes.
+    /// Continuous cushion noses and pocket facings. Each pair is a segment;
+    /// endpoints join exactly, with ball-radius contact rounding handled by
+    /// the solver. Rendering consumes this same boundary.
     #[must_use]
-    pub fn pocket_jaws(self) -> (Vec<Vector>, Scalar) {
-        let radius = self.pocket_radius.0 * 2 / 5;
+    pub fn cushion_segments(self) -> Vec<(Vector, Vector)> {
+        let w = self.half_width.0;
+        let h = self.half_height.0;
         let side = self.pocket_radius.0 * 3 / 2;
         let corner = self.pocket_radius.0 * 9 / 5;
-        let inset = radius / 2;
-        let mut centers = Vec::with_capacity(12);
-        for sign_y in [-1, 1] {
-            for sign_x in [-1, 1] {
-                centers.push(Vector::from_micros(
-                    sign_x * side,
-                    sign_y * (self.half_height.0 + inset),
+        let throat = self.pocket_radius.0;
+        let depth = self.ball_radius.0;
+        let mut segments = Vec::with_capacity(18);
+        for y in [-1, 1] {
+            for x in [-1, 1] {
+                segments.push((
+                    Vector::from_micros(x * side, y * h),
+                    Vector::from_micros(x * (w - corner), y * h),
                 ));
-                centers.push(Vector::from_micros(
-                    sign_x * (self.half_width.0 - corner),
-                    sign_y * (self.half_height.0 + inset),
+                segments.push((
+                    Vector::from_micros(x * side, y * h),
+                    Vector::from_micros(x * throat, y * (h + depth)),
                 ));
-                centers.push(Vector::from_micros(
-                    sign_x * (self.half_width.0 + inset),
-                    sign_y * (self.half_height.0 - corner),
+                segments.push((
+                    Vector::from_micros(x * (w - corner), y * h),
+                    Vector::from_micros(x * (w - throat), y * (h + depth)),
+                ));
+                segments.push((
+                    Vector::from_micros(x * w, y * (h - corner)),
+                    Vector::from_micros(x * (w + depth), y * (h - throat)),
                 ));
             }
         }
-        (centers, Scalar::from_micros(radius))
+        for x in [-1, 1] {
+            segments.push((
+                Vector::from_micros(x * w, -h + corner),
+                Vector::from_micros(x * w, h - corner),
+            ));
+        }
+        segments
     }
 
     /// Whether a coordinate along a horizontal/vertical rail is in a pocket mouth.
@@ -1166,10 +1178,20 @@ fn resolve_pockets(
     geometry: TableGeometry,
     events: &mut Vec<SimulationEventKind>,
 ) {
-    let radius_squared = squared_i128(geometry.pocket_radius.0 - geometry.ball_radius.0 / 2);
     for ball in balls.iter_mut().filter(|ball| !ball.pocketed) {
         if let Some(pocket) = PocketId::ALL.into_iter().find(|pocket| {
-            squared_distance(ball.position, pocket_position(*pocket, geometry)) <= radius_squared
+            let center = pocket_position(*pocket, geometry);
+            let x = ball.position.x.0 * center.x.0.signum();
+            let y = ball.position.y.0 * center.y.0.signum();
+            if center.x.0 == 0 {
+                ball.position.x.0.abs() <= geometry.pocket_radius.0 * 3 / 2
+                    && y >= geometry.half_height.0
+            } else {
+                x >= geometry.half_width.0 - geometry.pocket_radius.0 * 9 / 5
+                    && y >= geometry.half_height.0 - geometry.pocket_radius.0 * 9 / 5
+                    && x + y
+                        >= geometry.half_width.0 + geometry.half_height.0 - geometry.pocket_radius.0
+            }
         }) {
             ball.pocketed = true;
             ball.velocity = Vector::ZERO;

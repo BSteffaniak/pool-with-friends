@@ -835,15 +835,15 @@ fn spawn_pocket_art(
             Transform::from_translation(pocket.extend(2.6)),
         ));
     }
-    let (jaws, jaw_radius) = geometry.pocket_jaws();
-    #[allow(clippy::cast_precision_loss)]
-    let jaw = meshes.add(Circle::new(jaw_radius.micros() as f32 * scale));
-    let rubber = materials.add(ColorMaterial::from_color(Color::srgb(0.025, 0.29, 0.15)));
-    for center in jaws {
+    let rubber = Color::srgb(0.025, 0.29, 0.15);
+    for (a, b) in geometry.cushion_segments() {
+        let a = canonical_to_world(a);
+        let b = canonical_to_world(b);
+        let direction = b - a;
         commands.spawn((
-            Mesh2d(jaw.clone()),
-            MeshMaterial2d(rubber.clone()),
-            Transform::from_translation(canonical_to_world(center).extend(2.8)),
+            Sprite::from_color(rubber, Vec2::new(direction.length(), 3.0)),
+            Transform::from_translation(((a + b) / 2.0).extend(2.8))
+                .with_rotation(Quat::from_rotation_z(direction.y.atan2(direction.x))),
         ));
     }
 }

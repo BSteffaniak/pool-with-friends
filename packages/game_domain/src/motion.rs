@@ -39,12 +39,15 @@ pub fn advance(
         }
         resolve_pockets(&mut state.balls, geometry, events);
         cushions(&mut state.balls, geometry, profile, events);
-        jaws(&mut state.balls, geometry, profile, events);
+
         // Revisit contacts so impulses propagate through a tight rack rather
         // than being limited to one identifier-ordered sweep.
         for _ in 0..4 {
             contacts(&mut state.balls, geometry, profile, events);
         }
+        // Resolve contact before crossing the full-width pocket drop boundary.
+        // This also catches displacement introduced by contact separation.
+        resolve_pockets(&mut state.balls, geometry, events);
         for ball in state.balls.iter_mut().filter(|ball| !ball.pocketed) {
             cloth(ball, profile, frequency);
         }
@@ -148,27 +151,37 @@ fn contacts(
     }
 }
 
-fn jaws(
+fn cushions(
     balls: &mut [BallState],
     geometry: TableGeometry,
     profile: PhysicsProfile,
     events: &mut Vec<SimulationEventKind>,
 ) {
-    let (centers, radius) = geometry.pocket_jaws();
-    let contact_radius = radius.0 + geometry.ball_radius.0;
+    let segments = geometry.cushion_segments();
+    let radius = geometry.ball_radius.0;
     for ball in balls.iter_mut().filter(|ball| !ball.pocketed) {
-        for center in &centers {
-            let dx = ball.position.x.0 - center.x.0;
-            let dy = ball.position.y.0 - center.y.0;
+        for &(a, b) in &segments {
+            let sx = b.x.0 - a.x.0;
+            let sy = b.y.0 - a.y.0;
+            let length_squared = squared_i128(sx) + squared_i128(sy);
+            let projection = (i128::from(ball.position.x.0 - a.x.0) * i128::from(sx)
+                + i128::from(ball.position.y.0 - a.y.0) * i128::from(sy))
+            .clamp(0, length_squared);
+            let closest_x =
+                a.x.0 + i64::try_from(i128::from(sx) * projection / length_squared).unwrap_or(0);
+            let closest_y =
+                a.y.0 + i64::try_from(i128::from(sy) * projection / length_squared).unwrap_or(0);
+            let dx = ball.position.x.0 - closest_x;
+            let dy = ball.position.y.0 - closest_y;
             let squared = squared_i128(dx) + squared_i128(dy);
-            if squared >= squared_i128(contact_radius) || squared == 0 {
+            if squared >= squared_i128(radius) || squared == 0 {
                 continue;
             }
             let distance = integer_sqrt(squared).max(1);
             let normal =
                 mul_div(ball.velocity.x.0, dx, distance) + mul_div(ball.velocity.y.0, dy, distance);
-            ball.position.x.0 = center.x.0 + mul_div(dx, contact_radius + 2, distance);
-            ball.position.y.0 = center.y.0 + mul_div(dy, contact_radius + 2, distance);
+            ball.position.x.0 = closest_x + mul_div(dx, radius + 2, distance);
+            ball.position.y.0 = closest_y + mul_div(dy, radius + 2, distance);
             if normal >= 0 {
                 continue;
             }
@@ -177,78 +190,16 @@ fn jaws(
                 1_000_000 + i64::from(profile.cushion_restitution_millionths),
                 1_000_000,
             );
-            ball.velocity.x.0 += mul_div(impulse, dx, distance);
-            ball.velocity.y.0 += mul_div(impulse, dy, distance);
+            let tangent = mul_div(ball.velocity.x.0, -dy, distance)
+                + mul_div(ball.velocity.y.0, dx, distance)
+                - ball.side_spin.0;
+            let friction = mul_div(tangent, 2, 7).clamp(-impulse / 5, impulse / 5);
+            ball.velocity.x.0 += mul_div(impulse, dx, distance) + mul_div(friction, dy, distance);
+            ball.velocity.y.0 += mul_div(impulse, dy, distance) - mul_div(friction, dx, distance);
+            ball.side_spin.0 += mul_div(friction, 5, 2);
             events.push(SimulationEventKind::CushionContact {
                 ball: ball.id,
                 axis: if dx.abs() > dy.abs() {
-                    CushionAxis::Horizontal
-                } else {
-                    CushionAxis::Vertical
-                },
-            });
-        }
-    }
-}
-
-fn cushions(
-    balls: &mut [BallState],
-    geometry: TableGeometry,
-    profile: PhysicsProfile,
-    events: &mut Vec<SimulationEventKind>,
-) {
-    let max_x = geometry.half_width.0 - geometry.ball_radius.0;
-    let max_y = geometry.half_height.0 - geometry.ball_radius.0;
-    for ball in balls.iter_mut().filter(|ball| !ball.pocketed) {
-        for (horizontal, limit) in [(true, max_x), (false, max_y)] {
-            let along = if horizontal {
-                ball.position.y
-            } else {
-                ball.position.x
-            };
-            if geometry.rail_opening(!horizontal, along) {
-                continue;
-            }
-            let position = if horizontal {
-                ball.position.x.0
-            } else {
-                ball.position.y.0
-            };
-            if position.abs() <= limit {
-                continue;
-            }
-            let sign = position.signum();
-            let (normal, tangent) = if horizontal {
-                (ball.velocity.x.0 * sign, ball.velocity.y.0 * sign)
-            } else {
-                (ball.velocity.y.0 * sign, -ball.velocity.x.0 * sign)
-            };
-            if horizontal {
-                ball.position.x.0 = sign * limit;
-            } else {
-                ball.position.y.0 = sign * limit;
-            }
-            if normal <= 0 {
-                continue;
-            }
-            let rebound = mul_div(
-                normal,
-                i64::from(profile.cushion_restitution_millionths),
-                1_000_000,
-            );
-            let friction = mul_div(tangent + ball.side_spin.0, 2, 7)
-                .clamp(-(normal + rebound) / 5, (normal + rebound) / 5);
-            if horizontal {
-                ball.velocity.x.0 = -sign * rebound;
-                ball.velocity.y.0 -= sign * friction;
-            } else {
-                ball.velocity.y.0 = -sign * rebound;
-                ball.velocity.x.0 += sign * friction;
-            }
-            ball.side_spin.0 -= mul_div(friction, 5, 2);
-            events.push(SimulationEventKind::CushionContact {
-                ball: ball.id,
-                axis: if horizontal {
                     CushionAxis::Horizontal
                 } else {
                     CushionAxis::Vertical
@@ -328,7 +279,7 @@ mod tests {
         let geometry = TableGeometry::standard();
         let mut cue = BallState::stationary(
             BallId::CUE,
-            Vector::from_micros(geometry.half_width.0, 200_000),
+            Vector::from_micros(geometry.half_width.0 - 20_000, 200_000),
         );
         cue.velocity.x.0 = 1_000_000;
         cue.side_spin.0 = 300_000;
@@ -407,9 +358,9 @@ mod tests {
             &mut Vec::new(),
         );
         assert_eq!(centered.velocity.y.0, 500_000);
-        let mut clipped = BallState::stationary(BallId::CUE, Vector::from_micros(60_000, 603_000));
+        let mut clipped = BallState::stationary(BallId::CUE, Vector::from_micros(60_000, 615_000));
         clipped.velocity.y.0 = 500_000;
-        jaws(
+        cushions(
             std::slice::from_mut(&mut clipped),
             geometry,
             profile,
@@ -447,6 +398,49 @@ mod tests {
                 }
             }
             assert!(state.balls[0].pocketed, "missed {pocket:?}");
+        }
+    }
+
+    #[test]
+    fn swept_pocket_approaches_never_escape_the_board() {
+        let geometry = TableGeometry::standard();
+        for pocket in crate::PocketId::ALL {
+            let center = crate::pocket_position(pocket, geometry);
+            for offset in (-100_000..=100_000).step_by(20_000) {
+                for sideways in [-2_000_000, 0, 2_000_000] {
+                    let x = center.x.0.signum();
+                    let y = center.y.0.signum();
+                    let position = Vector::from_micros(
+                        center.x.0 - x * 160_000 + offset,
+                        center.y.0 - y * 160_000,
+                    );
+                    let mut ball = BallState::stationary(BallId::CUE, position);
+                    ball.velocity = Vector::from_micros(x * 5_000_000 + sideways, y * 5_000_000);
+                    let Ok(mut state) = VersionedTableState::new(
+                        crate::TABLE_STATE_VERSION,
+                        geometry,
+                        0,
+                        vec![ball],
+                    ) else {
+                        continue;
+                    };
+                    for _ in 0..240 {
+                        state = crate::advance_tick(geometry, PhysicsProfile::standard(), state)
+                            .unwrap()
+                            .state;
+                        let ball = state.balls[0];
+                        if ball.pocketed {
+                            break;
+                        }
+                        assert!(
+                            ball.position.x.0.abs() <= geometry.half_width.0
+                                && ball.position.y.0.abs() <= geometry.half_height.0,
+                            "escaped {pocket:?}, offset={offset}, lateral={sideways}: {:?}",
+                            ball.position
+                        );
+                    }
+                }
+            }
         }
     }
 
