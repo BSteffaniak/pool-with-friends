@@ -20,6 +20,7 @@ pub struct ExactPreview {
     contact: Option<Vec2>,
     object: Option<u8>,
     lengths: [f32; 16],
+    stopped: [bool; 16],
     published: Vec<(u8, Vec2, Vec2)>,
     published_contact: Option<Vec2>,
     contact_tick: Option<u32>,
@@ -63,6 +64,25 @@ fn average_paths(samples: &[(u8, Vec2, Vec2)]) -> Vec<(u8, Vec2, Vec2)> {
         .collect()
 }
 
+// Tick endpoints include collision response and overlap correction. Exclude the
+// whole tick on secondary contact, rather than averaging its post-impact motion.
+fn stop_colliding_paths(stopped: &mut [bool; 16], events: &[pwmtf_game_domain::SimulationEvent]) {
+    use pwmtf_game_domain::SimulationEventKind;
+    for event in events {
+        match event.kind {
+            SimulationEventKind::BallContact { first, second } => {
+                stopped[usize::from(first.number())] = true;
+                stopped[usize::from(second.number())] = true;
+            }
+            SimulationEventKind::CushionContact { ball, .. }
+            | SimulationEventKind::BallPocketed { ball, .. } => {
+                stopped[usize::from(ball.number())] = true;
+            }
+            _ => {}
+        }
+    }
+}
+
 impl ExactPreview {
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
@@ -95,6 +115,7 @@ impl ExactPreview {
             self.contact = None;
             self.object = None;
             self.lengths = [0.0; 16];
+            self.stopped = [false; 16];
             self.contact_tick = None;
         }
         // A short trajectory, generated in bounded work slices while aiming.
@@ -137,6 +158,10 @@ impl ExactPreview {
                 break;
             };
             self.ticks += 1;
+            let had_contact = self.contact.is_some();
+            if had_contact {
+                stop_colliding_paths(&mut self.stopped, &result.events);
+            }
             if self.contact.is_none() {
                 for event in &result.events {
                     if let pwmtf_game_domain::SimulationEventKind::BallContact { first, second } =
@@ -170,10 +195,12 @@ impl ExactPreview {
             }
             if self.contact.is_some() && self.contact_tick.is_none() {
                 self.contact_tick = Some(self.ticks);
+                self.stop_same_tick_contacts(&result.events);
             }
             for (a, b) in before.balls().iter().zip(result.state.balls()) {
                 if !a.pocketed && !b.pocketed && a.position != b.position {
-                    if self.contact.is_some()
+                    if had_contact
+                        && !self.stopped[usize::from(a.id.number())]
                         && (a.id.number() == 0 || Some(a.id.number()) == self.object)
                     {
                         let number = a.id.number();
@@ -203,6 +230,24 @@ impl ExactPreview {
             {
                 self.moving = Some(result.state);
             }
+        }
+    }
+
+    fn stop_same_tick_contacts(&mut self, events: &[pwmtf_game_domain::SimulationEvent]) {
+        // Events within a tick are canonicalized, so when another
+        // contact shares the initiating tick there is no safe free
+        // flight to average for its participants.
+        let mut skipped_initial = false;
+        for event in events {
+            if !skipped_initial
+                && matches!(event.kind,
+                        pwmtf_game_domain::SimulationEventKind::BallContact { first, second }
+                        if first.number() == 0 || second.number() == 0)
+            {
+                skipped_initial = true;
+                continue;
+            }
+            stop_colliding_paths(&mut self.stopped, std::slice::from_ref(event));
         }
     }
 
@@ -243,6 +288,39 @@ impl ExactPreview {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn secondary_contacts_stop_only_involved_paths_and_stay_stopped() {
+        use pwmtf_game_domain::{BallId, CushionAxis, SimulationEvent, SimulationEventKind};
+        let mut stopped = [false; 16];
+        stop_colliding_paths(
+            &mut stopped,
+            &[SimulationEvent {
+                tick: 2,
+                sequence: 0,
+                kind: SimulationEventKind::CushionContact {
+                    ball: BallId::CUE,
+                    axis: CushionAxis::Horizontal,
+                },
+            }],
+        );
+        assert!(stopped[0]);
+        assert!(!stopped[1]);
+        stop_colliding_paths(
+            &mut stopped,
+            &[SimulationEvent {
+                tick: 3,
+                sequence: 0,
+                kind: SimulationEventKind::BallContact {
+                    first: BallId::new(1).unwrap(),
+                    second: BallId::new(2).unwrap(),
+                },
+            }],
+        );
+        stop_colliding_paths(&mut stopped, &[]);
+        assert!(stopped[0] && stopped[1] && stopped[2]);
+        assert!(!stopped[3]);
+    }
+
     #[test]
     fn curved_samples_publish_one_straight_average_per_ball() {
         let samples = [
