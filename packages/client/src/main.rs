@@ -33,7 +33,6 @@ const BALL_RADIUS: f32 = {
         * (TABLE_SIZE.x / 2.0)
 };
 const POWER_BAR_HEIGHT: f32 = 300.0;
-const POWER_ZONE_START: f32 = 0.82;
 const SPIN_ZONE_CENTER: Vec2 = Vec2::new(105.0, 105.0);
 const SPIN_ZONE_RADIUS: f32 = 58.0;
 const POCKET_SELECTION_RADIUS: f32 = 44.0;
@@ -95,7 +94,7 @@ struct PrototypeInput {
     touch_rearm_blocked: bool,
 }
 
-#[derive(Clone, Copy, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum PointerContact {
     #[default]
     None,
@@ -582,6 +581,12 @@ fn setup(
         MatchControlChrome,
     ));
 
+    commands.spawn((
+        Text2d::new("POWER"),
+        TextFont::from_font_size(16.0),
+        TextColor(Color::srgb(0.94, 0.85, 0.64)),
+        Transform::from_xyz(565.0, POWER_BAR_HEIGHT / 2.0 + 24.0, 6.0),
+    ));
     spawn_overlay(&mut commands, presentation_tier.0);
 }
 
@@ -600,42 +605,18 @@ fn spawn_table_details(commands: &mut Commands) {
     }
 }
 
-fn spawn_overlay(commands: &mut Commands, presentation_tier: &str) {
-    commands.spawn((
-        Text::new(format!(
-            "POOL WITH MORE THAN FRIENDS · {presentation_tier} TIER"
-        )),
-        TextFont::from_font_size(24.0),
-        TextColor(Color::srgb(0.92, 0.85, 0.65)),
-        Node {
-            position_type: PositionType::Absolute,
-            top: px(18),
-            left: px(24),
-            ..default()
-        },
-    ));
+fn spawn_overlay(commands: &mut Commands, _presentation_tier: &str) {
     commands.spawn((
         Text::new("Waiting for an authoritative match"),
-        TextFont::from_font_size(18.0),
+        TextFont::from_font_size(12.0),
         TextColor(Color::srgb(0.92, 0.85, 0.65)),
         Node {
             position_type: PositionType::Absolute,
-            top: px(58),
+            top: px(4),
             left: px(24),
             ..default()
         },
         TurnStatus,
-    ));
-    commands.spawn((
-        Text::new("Drag to aim | pull the right rail for power | release to shoot"),
-        TextFont::from_font_size(17.0),
-        TextColor(Color::srgb(0.76, 0.82, 0.78)),
-        Node {
-            position_type: PositionType::Absolute,
-            bottom: px(18),
-            left: px(24),
-            ..default()
-        },
     ));
     commands.spawn((
         Text::new("Rotate your device to landscape"),
@@ -879,8 +860,18 @@ fn input_position(
     mouse_is_pressed.then(|| window.cursor_position()).flatten()
 }
 
+fn pointer_world(cursor: Vec2, size: Vec2) -> Vec2 {
+    let scale = (size / DESIGN_SIZE).min_element().max(0.001);
+    Vec2::new(cursor.x - size.x / 2.0, size.y / 2.0 - cursor.y) / scale
+}
+
+fn power_contact(cursor: Vec2, size: Vec2) -> bool {
+    let point = pointer_world(cursor, size);
+    (point.x - 565.0).abs() <= 42.0 && point.y.abs() <= POWER_BAR_HEIGHT / 2.0 + 20.0
+}
+
 fn classify_pointer_contact(cursor: Vec2, window_size: Vec2) -> PointerContact {
-    if cursor.x > window_size.x * POWER_ZONE_START {
+    if power_contact(cursor, window_size) {
         return PointerContact::Power;
     }
     #[cfg(target_arch = "wasm32")]
@@ -906,8 +897,9 @@ fn update_from_pointer(
         return;
     }
 
-    if cursor.x > window_size.x * POWER_ZONE_START {
-        input.power = (1.0 - cursor.y / window_size.y).clamp(MIN_POWER, 1.0);
+    if input.pointer_contact == PointerContact::Power {
+        input.power =
+            (pointer_world(cursor, window_size).y / POWER_BAR_HEIGHT + 0.5).clamp(MIN_POWER, 1.0);
     } else {
         #[cfg(target_arch = "wasm32")]
         {
@@ -920,11 +912,15 @@ fn update_from_pointer(
                 return;
             }
             let spin_offset = (cursor - SPIN_ZONE_CENTER) / SPIN_ZONE_RADIUS;
-            if spin_offset.length_squared() <= 1.0 {
+            if input.pointer_contact == PointerContact::Auxiliary
+                && spin_offset.length_squared() <= 1.0
+            {
                 input.spin = Vec2::new(spin_offset.x, -spin_offset.y);
                 return;
             }
-            if let Some(pocket) = selected_pocket(cursor, window_size) {
+            if input.pointer_contact == PointerContact::Auxiliary
+                && let Some(pocket) = selected_pocket(cursor, window_size)
+            {
                 input.called_pocket = Some(pocket);
                 return;
             }
@@ -1123,7 +1119,26 @@ fn update_aim(
         .copied()
         .unwrap_or(Vec2::new(-330.0, 0.0));
     let direction = Vec2::from_angle(input.aim_angle);
-    cue.translation = (cue_ball - direction * input.power.mul_add(42.0, 222.0)).extend(7.0);
+    let desired = input.power.mul_add(42.0, 12.0);
+    let half = DESIGN_SIZE / 2.0 - Vec2::splat(8.0);
+    let backward = -direction;
+    let available = [
+        if backward.x.abs() > 0.001 {
+            backward.x.signum().mul_add(-cue_ball.x, half.x) / backward.x.abs()
+        } else {
+            f32::INFINITY
+        },
+        if backward.y.abs() > 0.001 {
+            backward.y.signum().mul_add(-cue_ball.y, half.y) / backward.y.abs()
+        } else {
+            f32::INFINITY
+        },
+    ]
+    .into_iter()
+    .fold(f32::INFINITY, f32::min);
+    let length = (available - desired).clamp(20.0, 420.0);
+    cue.scale.x = length / 420.0;
+    cue.translation = (cue_ball - direction * (desired + length / 2.0)).extend(7.0);
     cue.rotation = Quat::from_rotation_z(input.aim_angle);
 
     let fill_height = POWER_BAR_HEIGHT * input.power;
@@ -1318,8 +1333,50 @@ mod tests {
     }
 
     #[test]
+    fn power_hit_area_matches_drawn_bar_at_multiple_viewports() {
+        for size in [Vec2::new(1280.0, 634.0), Vec2::new(844.0, 325.0)] {
+            let scale = (size / DESIGN_SIZE).min_element();
+            let center = size / 2.0 + Vec2::new(565.0, 0.0) * scale;
+            assert_eq!(
+                classify_pointer_contact(center, size),
+                PointerContact::Power
+            );
+            let table = size / 2.0 + Vec2::new(400.0, 0.0) * scale;
+            assert_eq!(classify_pointer_contact(table, size), PointerContact::Aim);
+            let mut input = PrototypeInput {
+                pointer_contact: PointerContact::Power,
+                ..Default::default()
+            };
+            let mut placed = false;
+            update_from_pointer(&mut input, center, size, &mut placed);
+            assert!((input.power - 0.5).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn power_drag_stays_power_after_leaving_the_bar() {
+        let mut input = PrototypeInput {
+            pointer_contact: PointerContact::Power,
+            aim_angle: 0.7,
+            ..Default::default()
+        };
+        let mut placed = false;
+        update_from_pointer(
+            &mut input,
+            Vec2::new(300.0, 100.0),
+            DESIGN_SIZE,
+            &mut placed,
+        );
+        assert!((input.aim_angle - 0.7).abs() < 0.001);
+        assert!((input.power - 1.0).abs() < 0.001);
+    }
+
+    #[test]
     fn power_pointer_is_clamped_to_supported_range() {
-        let mut input = PrototypeInput::default();
+        let mut input = PrototypeInput {
+            pointer_contact: PointerContact::Power,
+            ..Default::default()
+        };
         let size = Vec2::new(1_000.0, 500.0);
 
         let mut placed = false;

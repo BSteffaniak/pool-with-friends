@@ -21,6 +21,8 @@
         <span class="brand-mark" aria-hidden="true"><i></i><b>8</b><i></i></span>
         <span class="brand-name">Pool <small>with more than</small> Friends</span>
       </header>
+      <details id="game-menu">
+        <summary>Menu &amp; settings</summary>
       <section id="account-panel" hidden>
         <span id="account-label"></span>
         <form id="google-sign-in" method="post" action="/auth/google/start">
@@ -86,7 +88,11 @@
         </select>
         <input id="unlimited-aim-range" type="checkbox" aria-label="Unlimited projection range" /> Unlimited projection range
       </label>
-      <canvas id="pwmtf-canvas" tabindex="0"></canvas>
+      </details>
+      <div id="table-stage">
+      <canvas id="pwmtf-canvas" tabindex="0" aria-label="Pool table. Drag to aim, release to shoot. Adjust power on the right."></canvas>
+      </div>
+      <footer id="game-help">Drag table to aim · Release to shoot · Power on the right</footer>
       <section id="rotate-device" role="status" aria-live="polite">
         <strong>Rotate your device</strong>
         <span>Pool with More Than Friends plays in landscape.</span>
