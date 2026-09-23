@@ -86,9 +86,26 @@ deployment/backup gating, and path bounds.
 
 ## Deploy
 
-After adding all protected secrets, dispatch **Deploy Production** from the
-GitHub Actions page and approve the `production-approval` environment. The job
-must finish successfully before the service is treated as deployed.
+Every push to `master` starts **Deploy Production**: validation and a Fly remote
+build/push run before the `production-approval` gate. Manual dispatch on `master`
+is also supported. The build uses the `Production` environment's Fly token but
+never creates a release, stages secrets, or modifies Machines. Keep that
+environment without required reviewers; reviewers belong on `production-approval`.
+
+The build resolves its unique tag to an immutable registry digest. After both
+validation and image preparation succeed, approve the run for the intended SHA.
+Deployment receives that exact digest via job outputs and uses `flyctl deploy
+--image`; it cannot rebuild or fall back to a mutable tag. Registry image retention
+must preserve pending candidates. Only the release job is serialized, so waiting
+for approval does not block subsequent builds. Approving an older run can deploy
+an older image: cancel obsolete approvals and check the SHA before approving.
+
+Backup, secret staging, DNS/TLS checks, Machine update/restart, and smoke tests
+still execute after approval. Approval therefore avoids build latency, but is
+not an instantaneous or zero-downtime switch (production uses one Machine).
+The job must finish successfully before the service is treated as deployed.
+Local invocation of `scripts/deploy-production.sh` also requires
+`PWMTF_DEPLOY_IMAGE=registry.fly.io/pwmtf@sha256:<64 lowercase hex digits>`.
 
 The production smoke test verifies the canonical application's HSTS, no-store
 dynamic caching, referrer policy, content-type protection, permissions policy,

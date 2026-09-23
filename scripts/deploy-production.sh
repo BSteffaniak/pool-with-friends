@@ -17,6 +17,11 @@ require_environment() {
     fi
 }
 
+require_environment PWMTF_DEPLOY_IMAGE
+if ! printf '%s\n' "$PWMTF_DEPLOY_IMAGE" | grep -Eq '^registry\.fly\.io/pwmtf@sha256:[0-9a-f]{64}$'; then
+    printf '%s\n' "PWMTF_DEPLOY_IMAGE must be an immutable pwmtf registry digest" >&2
+    exit 1
+fi
 require_environment PWMTF_GOOGLE_CLIENT_ID
 require_environment PWMTF_GOOGLE_CLIENT_SECRET
 
@@ -48,7 +53,7 @@ if [ "$volume_count" -ne 1 ]; then
     printf '%s\n' "production requires exactly one created encrypted $volume_name volume in ord with 14-day snapshots and automatic backups; found $volume_count" >&2
     exit 1
 fi
-flyctl deploy --app "$app" --remote-only --ha=false --strategy immediate --wait-timeout 10m
+flyctl deploy --app "$app" --image "$PWMTF_DEPLOY_IMAGE" --ha=false --strategy immediate --wait-timeout 10m
 
 machine_count=$(flyctl status --app "$app" --json \
     | jq '[.Machines[]? | select(.state != "destroyed")] | length')

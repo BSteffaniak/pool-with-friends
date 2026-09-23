@@ -5,6 +5,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/pwmtf-production-operations.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 mkdir "$tmp/bin"
+export PWMTF_DEPLOY_IMAGE=registry.fly.io/pwmtf@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 cat >"$tmp/bin/flyctl" <<'MOCK'
 #!/bin/sh
@@ -30,7 +31,10 @@ case "$1 $2" in
     "secrets import")
         cat >"$PWMTF_TEST_TMP/staged-secrets"
         ;;
-    "config validate"|"deploy --app")
+    "deploy --app")
+        [ "$*" = "deploy --app pwmtf --image $PWMTF_DEPLOY_IMAGE --ha=false --strategy immediate --wait-timeout 10m" ]
+        ;;
+    "config validate")
         :
         ;;
     "volumes list")
@@ -233,6 +237,14 @@ set -eu
 : >"$PWMTF_TEST_TMP/smoke-ran"
 MOCK
 chmod +x "$tmp/smoke"
+for image in '' registry.fly.io/pwmtf:latest registry.fly.io/other@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
+    if PATH="$tmp/bin:$PATH" PWMTF_DEPLOY_IMAGE="$image" \
+        PWMTF_GOOGLE_CLIENT_ID=client-id PWMTF_GOOGLE_CLIENT_SECRET=client-secret \
+        "$root/scripts/deploy-production.sh" >/dev/null 2>&1; then
+        printf '%s\n' "deployment accepted an absent, mutable, or noncanonical image" >&2
+        exit 1
+    fi
+done
 PATH="$tmp/bin:$PATH" PWMTF_TEST_TMP="$tmp" \
     PWMTF_GOOGLE_CLIENT_ID=client-id PWMTF_GOOGLE_CLIENT_SECRET=client-secret \
     PWMTF_PRODUCTION_SMOKE_SCRIPT="$tmp/smoke" \

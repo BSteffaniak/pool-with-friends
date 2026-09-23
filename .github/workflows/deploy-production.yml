@@ -2,16 +2,49 @@ name: Deploy Production
 
 "on":
   workflow_dispatch:
+  push:
+    branches: [master]
 
 permissions:
   contents: read
 
-concurrency:
-  group: production
-  cancel-in-progress: false
-
+# Builds are independent; only the production mutation job is serialized.
 jobs:
+  validate:
+    if: github.ref == 'refs/heads/master'
+    uses: ./.github/workflows/validate.yml
+
+  build:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    environment: Production
+    timeout-minutes: 60
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+      - name: Build and push without releasing
+        env:
+          IMAGE_TAG: build-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          test -n "$FLY_API_TOKEN"
+          flyctl deploy --app pwmtf --remote-only --build-only --push --image-label "$IMAGE_TAG"
+      - name: Resolve immutable image digest
+        id: image
+        env:
+          IMAGE_TAG: build-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          flyctl auth docker
+          digest=$(docker buildx imagetools inspect "registry.fly.io/pwmtf:$IMAGE_TAG" --format '{{json .Manifest}}' | jq -er '.digest')
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "image=registry.fly.io/pwmtf@$digest" >> "$GITHUB_OUTPUT"
+          echo "Prepared registry.fly.io/pwmtf@$digest for $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+
   approve:
+    needs: [build, validate]
     runs-on: ubuntu-latest
     environment: production-approval
     timeout-minutes: 5
@@ -19,11 +52,15 @@ jobs:
       - run: echo "Approved PWMTF production deployment"
 
   deploy:
-    needs: approve
+    needs: [approve, build]
+    concurrency:
+      group: production-release
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     environment: Production
     timeout-minutes: 60
     env:
+      PWMTF_DEPLOY_IMAGE: ${{ needs.build.outputs.image }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
