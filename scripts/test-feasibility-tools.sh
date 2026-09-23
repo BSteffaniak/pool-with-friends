@@ -12,7 +12,11 @@ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
 if [ ! -f "$root/dist/pwmtf-bundle-manifest.json" ] || \
    ! grep -q '^const candidateWasmOptimization = "wasm-opt-Oz";$' "$root/dist/bootstrap.js"; then
-    "$root/scripts/build-wasm.sh"
+    command -v wasm-opt >/dev/null 2>&1 || {
+        printf '%s\n' "feasibility tools require Binaryen wasm-opt; install it before running this test" >&2
+        exit 1
+    }
+    PWMTF_SKIP_WASM_OPT=0 "$root/scripts/build-wasm.sh"
 fi
 mkdir -p "$tmp/expected-bundle"
 cp -R "$root/dist/." "$tmp/expected-bundle/"

@@ -8,11 +8,13 @@ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 run_test() {
     name=$1
     shift
+    printf '%s\n' "START $name $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     if "$@" >"$tmp/$name.log" 2>&1; then
         printf '%s\n' 0 >"$tmp/$name.status"
     else
         printf '%s\n' "$?" >"$tmp/$name.status"
     fi
+    printf '%s\n' "END $name exit=$(cat "$tmp/$name.status") $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 }
 
 run_test build "$root/scripts/build-wasm.sh" &
@@ -31,6 +33,11 @@ wait "$chrome_pid"
 wait "$edge_pid"
 wait "$tools_pid"
 wait "$integrity_pid"
+
+if [ -n "${PWMTF_TEST_ARTIFACT_DIR:-}" ]; then
+    mkdir -p "$PWMTF_TEST_ARTIFACT_DIR"
+    cp "$tmp/"*.log "$tmp/"*.status "$PWMTF_TEST_ARTIFACT_DIR/"
+fi
 
 failed=0
 for name in build chrome edge tools integrity; do

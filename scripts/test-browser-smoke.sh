@@ -63,49 +63,10 @@ while ! curl --fail --silent --output /dev/null "http://127.0.0.1:$port/"; do
 done
 
 dump_dom() {
-    url=$1
-    python3 - "$browser_log" "$chrome" "$url" <<'PY'
-import os
-import signal
-import subprocess
-import sys
-
-log_path, chrome, url = sys.argv[1:]
-command = [
-    chrome,
-    "--headless=new",
-    "--disable-gpu-sandbox",
-    "--enable-webgl",
-    "--enable-unsafe-swiftshader",
-    "--ignore-gpu-blocklist",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--run-all-compositor-stages-before-draw",
-    "--timeout=30000",
-    "--use-angle=swiftshader",
-    "--virtual-time-budget=15000",
-    "--window-size=1280,720",
-    "--dump-dom",
-    url,
-]
-with open(log_path, "w", encoding="utf-8") as browser_log:
-    process = subprocess.Popen(
-        command,
-        stdout=browser_log,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        text=True,
-    )
-    try:
-        return_code = process.wait(timeout=60)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.wait()
-        print(f"Chrome smoke navigation timed out: {url}", file=sys.stderr)
-        raise SystemExit(1)
-if return_code != 0:
-    raise SystemExit(return_code)
-PY
+    if ! node "$root/scripts/browser-smoke-ready.js" "$chrome" "$1" "$browser_log"; then
+        cat "$browser_log" "$server_log" >&2
+        return 1
+    fi
 }
 
 dump_dom "http://127.0.0.1:$port/"

@@ -59,66 +59,10 @@ while ! curl --fail --silent --output /dev/null "http://127.0.0.1:$port/"; do
 done
 
 dump_dom() {
-    url=$1
-    attempts=0
-    while :; do
-        attempts=$((attempts + 1))
-        python3 - "$browser_log" "$edge" "$url" <<'PY'
-import os
-import signal
-import subprocess
-import sys
-
-log, browser, url = sys.argv[1:]
-command = [
-    browser,
-    "--headless=new",
-    "--disable-background-networking",
-    "--disable-component-update",
-    "--disable-default-apps",
-    "--disable-extensions",
-    "--disable-gpu-sandbox",
-    "--disable-sync",
-    "--enable-webgl",
-    "--enable-unsafe-swiftshader",
-    "--ignore-gpu-blocklist",
-    "--metrics-recording-only",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--run-all-compositor-stages-before-draw",
-    "--timeout=30000",
-    "--use-angle=swiftshader",
-    "--virtual-time-budget=30000",
-    "--window-size=1280,720",
-    "--dump-dom",
-    url,
-]
-with open(log, "w", encoding="utf-8") as output:
-    process = subprocess.Popen(
-        command,
-        stdout=output,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        text=True,
-    )
-    try:
-        return_code = process.wait(timeout=60)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.wait()
-        print(f"Edge smoke navigation timed out: {url}", file=sys.stderr)
-        raise SystemExit(1)
-if return_code != 0:
-    raise SystemExit(return_code)
-PY
-        if grep -q 'data-client-state="ready"' "$browser_log"; then
-            return
-        fi
-        if [ "$attempts" -ge 5 ]; then
-            return
-        fi
-        sleep 0.5
-    done
+    if ! node "$root/scripts/browser-smoke-ready.js" "$edge" "$1" "$browser_log"; then
+        cat "$browser_log" "$server_log" >&2
+        return 1
+    fi
 }
 
 check_ready() {
