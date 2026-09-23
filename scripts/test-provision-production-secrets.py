@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Offline tests: no real provider credentials or API calls."""
+import io
+import urllib.error
 import argparse
 import importlib.util
 from pathlib import Path
@@ -75,6 +77,37 @@ class ProvisionTests(unittest.TestCase):
             with self.assertRaisesRegex(m.ProvisionError, 'manual'):
                 m.provision(self.args(only=['PWMTF_GOOGLE_CLIENT_SECRET']))
             self.assertEqual(cmd.call_count, 2)
+
+    def test_http_diagnostics_are_actionable_and_redacted(self):
+        for status in (400, 401, 403, 429, 500):
+            error = urllib.error.HTTPError('https://secret-url', status, 'secret-reason', {},
+                io.BytesIO(b'{"errors":[{"code":10000,"message":"secret-value"}]}'))
+            with patch.dict(m.os.environ, {'CLOUDFLARE_PROVISION_TOKEN': 'secret-token'}), patch.object(m.urllib.request, 'urlopen', side_effect=error):
+                with self.assertRaises(m.ProvisionError) as raised:
+                    m.Cloudflare().request('POST', '/user/tokens', {'value': 'secret-body'})
+            text = str(raised.exception)
+            self.assertIn('create project token (POST)', text)
+            self.assertIn(f'HTTP {status}', text)
+            self.assertIn('10000', text)
+            self.assertIn('not confirmed', text)
+            self.assertNotIn('secret-', text)
+
+    def test_network_diagnostics_redact_exception(self):
+        with patch.dict(m.os.environ, {'CLOUDFLARE_PROVISION_TOKEN': 'secret-token'}), patch.object(m.urllib.request, 'urlopen', side_effect=urllib.error.URLError('secret-value')):
+            with self.assertRaises(m.ProvisionError) as raised:
+                m.Cloudflare().request('GET', '/user/tokens')
+        self.assertIn('list managed tokens', str(raised.exception))
+        self.assertIn('network/TLS/timeout', str(raised.exception))
+        self.assertNotIn('secret-', str(raised.exception))
+
+    def test_malformed_http_error_body_is_suppressed(self):
+        error = urllib.error.HTTPError('secret-url', 403, 'secret', {}, io.BytesIO(b'secret html'))
+        with patch.dict(m.os.environ, {'CLOUDFLARE_PROVISION_TOKEN': 'secret-token'}), patch.object(m.urllib.request, 'urlopen', side_effect=error):
+            with self.assertRaises(m.ProvisionError) as raised:
+                m.Cloudflare().request('GET', '/user/tokens/permission_groups')
+        self.assertIn('list token permission groups', str(raised.exception))
+        self.assertIn('HTTP 403', str(raised.exception))
+        self.assertNotIn('secret', str(raised.exception))
 
     def test_subprocess_error_is_redacted(self):
         with patch.object(m.subprocess, 'run', return_value=argparse.Namespace(returncode=1, stdout='secret', stderr='secret')):

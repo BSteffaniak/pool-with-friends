@@ -33,18 +33,59 @@ class Cloudflare:
         token = os.environ.get('CLOUDFLARE_PROVISION_TOKEN')
         if not token:
             raise ProvisionError('Set CLOUDFLARE_PROVISION_TOKEN with API Tokens Read/Edit and target-zone access')
+        # Labels are fixed: never echo request URLs, token IDs, or query values.
+        endpoint = path.split('?', 1)[0]
+        label = {
+            '/zones': 'discover zone',
+            '/user/tokens/permission_groups': 'list token permission groups',
+            '/user/tokens': 'create project token' if method == 'POST' else 'list managed tokens',
+        }.get(endpoint, 'revoke previous managed token' if method == 'DELETE' else 'API request')
+        operation = f'Cloudflare {label} ({method})'
         request = urllib.request.Request(
             'https://api.cloudflare.com/client/v4' + path,
             data=None if body is None else json.dumps(body).encode(), method=method,
             headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'})
+
+        def failure(status, payload):
+            # Provider messages may echo inputs. Only numeric codes are safe to
+            # expose; deliberately omit message text, headers, and response bodies.
+            errors = payload.get('errors', []) if isinstance(payload, dict) else []
+            codes = sorted({str(error['code']) for error in errors
+                            if isinstance(error, dict) and type(error.get('code')) is int}) if isinstance(errors, list) else []
+            detail = f'; error codes: {", ".join(codes)}' if codes else ''
+            if status in (401, 403):
+                hint = 'Check provisioning-token validity, User API Tokens Read/Edit, and target-zone access.'
+            elif status == 429:
+                hint = 'Rate limited; wait before retrying.'
+            elif status == 400:
+                hint = 'Check token policy permissions and whether the provisioning credential may grant them.'
+            else:
+                hint = 'Check Cloudflare availability and provisioning-token permissions.'
+            if method in ('POST', 'DELETE'):
+                hint += ' Token mutation was not confirmed; inspect provider state before retrying.'
+            return ProvisionError(f'{operation}: HTTP {status}{detail}. {hint}')
+
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
+                status = response.status
                 payload = json.load(response)
+            if not isinstance(payload, dict):
+                raise ValueError
             if not payload.get('success'):
-                raise ProvisionError('Cloudflare operation failed; response suppressed')
+                raise failure(status, payload)
             return payload
-        except (urllib.error.URLError, ValueError):
-            raise ProvisionError('Cloudflare request failed; inspect token state before retrying') from None
+        except urllib.error.HTTPError as error:
+            try:
+                payload = json.loads(error.read(65536))
+            except (ValueError, OSError):
+                payload = {}
+            finally:
+                error.close()
+            raise failure(error.code, payload) from None
+        except (urllib.error.URLError, TimeoutError, OSError):
+            raise ProvisionError(f'{operation}: network/TLS/timeout failure. Check connectivity and certificate trust; inspect token state before retrying mutations.') from None
+        except ValueError:
+            raise ProvisionError(f'{operation}: invalid JSON or unexpected response shape. Response suppressed; inspect token state before retrying mutations.') from None
 
     def items(self, path):
         """Read all pages rather than silently missing older managed tokens."""
@@ -80,7 +121,7 @@ def provision(args):
         if secret in ('CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_API_TOKEN'):
             zones = list(cf.items('/zones?name=' + urllib.parse.quote(args.zone)))
             if len(zones) != 1 or zones[0]['name'] != args.zone:
-                raise ProvisionError('Expected exactly one accessible target zone')
+                raise ProvisionError(f'Cloudflare zone discovery returned {len(zones)} results without one exact match. Use the root zone (for example hyperchad.dev), not the app subdomain; grant Zone Read for that zone to CLOUDFLARE_PROVISION_TOKEN.')
             zone = zones[0]
             if secret == 'CLOUDFLARE_ACCOUNT_ID':
                 value = zone['account']['id']
