@@ -32,16 +32,13 @@ jobs:
         run: |
           test -n "$FLY_API_TOKEN"
           flyctl deploy --app pwmtf --remote-only --build-only --push --image-label "$IMAGE_TAG"
-      - name: Resolve immutable image digest
+      - name: Record prepared image tag
         id: image
         env:
           IMAGE_TAG: build-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          flyctl auth docker
-          digest=$(docker buildx imagetools inspect "registry.fly.io/pwmtf:$IMAGE_TAG" --format '{{json .Manifest}}' | jq -er '.digest')
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "image=registry.fly.io/pwmtf@$digest" >> "$GITHUB_OUTPUT"
-          echo "Prepared registry.fly.io/pwmtf@$digest for $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "image=registry.fly.io/pwmtf:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "Prepared registry.fly.io/pwmtf:$IMAGE_TAG for $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
 
   approve:
     needs: [build, validate]

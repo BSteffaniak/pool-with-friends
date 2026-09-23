@@ -5,7 +5,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/pwmtf-production-operations.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 mkdir "$tmp/bin"
-export PWMTF_DEPLOY_IMAGE=registry.fly.io/pwmtf@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+export PWMTF_DEPLOY_IMAGE=registry.fly.io/pwmtf:build-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-123-2
 
 cat >"$tmp/bin/flyctl" <<'MOCK'
 #!/bin/sh
@@ -237,11 +237,11 @@ set -eu
 : >"$PWMTF_TEST_TMP/smoke-ran"
 MOCK
 chmod +x "$tmp/smoke"
-for image in '' registry.fly.io/pwmtf:latest registry.fly.io/other@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
+for image in '' registry.fly.io/pwmtf:latest registry.fly.io/other:build-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-123-2 registry.fly.io/pwmtf:build-abc-123-2 registry.fly.io/pwmtf:build-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
     if PATH="$tmp/bin:$PATH" PWMTF_DEPLOY_IMAGE="$image" \
         PWMTF_GOOGLE_CLIENT_ID=client-id PWMTF_GOOGLE_CLIENT_SECRET=client-secret \
         "$root/scripts/deploy-production.sh" >/dev/null 2>&1; then
-        printf '%s\n' "deployment accepted an absent, mutable, or noncanonical image" >&2
+        printf '%s\n' "deployment accepted an absent, malformed, generic, or noncanonical image tag" >&2
         exit 1
     fi
 done

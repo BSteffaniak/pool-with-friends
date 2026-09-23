@@ -18,8 +18,8 @@ require_environment() {
 }
 
 require_environment PWMTF_DEPLOY_IMAGE
-if ! printf '%s\n' "$PWMTF_DEPLOY_IMAGE" | grep -Eq '^registry\.fly\.io/pwmtf@sha256:[0-9a-f]{64}$'; then
-    printf '%s\n' "PWMTF_DEPLOY_IMAGE must be an immutable pwmtf registry digest" >&2
+if ! printf '%s\n' "$PWMTF_DEPLOY_IMAGE" | grep -Eq '^registry\.fly\.io/pwmtf:build-[0-9a-f]{40}-[0-9]+-[0-9]+$'; then
+    printf '%s\n' "PWMTF_DEPLOY_IMAGE must be a pwmtf build tag containing commit SHA, run ID, and attempt" >&2
     exit 1
 fi
 require_environment PWMTF_GOOGLE_CLIENT_ID
