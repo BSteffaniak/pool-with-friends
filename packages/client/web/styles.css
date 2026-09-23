@@ -647,10 +647,14 @@ select:focus-visible,
 #game-menu #aim-mode-control { display: block; }
 #game-menu input, #game-menu select, #game-menu button { min-height: 36px; max-width: 100%; }
 @media (max-height: 500px) and (orientation: landscape) {
-  #table-stage { inset: 42px 0 23px; }
-  #brand-lockup .brand-name { display: none; }
-  #game-menu { top: 2px; }
-  #game-menu > summary { padding: 6px 10px; }
+  #table-stage { inset: 0; }
+  #brand-lockup, #game-help { display: none; }
+  #game-menu { top: 2px; right: 4px; }
+  #game-menu > summary { padding: 8px; font-size: 0; min-width: 44px; min-height: 44px; }
+  #game-menu > summary::after { content: '☰'; font-size: 20px; }
+  #game-menu[open] > summary { font-size: 14px; }
+  #game-menu[open] > summary::after { content: ' ×'; }
+  #game-menu[open] { max-height: calc(100% - 4px); }
   #game-help { font-size: 11px; }
 }
 @media (orientation: portrait) {

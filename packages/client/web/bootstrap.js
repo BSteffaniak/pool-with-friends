@@ -1605,6 +1605,26 @@ let socialPollTimer = null;
 let socialRefreshInFlight = false;
 let wasmModule = null;
 const aimMode = document.querySelector("#aim-mode");
+const spinSide = document.querySelector("#spin-side");
+const spinVertical = document.querySelector("#spin-vertical");
+const updateSpin = () => wasmModule?.set_cue_spin(Number(spinSide.value), Number(spinVertical.value));
+spinSide.addEventListener("input", updateSpin);
+spinVertical.addEventListener("input", updateSpin);
+document.querySelector("#reset-spin").addEventListener("click", () => {
+  spinSide.value = "0";
+  spinVertical.value = "0";
+  updateSpin();
+});
+const fullscreenButton = document.querySelector("#fullscreen-table");
+fullscreenButton.hidden = !document.documentElement.requestFullscreen;
+fullscreenButton.addEventListener("click", async () => {
+  try {
+    await document.documentElement.requestFullscreen();
+    document.querySelector("#game-menu").open = false;
+  } catch {
+    fullscreenButton.textContent = "Full screen unavailable";
+  }
+});
 const unlimitedAimRange = document.querySelector("#unlimited-aim-range");
 unlimitedAimRange.addEventListener("change", () => {
   wasmModule?.set_unlimited_aim_range(unlimitedAimRange.checked);
@@ -2444,6 +2464,7 @@ try {
   wasmModule = await import("./pwmtf_client.js");
   await wasmModule.default();
   wasmModule.set_aim_mode(Number(aimMode.value));
+  updateSpin();
   wasmModule.set_unlimited_aim_range(unlimitedAimRange.checked);
   await sessionReady;
   if (matchPlayerSeat !== null) {

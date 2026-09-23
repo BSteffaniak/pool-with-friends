@@ -20,7 +20,7 @@ use bevy::{
     window::{PresentMode, WindowFocused, WindowResolution},
 };
 
-const DESIGN_SIZE: Vec2 = Vec2::new(1280.0, 720.0);
+const DESIGN_SIZE: Vec2 = Vec2::new(1220.0, 590.0);
 const TABLE_CENTER_X: f32 = -55.0;
 const TABLE_SIZE: Vec2 = Vec2::new(960.0, 480.0);
 const CUSHION: f32 = 34.0;
@@ -33,15 +33,24 @@ const BALL_RADIUS: f32 = {
         * (TABLE_SIZE.x / 2.0)
 };
 const POWER_BAR_HEIGHT: f32 = 300.0;
-const SPIN_ZONE_CENTER: Vec2 = Vec2::new(105.0, 105.0);
-const SPIN_ZONE_RADIUS: f32 = 58.0;
+#[cfg(target_arch = "wasm32")]
 const POCKET_SELECTION_RADIUS: f32 = 44.0;
-#[cfg(not(target_arch = "wasm32"))]
-const _: (f32, f32, f32) = (
-    SPIN_ZONE_CENTER.x,
-    SPIN_ZONE_RADIUS,
-    POCKET_SELECTION_RADIUS,
-);
+#[cfg(target_arch = "wasm32")]
+static SPIN_SIDE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+#[cfg(target_arch = "wasm32")]
+static SPIN_VERTICAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Sets bounded presentation spin input from the visible settings controls.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn set_cue_spin(side: i32, vertical: i32) {
+    SPIN_SIDE.store(side.clamp(-100, 100), std::sync::atomic::Ordering::Relaxed);
+    SPIN_VERTICAL.store(
+        vertical.clamp(-100, 100),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
 const MIN_POWER: f32 = 0.05;
 const DEFAULT_POWER: f32 = 0.55;
 const MINIMUM_VIEWPORT_WIDTH: f32 = 1.0;
@@ -876,8 +885,7 @@ fn classify_pointer_contact(cursor: Vec2, window_size: Vec2) -> PointerContact {
     }
     #[cfg(target_arch = "wasm32")]
     {
-        let spin_offset = (cursor - SPIN_ZONE_CENTER) / SPIN_ZONE_RADIUS;
-        if spin_offset.length_squared() <= 1.0 || selected_pocket(cursor, window_size).is_some() {
+        if selected_pocket(cursor, window_size).is_some() {
             return PointerContact::Auxiliary;
         }
     }
@@ -909,13 +917,6 @@ fn update_from_pointer(
                 if send_cue_ball_placement(position.x.micros(), position.y.micros()).is_ok() {
                     *placement_sent_during_contact = true;
                 }
-                return;
-            }
-            let spin_offset = (cursor - SPIN_ZONE_CENTER) / SPIN_ZONE_RADIUS;
-            if input.pointer_contact == PointerContact::Auxiliary
-                && spin_offset.length_squared() <= 1.0
-            {
-                input.spin = Vec2::new(spin_offset.x, -spin_offset.y);
                 return;
             }
             if input.pointer_contact == PointerContact::Auxiliary
@@ -1161,6 +1162,13 @@ fn update_orientation(
     #[cfg(target_arch = "wasm32")]
     {
         input.placing_cue_ball = browser_transport::ball_in_hand();
+        #[allow(clippy::cast_precision_loss)]
+        {
+            input.spin = Vec2::new(
+                SPIN_SIDE.load(std::sync::atomic::Ordering::Relaxed) as f32,
+                SPIN_VERTICAL.load(std::sync::atomic::Ordering::Relaxed) as f32,
+            ) / 100.0;
+        }
     }
     if is_portrait || window.width() < MINIMUM_VIEWPORT_WIDTH {
         input.release_active_touch(true);

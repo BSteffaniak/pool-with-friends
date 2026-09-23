@@ -88,6 +88,14 @@
         </select>
         <input id="unlimited-aim-range" type="checkbox" aria-label="Unlimited projection range" /> Unlimited projection range
       </label>
+      <fieldset id="spin-controls">
+        <legend>Cue spin</legend>
+        <label>Left / right <input id="spin-side" type="range" min="-100" max="100" value="0" /></label>
+        <label>Draw / follow <input id="spin-vertical" type="range" min="-100" max="100" value="0" /></label>
+        <button id="reset-spin" type="button">Center hit</button>
+      </fieldset>
+      <p>Drag the table to aim; release to shoot. Drag the POWER bar to adjust strength without shooting.</p>
+      <button id="fullscreen-table" type="button">Full screen</button>
       </details>
       <div id="table-stage">
       <canvas id="pwmtf-canvas" tabindex="0" aria-label="Pool table. Drag to aim, release to shoot. Adjust power on the right."></canvas>
