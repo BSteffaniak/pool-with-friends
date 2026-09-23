@@ -18,6 +18,11 @@ BUNDLE_HASH_ALGORITHM = "sha256-length-prefixed-v1"
 EXPECTED_ASSETS = {
     "bootstrap.js",
     "brand-mark.svg",
+    "manifest.webmanifest",
+    "install.js",
+    "icon-180.png",
+    "icon-192.png",
+    "icon-512.png",
     "index.html",
     "pwmtf_client.d.ts",
     "pwmtf_client.js",

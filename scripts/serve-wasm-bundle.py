@@ -38,6 +38,8 @@ CONTENT_TYPES = {
     ".js": "text/javascript; charset=utf-8",
     ".svg": "image/svg+xml",
     ".wasm": "application/wasm",
+    ".webmanifest": "application/manifest+json",
+    ".png": "image/png",
 }
 
 
