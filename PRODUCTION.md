@@ -84,6 +84,50 @@ region with backup/retention policy, post-deploy Machine
 mount/availability/HTTPS/readiness configuration, one-Machine
 deployment/backup gating, and path bounds.
 
+## Automated secret provisioning
+
+Run locally with Python 3, authenticated `gh`, and authenticated `flyctl`:
+
+```sh
+python3 scripts/provision-production-secrets.py --repo BSteffaniak/pool-with-friends
+# Explicitly replace just one credential:
+python3 scripts/provision-production-secrets.py --repo BSteffaniak/pool-with-friends \
+  --refresh --only CLOUDFLARE_API_TOKEN
+```
+
+The existing `Production` environment is required; its protection settings are
+never rewritten. Each existing GitHub environment secret is skipped before any
+provider access for that secret. `--only` is repeatable. `--refresh` replaces
+all selected secrets, even if already present. Run only one provisioner per
+repository/environment at a time; do not rotate while deployments are running.
+
+Supply `CLOUDFLARE_PROVISION_TOKEN` locally using a secure credential manager.
+This separate provisioning token needs user API Tokens Read/Edit plus access to
+read the target zone; it must be allowed to grant the requested zone permissions.
+It is never installed in GitHub. The script discovers the account ID and creates
+a separate project token with Zone Read, DNS Write, Zone Settings Write (for
+strict TLS), and Dynamic URL Redirects Write, restricted to `--zone` (default
+`hyperchad.dev`). Cloudflare DNS authorization is zone-wide, not subdomain-wide.
+Old tokens with the exact managed repo/environment name are revoked only after
+GitHub confirms the replacement write. Existing manually named tokens are not
+revoked automatically.
+
+Fly uses the local flyctl authentication to create an app-scoped deploy token
+for `--fly-app` (default `pwmtf`) with `--fly-expiry` (default `8760h`). Its CLI
+creation response does not expose a revocation ID, so old Fly tokens must be
+reviewed with `flyctl tokens list --app APP` and revoked by ID manually.
+Google OAuth client creation remains manual: supply `PWMTF_GOOGLE_CLIENT_ID` and
+`PWMTF_GOOGLE_CLIENT_SECRET` locally when those secrets need installation.
+
+Values travel in memory and over provider HTTPS or gh stdin, never command
+arguments, files, or printed diagnostics. Do not run with credential-dumping
+shell/debug instrumentation. Missing tools, permissions, inputs, or unexpected
+responses stop the run; earlier successful writes remain. An uncertain GitHub
+upload leaves the new credential intact because the write may have succeeded:
+inspect provider state before retrying, then refresh/clean up as appropriate.
+Token creation with a lost response can also leave an orphan. No automated
+claim of credential validity is made merely because a GitHub secret exists.
+
 ## Deploy
 
 Every push to `master` starts **Deploy Production**: validation and a Fly remote
