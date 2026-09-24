@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 
 browser = os.environ.get('CHROME_BIN') or shutil.which('google-chrome') or '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 root = Path(__file__).resolve().parent
@@ -17,7 +18,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path == '/slow-navigation':
+            time.sleep(2)
         script = {
+            '/slow-navigation': 'document.querySelector("main").dataset.clientState="ready"',
             '/ready': 'setTimeout(()=>document.querySelector("main").dataset.clientState="ready",1500)',
             '/error': 'document.querySelector("main").dataset.clientState="error"',
             '/exception': 'setTimeout(()=>{throw new Error("synthetic failure")},500)',
@@ -35,11 +39,11 @@ thread = threading.Thread(target=server.serve_forever, daemon=True)
 thread.start()
 try:
     with tempfile.TemporaryDirectory(prefix='pwmtf-readiness-test-') as tmp:
-        for route, expected in [('/ready', 0), ('/error', 1), ('/exception', 1), ('/loading', 1)]:
+        for route, expected in [('/ready', 0), ('/slow-navigation', 0), ('/error', 1), ('/exception', 1), ('/loading', 1)]:
             output = Path(tmp) / f'{route[1:]}.log'
             result = subprocess.run(['node', str(root / 'browser-smoke-ready.js'), browser,
                 f'http://127.0.0.1:{server.server_port}{route}', str(output)],
-                capture_output=True, text=True, timeout=90, check=False)
+                capture_output=True, text=True, timeout=240, check=False)
             artifacts = os.environ.get('PWMTF_TEST_ARTIFACT_DIR')
             if artifacts:
                 destination = Path(artifacts) / 'readiness'
