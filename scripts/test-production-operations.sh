@@ -14,13 +14,11 @@ case "$1 $2" in
     "ips list")
         printf '%s\n' '[{"Type":"v6","Address":"2a09:8280:1::1234"}]'
         ;;
-    "certs show")
+    "certs check")
         if [ "${PWMTF_TEST_CERTIFICATE_STATE:-ready}" = missing ]; then
             printf '%s\n' '{}'
-        elif [ "${PWMTF_TEST_CERTIFICATE_STATE:-ready}" = ready ]; then
-            printf '%s\n' '{"DNSValidationHostname":"_acme-challenge.pwmtf.hyperchad.dev","DNSValidationTarget":"pwmtf.hyperchad.dev.example.flydns.net.","ClientStatus":"Ready"}'
         else
-            printf '%s\n' '{"DNSValidationHostname":"_acme-challenge.pwmtf.hyperchad.dev","DNSValidationTarget":"pwmtf.hyperchad.dev.example.flydns.net.","ClientStatus":"Awaiting configuration"}'
+            printf '%s\n' '{"dns_requirements":{"ownership":{"app_value":"example-ownership"}}}'
         fi
         ;;
     "status --app")
@@ -166,7 +164,7 @@ PATH="$tmp/bin:$PATH" PWMTF_TEST_TMP="$tmp" \
 
 [ "$(jq -s 'length' "$tmp/dns-payloads")" = 2 ]
 jq -e 'select(.type == "AAAA" and .name == "pwmtf.hyperchad.dev" and .content == "2a09:8280:1::1234" and .proxied == true)' "$tmp/dns-payloads" >/dev/null
-jq -e 'select(.type == "CNAME" and .name == "_acme-challenge.pwmtf.hyperchad.dev" and .content == "pwmtf.hyperchad.dev.example.flydns.net." and .proxied == false)' "$tmp/dns-payloads" >/dev/null
+jq -e 'select(.type == "TXT" and .name == "_fly-ownership.pwmtf.hyperchad.dev" and .content == "example-ownership" and .proxied == false)' "$tmp/dns-payloads" >/dev/null
 jq -e '.value == "strict"' "$tmp/ssl-payload" >/dev/null
 jq -e '.rules | length == 2 and any(.[]; .ref == "existing_rule" and (.id | not) and (.version | not) and (.last_updated | not)) and any(.[]; .ref == "pwmtf_games_directory_redirect" and .action_parameters.from_value.status_code == 308 and .action_parameters.from_value.target_url.value == "https://pwmtf.hyperchad.dev" and (.expression | contains("hyperchad.dev") and contains("/games/pool-with-more-than-friends")))' "$tmp/redirect-payload" >/dev/null
 
@@ -191,8 +189,8 @@ if PATH="$tmp/bin:$PATH" PWMTF_TEST_TMP="$tmp" PWMTF_TEST_CERTIFICATE_STATE=miss
     printf '%s\n' "edge configuration accepted missing certificate fields" >&2
     exit 1
 fi
-grep -q 'missing DNSValidationHostname' "$tmp/diagnostic.log"
-grep -q 'Production edge setup failed: extract Fly DNS validation hostname' "$tmp/diagnostic.log"
+grep -q 'missing dns_requirements.ownership.app_value' "$tmp/diagnostic.log"
+grep -q 'Production edge setup failed: extract Fly ownership TXT value' "$tmp/diagnostic.log"
 if grep -q 'test-token\|account-1' "$tmp/diagnostic.log"; then
     printf '%s\n' "edge diagnostics exposed credentials" >&2
     exit 1

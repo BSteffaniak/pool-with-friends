@@ -92,14 +92,13 @@ then
     exit 1
 fi
 
-# Fly issues the origin certificate after the proxied AAAA and ACME challenge
-# records have propagated. Wait boundedly rather than treating DNS lag as a
-# successful deployment.
+# Probe the actual HTTPS boundary rather than parsing version-specific Fly
+# certificate status fields. DNS/TLS provisioning is a separate approved workflow.
 certificate_ready=false
 attempt=0
-while [ "$attempt" -lt 60 ]; do
-    if [ "$(flyctl certs show "$hostname" --app "$app" --json 2>/dev/null \
-        | jq -r '.ClientStatus // empty')" = Ready ]; then
+while [ "$attempt" -lt 30 ]; do
+    if curl --fail --silent --show-error --connect-timeout 5 --max-time 10 \
+        "https://${hostname}/readyz" | grep -qx ready; then
         certificate_ready=true
         break
     fi
@@ -107,7 +106,7 @@ while [ "$attempt" -lt 60 ]; do
     sleep 5
 done
 if [ "$certificate_ready" != true ]; then
-    printf '%s\n' "Fly certificate did not become ready within five minutes" >&2
+    printf '%s\n' "Canonical HTTPS readiness failed after 30 attempts; check the infrastructure workflow, DNS, TLS, and Machine logs" >&2
     exit 1
 fi
 

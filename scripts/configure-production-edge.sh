@@ -68,17 +68,13 @@ step 'discover Fly IPv6 address'
 fly_ipv6=$(flyctl ips list --app "$app" --json \
     | jq -er '[.[] | select((.Type // .type) == "v6") | .Address // .address] | if length == 1 then .[0] else error("expected one Fly IPv6 address") end')
 step 'read Fly certificate'
-certificate=$(flyctl certs show "$hostname" --app "$app" --json)
-step 'extract Fly DNS validation hostname'
-validation_hostname=$(jq -er '.DNSValidationHostname | if type == "string" and length > 0 then . else error("Fly certificate is missing DNSValidationHostname") end' <<EOF
+certificate=$(flyctl certs check --app "$app" --json "$hostname")
+step 'extract Fly ownership TXT value'
+validation_target=$(jq -er '.dns_requirements.ownership.app_value | if type == "string" and length > 0 then . else error("Fly certificate is missing dns_requirements.ownership.app_value; use flyctl 0.4.107") end' <<EOF
 $certificate
 EOF
 )
-step 'extract Fly DNS validation target'
-validation_target=$(jq -er '.DNSValidationTarget | if type == "string" and length > 0 then . else error("Fly certificate is missing DNSValidationTarget") end' <<EOF
-$certificate
-EOF
-)
+validation_hostname="_fly-ownership.$hostname"
 
 upsert_record() {
     type=$1
@@ -115,7 +111,7 @@ EOF
 
 if [ "$mode" != redirect ]; then
     upsert_record AAAA "$hostname" "$fly_ipv6" true
-    upsert_record CNAME "$validation_hostname" "$validation_target" false
+    upsert_record TXT "$validation_hostname" "$validation_target" false
 
     # Cloudflare must authenticate Fly's origin certificate. Flexible or Full mode
     # would weaken the canonical TLS boundary for every proxied request.

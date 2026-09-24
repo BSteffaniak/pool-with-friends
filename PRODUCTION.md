@@ -35,17 +35,19 @@ The Fly application, dedicated IPv6 address, certificate request, and encrypted
 Fly remote build as a 41 MB image, including SQLite and the backup/restore
 helpers; build-only qualification did not create a release or Machine.
 `scripts/configure-production-edge.sh`
-idempotently configures the proxied AAAA record and Fly ACME challenge, and
-sets Cloudflare origin TLS to `strict` while failing unless the API confirms that
-exact value. The workflow applies only origin DNS/TLS before deployment; it adds
-the public directory redirect only after deployment, graceful restart, and two
-origin-only smoke passes have succeeded, then runs the complete smoke including
-the new redirect. A failed bring-up therefore cannot advertise an unavailable
-product. It
+idempotently configures the proxied AAAA record and Fly `_fly-ownership` TXT,
+and sets Cloudflare origin TLS to `strict`. Like WWMTF, it reads
+`dns_requirements.ownership.app_value` from `flyctl certs check --json`.
+All deployment workflows pin flyctl 0.4.107; use that version locally too.
+DNS/TLS changes belong to **Configure Production Infrastructure**, not app releases.
+Run its `origin` operation and approve it before the first application deployment.
+After the application is healthy, run its `redirect` operation, which verifies
+the origin before publishing and verifying the directory redirect.
+A failed bring-up therefore cannot advertise an unavailable product. It
 preserves the shared Cloudflare redirect ruleset and replaces only the stable
 `pwmtf_games_directory_redirect` rule. `scripts/deploy-production.sh` atomically
 stages both Google credentials, validates `fly.toml`, deploys exactly one
-Machine, waits for the certificate, and runs the production smoke test. Before
+Machine, waits for actual canonical HTTPS readiness, and runs the production smoke test. Before
 creating a Machine it also requires exactly one created, encrypted `pwmtf_data`
 volume, in `ord` with 14-day snapshot retention and automatic Fly backups,
 preventing an accidental ephemeral, unprotected, or ambiguous database
@@ -148,8 +150,10 @@ Only the release job is serialized, so waiting
 for approval does not block subsequent builds. Approving an older run can deploy
 an older image: cancel obsolete approvals and check the SHA before approving.
 
-Backup, secret staging, DNS/TLS checks, Machine update/restart, and smoke tests
-still execute after approval. Approval therefore avoids build latency, but is
+Backup, secret staging, Machine update/restart, and origin smoke tests
+still execute after approval. Application releases do not use Cloudflare credentials
+or reconfigure DNS/TLS/redirects. Infrastructure and app mutations share one concurrency
+group. Approval therefore avoids build latency, but is
 not an instantaneous or zero-downtime switch (production uses one Machine).
 The job must finish successfully before the service is treated as deployed.
 Local invocation of `scripts/deploy-production.sh` also requires

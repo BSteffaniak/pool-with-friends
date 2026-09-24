@@ -22,6 +22,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+        with:
+          version: 0.4.107
       - name: Build and push without releasing
         env:
           IMAGE_TAG: build-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -54,18 +56,16 @@ jobs:
     timeout-minutes: 60
     env:
       PWMTF_DEPLOY_IMAGE: ${{ needs.build.outputs.image }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       PWMTF_GOOGLE_CLIENT_ID: ${{ secrets.PWMTF_GOOGLE_CLIENT_ID }}
       PWMTF_GOOGLE_CLIENT_SECRET: ${{ secrets.PWMTF_GOOGLE_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+        with:
+          version: 0.4.107
       - name: Assert protected credentials
         run: |
-          test -n "$CLOUDFLARE_ACCOUNT_ID"
-          test -n "$CLOUDFLARE_API_TOKEN"
           test -n "$FLY_API_TOKEN"
           test -n "$PWMTF_GOOGLE_CLIENT_ID"
           test -n "$PWMTF_GOOGLE_CLIENT_SECRET"
@@ -73,13 +73,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes jq
       - name: Snapshot existing production database
         run: ./scripts/backup-production.sh --if-running
-      - name: Configure canonical DNS and TLS validation
-        run: ./scripts/configure-production-edge.sh origin
       - name: Deploy one authoritative Machine
         run: ./scripts/deploy-production.sh
-      - name: Configure managed directory redirect
-        run: ./scripts/configure-production-edge.sh redirect
-      - name: Verify canonical origin and directory redirect
-        run: ./scripts/test-production-smoke.sh
       - name: Verify application-consistent production backup and restore
         run: ./scripts/backup-production.sh
