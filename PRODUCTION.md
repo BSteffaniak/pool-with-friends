@@ -130,14 +130,17 @@ claim of credential validity is made merely because a GitHub secret exists.
 
 ## Deploy
 
-Every push to `master` starts **Deploy Production**: validation and a Fly remote
-build/push run before the `production-approval` gate. Manual dispatch on `master`
+Every push to `master` starts **Deploy Production**: a Fly remote
+build/push runs before the `production-approval` gate. Manual dispatch on `master`
 is also supported. The build uses the `Production` environment's Fly token but
 never creates a release, stages secrets, or modifies Machines. Keep that
 environment without required reviewers; reviewers belong on `production-approval`.
 
 The build tags its image with the commit SHA, workflow run ID, and attempt.
-After both validation and image preparation succeed, approve the intended SHA.
+After image preparation succeeds, approve the intended SHA.
+Heavyweight verification runs independently in **Validate** on pushes and PRs;
+its result does not gate deployment. Approval is the explicit release decision,
+so review the separate validation results before approving.
 Deployment receives that exact tag via job outputs and uses `flyctl deploy
 --image` without a rebuild or digest lookup. Tags are technically mutable: do not
 overwrite prepared tags, and preserve pending candidates in registry retention.
