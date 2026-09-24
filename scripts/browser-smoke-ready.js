@@ -16,7 +16,7 @@ const child = spawn(browser, [
   '--disable-gpu-sandbox', '--enable-webgl', '--enable-unsafe-swiftshader',
   '--ignore-gpu-blocklist', '--no-first-run', '--no-default-browser-check',
   '--use-angle=swiftshader', '--window-size=1280,720', 'about:blank',
-], {stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']});
+], {detached: true, stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']});
 let nextId = 0;
 let buffer = '';
 let failure = null;
@@ -93,10 +93,34 @@ function send(method, params = {}, sessionId) {
     console.error(`Smoke navigation failed (${url}): ${error.message}`);
     process.exitCode = 1;
   } finally {
-    child.kill('SIGKILL');
-    if (child.pid && child.exitCode === null && child.signalCode === null) {
-      await new Promise(resolve => child.once('exit', resolve));
+    try {
+      // Browser.close can close the pipe before replying. Shutdown is still
+      // bounded by send's timeout and the process-group fallback below.
+      if (child.pid) {
+        await send('Browser.close').catch(() => {});
+        const deadline = Date.now() + 3000;
+        while (child.exitCode === null && child.signalCode === null && Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        // The detached browser owns this group; never signal unrelated Chrome
+        // instances. Descendants may outlive the parent and still write profiles.
+        try {
+          process.kill(-child.pid, 'SIGKILL');
+        } catch (error) {
+          if (error.code !== 'ESRCH') throw error;
+        }
+        if (child.exitCode === null && child.signalCode === null) {
+          await new Promise(resolve => child.once('exit', resolve));
+        }
+      }
+      await fs.promises.rm(profile, {
+        recursive: true, force: true, maxRetries: 10, retryDelay: 100,
+      });
+    } catch (error) {
+      const message = `Browser cleanup failed: ${error.code || error.message}`;
+      console.error(message);
+      fs.appendFileSync(output, `\n${message}\n`);
+      process.exitCode = 1;
     }
-    fs.rmSync(profile, {recursive: true, force: true});
   }
 })();

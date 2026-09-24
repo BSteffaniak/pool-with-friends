@@ -36,10 +36,18 @@ thread.start()
 try:
     with tempfile.TemporaryDirectory(prefix='pwmtf-readiness-test-') as tmp:
         for route, expected in [('/ready', 0), ('/error', 1), ('/exception', 1), ('/loading', 1)]:
-            output = Path(tmp) / 'page.log'
+            output = Path(tmp) / f'{route[1:]}.log'
             result = subprocess.run(['node', str(root / 'browser-smoke-ready.js'), browser,
                 f'http://127.0.0.1:{server.server_port}{route}', str(output)],
                 capture_output=True, text=True, timeout=90, check=False)
+            artifacts = os.environ.get('PWMTF_TEST_ARTIFACT_DIR')
+            if artifacts:
+                destination = Path(artifacts) / 'readiness'
+                destination.mkdir(parents=True, exist_ok=True)
+                (destination / f'{route[1:]}-process.log').write_text(
+                    f'exit={result.returncode}\n{result.stdout}\n{result.stderr}')
+                if output.exists():
+                    shutil.copyfile(output, destination / output.name)
             assert result.returncode == expected, (route, result.stderr)
             assert output.exists(), route
             if route == '/ready':

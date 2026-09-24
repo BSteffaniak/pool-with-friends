@@ -46,6 +46,8 @@ jobs:
       - run: ./scripts/test-wasm-bundle-integrity.sh
       - run: ./scripts/test-wasm-bundle-lock.py
       - run: python3 scripts/test-browser-smoke-ready.py
+        env:
+          PWMTF_TEST_ARTIFACT_DIR: ${{ runner.temp }}/wasm-concurrency
       - run: ./scripts/test-wasm-bundle-concurrency.sh
         env:
           PWMTF_TEST_ARTIFACT_DIR: ${{ runner.temp }}/wasm-concurrency
