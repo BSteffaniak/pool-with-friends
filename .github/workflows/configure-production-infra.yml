@@ -2,13 +2,6 @@ name: Configure Production Infrastructure
 
 "on":
   workflow_dispatch:
-    inputs:
-      operation:
-        description: Configure origin before first release; publish redirect after the app is healthy
-        type: choice
-        required: true
-        default: origin
-        options: [origin, redirect]
 
 permissions:
   contents: read
@@ -33,7 +26,6 @@ jobs:
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      OPERATION: ${{ inputs.operation }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
@@ -41,11 +33,5 @@ jobs:
           version: 0.4.107
       - run: sudo apt-get update && sudo apt-get install --yes jq
       - run: flyctl version
-      - name: Verify application before advertising directory redirect
-        if: inputs.operation == 'redirect'
-        run: ./scripts/test-production-smoke.sh --origin-only
-      - name: Configure infrastructure
-        run: ./scripts/configure-production-edge.sh "$OPERATION"
-      - name: Verify directory redirect
-        if: inputs.operation == 'redirect'
-        run: ./scripts/test-production-smoke.sh
+      - name: Configure DNS, TLS, and directory redirect
+        run: ./scripts/configure-production-edge.sh

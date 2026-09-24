@@ -40,10 +40,10 @@ and sets Cloudflare origin TLS to `strict`. Like WWMTF, it reads
 `dns_requirements.ownership.app_value` from `flyctl certs check --json`.
 All deployment workflows pin flyctl 0.4.107; use that version locally too.
 DNS/TLS changes belong to **Configure Production Infrastructure**, not app releases.
-Run its `origin` operation and approve it before the first application deployment.
-After the application is healthy, run its `redirect` operation, which verifies
-the origin before publishing and verifying the directory redirect.
-A failed bring-up therefore cannot advertise an unavailable product. It
+Run and approve it once to configure DNS, TLS, and the directory redirect together,
+matching WWMTF's single infrastructure apply. There are no operation choices or
+application-health prerequisites. The link may be published before the first app
+release is healthy; this is intentional. The script
 preserves the shared Cloudflare redirect ruleset and replaces only the stable
 `pwmtf_games_directory_redirect` rule. `scripts/deploy-production.sh` atomically
 stages both Google credentials, validates `fly.toml`, deploys exactly one
