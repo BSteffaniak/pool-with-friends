@@ -15,7 +15,9 @@ case "$1 $2" in
         printf '%s\n' '[{"Type":"v6","Address":"2a09:8280:1::1234"}]'
         ;;
     "certs show")
-        if [ "${PWMTF_TEST_CERTIFICATE_STATE:-ready}" = ready ]; then
+        if [ "${PWMTF_TEST_CERTIFICATE_STATE:-ready}" = missing ]; then
+            printf '%s\n' '{}'
+        elif [ "${PWMTF_TEST_CERTIFICATE_STATE:-ready}" = ready ]; then
             printf '%s\n' '{"DNSValidationHostname":"_acme-challenge.pwmtf.hyperchad.dev","DNSValidationTarget":"pwmtf.hyperchad.dev.example.flydns.net.","ClientStatus":"Ready"}'
         else
             printf '%s\n' '{"DNSValidationHostname":"_acme-challenge.pwmtf.hyperchad.dev","DNSValidationTarget":"pwmtf.hyperchad.dev.example.flydns.net.","ClientStatus":"Awaiting configuration"}'
@@ -182,6 +184,19 @@ PATH="$tmp/bin:$PATH" PWMTF_TEST_TMP="$tmp" \
 [ ! -e "$tmp/dns-payloads" ]
 [ ! -e "$tmp/ssl-payload" ]
 [ -f "$tmp/redirect-payload" ]
+
+if PATH="$tmp/bin:$PATH" PWMTF_TEST_TMP="$tmp" PWMTF_TEST_CERTIFICATE_STATE=missing \
+    CLOUDFLARE_API_TOKEN=test-token CLOUDFLARE_ACCOUNT_ID=account-1 \
+    "$root/scripts/configure-production-edge.sh" origin >"$tmp/diagnostic.log" 2>&1; then
+    printf '%s\n' "edge configuration accepted missing certificate fields" >&2
+    exit 1
+fi
+grep -q 'missing DNSValidationHostname' "$tmp/diagnostic.log"
+grep -q 'Production edge setup failed: extract Fly DNS validation hostname' "$tmp/diagnostic.log"
+if grep -q 'test-token\|account-1' "$tmp/diagnostic.log"; then
+    printf '%s\n' "edge diagnostics exposed credentials" >&2
+    exit 1
+fi
 
 for ruleset_state in none two; do
     if PATH="$tmp/bin:$PATH" PWMTF_TEST_TMP="$tmp" PWMTF_TEST_RULESET_STATE="$ruleset_state" \
