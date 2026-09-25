@@ -160,7 +160,10 @@ for required_parameter in 'client_id=' 'response_type=code' 'scope=' 'profile' '
             ;;
     esac
 done
-grep -qi '^set-cookie: pwmtf_oidc_binding=' "$response_headers"
+if ! grep -qi '^set-cookie: __Host-pwmtf_oidc=' "$response_headers"; then
+    printf '%s\n' 'Google authorization start omitted the __Host-pwmtf_oidc binding cookie' >&2
+    exit 1
+fi
 grep -qi '^set-cookie: .*Secure' "$response_headers"
 grep -qi '^set-cookie: .*HttpOnly' "$response_headers"
 grep -qi '^set-cookie: .*SameSite=Lax' "$response_headers"

@@ -51,7 +51,7 @@ case "$url" in
         printf '%s' "${PWMTF_FAKE_MANIFEST_BODY:-}" >"$body"
         ;;
     https://pwmtf.hyperchad.dev/auth/google/start)
-        printf 'HTTP/1.1 %s Redirect\r\nLocation: %s\r\nSet-Cookie: pwmtf_oidc_binding=opaque; Path=/; Max-Age=600; Secure; HttpOnly; SameSite=Lax; Priority=High%s\r\n\r\n' "${PWMTF_FAKE_OIDC_STATUS:-307}" "${PWMTF_FAKE_OIDC_TARGET:-https://accounts.google.com/o/oauth2/v2/auth?client_id=client&redirect_uri=https%3A%2F%2Fpwmtf.hyperchad.dev%2Fauth%2Fgoogle%2Fcallback&response_type=code&scope=openid%20profile&state=opaque&nonce=opaque&code_challenge=opaque&code_challenge_method=S256}" "${PWMTF_FAKE_OIDC_COOKIE_EXTRA:-}" >"$headers"
+        printf 'HTTP/1.1 %s Redirect\r\nLocation: %s\r\nSet-Cookie: %s=opaque; Path=/; Max-Age=600; Secure; HttpOnly; SameSite=Lax; Priority=High%s\r\n\r\n' "${PWMTF_FAKE_OIDC_STATUS:-307}" "${PWMTF_FAKE_OIDC_TARGET:-https://accounts.google.com/o/oauth2/v2/auth?client_id=client&redirect_uri=https%3A%2F%2Fpwmtf.hyperchad.dev%2Fauth%2Fgoogle%2Fcallback&response_type=code&scope=openid%20profile&state=opaque&nonce=opaque&code_challenge=opaque&code_challenge_method=S256}" "${PWMTF_FAKE_OIDC_COOKIE_NAME:-__Host-pwmtf_oidc}" "${PWMTF_FAKE_OIDC_COOKIE_EXTRA:-}" >"$headers"
         : >"$body"
         ;;
     https://pwmtf.hyperchad.dev/auth/google/callback\?code=pwmtf-malformed-callback-marker\&state=)
@@ -87,6 +87,13 @@ grep -q 'production origin and directory redirect smoke passed' "$tmp/pass.out"
 PWMTF_CURL_BIN="$tmp/curl" PWMTF_FAKE_REDIRECT_STATUS=500 \
     "$root/scripts/test-production-smoke.sh" --origin-only >"$tmp/origin-pass.out"
 grep -q 'production origin smoke passed' "$tmp/origin-pass.out"
+
+if PWMTF_CURL_BIN="$tmp/curl" PWMTF_FAKE_OIDC_COOKIE_NAME=pwmtf_oidc_binding \
+    "$root/scripts/test-production-smoke.sh" >"$tmp/rejected.out" 2>"$tmp/rejected.err"; then
+    printf '%s\n' 'production smoke accepted the obsolete OIDC binding cookie name' >&2
+    exit 1
+fi
+grep -q 'omitted the __Host-pwmtf_oidc binding cookie' "$tmp/rejected.err"
 
 if PWMTF_CURL_BIN="$tmp/curl" PWMTF_FAKE_APPLICATION_CACHE='public, max-age=3600' \
     "$root/scripts/test-production-smoke.sh" >"$tmp/rejected.out" 2>"$tmp/rejected.err"; then
