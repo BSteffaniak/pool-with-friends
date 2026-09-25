@@ -8,7 +8,7 @@ import time
 import urllib.request
 
 
-def request(method, path, body=None):
+def request(method, path, body=None, *, expect_json=True):
     """Call the Fly Machines API without printing credentials or configuration."""
     req = urllib.request.Request(
         'https://api.machines.dev/v1/apps/pwmtf/' + path,
@@ -16,6 +16,8 @@ def request(method, path, body=None):
         headers={'Authorization': 'Bearer ' + os.environ['FLY_API_TOKEN'],
                  'Content-Type': 'application/json'})
     with urllib.request.urlopen(req, timeout=60) as response:
+        if not expect_json:
+            return None
         data = response.read()
         return json.loads(data) if data else None
 
@@ -63,15 +65,15 @@ def snapshot():
         print('Quiescing production Machine for volume snapshot', flush=True)
         request('POST', f'machines/{machine}', {'config': quiesced, 'skip_launch': True})
         wait(machine, 'stopped')
-        result = request('POST', f'volumes/{volume}/snapshots', {})
-        if not isinstance(result, dict) or not result.get('id'):
-            raise RuntimeError('Fly did not confirm a snapshot ID')
-        print('Fly volume snapshot created', flush=True)
+        # Fly's snapshot-create endpoint confirms acceptance via HTTP status;
+        # its client does not require a JSON body or snapshot ID.
+        request('POST', f'volumes/{volume}/snapshots', expect_json=False)
+        print('Fly volume snapshot request accepted', flush=True)
     finally:
         print('Restoring original Machine configuration and service', flush=True)
         request('POST', f'machines/{machine}', {'config': config, 'skip_launch': True})
         wait(machine, 'started')
-    print('Production snapshot completed; Machine restarted')
+    print('Snapshot request accepted; Machine restarted. Snapshot completion and restore are not verified.')
 
 
 if __name__ == '__main__':
