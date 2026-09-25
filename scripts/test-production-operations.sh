@@ -85,22 +85,22 @@ case "$1 $2" in
     "machine restart")
         : >"$PWMTF_TEST_TMP/restart-ran"
         ;;
-    "machine status")
+    "machine list")
+        [ "$*" = 'machine list --app pwmtf --json' ]
+        case "${PWMTF_TEST_MACHINE_CONFIG:-valid}" in
+            missing) printf '%s\n' '[{"id":"other","config":{}}]'; exit 0 ;;
+            duplicate) printf '%s\n' '[{"id":"machine-1","config":{}},{"id":"machine-1","config":{}}]'; exit 0 ;;
+            absent) printf '%s\n' '[{"id":"machine-1"}]'; exit 0 ;;
+        esac
         if [ "${PWMTF_TEST_MACHINE_CONFIG:-valid}" = valid ]; then
             cat <<EOF
-Machine ID: machine-1
-Config:
-{
+[{"id":"other","config":{}},{"id":"machine-1","config":{
   "mounts": [{"name":"pwmtf_data","path":"/data","encrypted":true}],
   "services": [{"internal_port":8080,"autostop":false,"autostart":true,"min_machines_running":1,"ports":[{"port":80,"handlers":["http"],"force_https":true},{"port":443,"handlers":["http","tls"]}],"checks":[{"type":"http","path":"/readyz"}]}]
-}
+}}]
 EOF
         else
-            cat <<EOF
-Machine ID: machine-1
-Config:
-{"mounts":[],"services":[{"internal_port":8080,"autostop":true,"autostart":true,"min_machines_running":0,"checks":[]}]}
-EOF
+            printf '%s\n' '[{"id":"machine-1","config":{"mounts":[],"services":[{"internal_port":8080,"autostop":true,"autostart":true,"min_machines_running":0,"checks":[]}]}}]'
         fi
         ;;
     *)
@@ -269,6 +269,16 @@ set -eu
 : >"$PWMTF_TEST_TMP/smoke-ran"
 MOCK
 chmod +x "$tmp/smoke"
+for config_state in missing duplicate absent; do
+    if PATH="$tmp/bin:$PATH" PWMTF_TEST_TMP="$tmp" PWMTF_TEST_MACHINE_CONFIG="$config_state" \
+        PWMTF_GOOGLE_CLIENT_ID=client-id PWMTF_GOOGLE_CLIENT_SECRET=client-secret \
+        PWMTF_PRODUCTION_SMOKE_SCRIPT="$tmp/smoke" \
+        "$root/scripts/deploy-production.sh" >"$tmp/config-error.log" 2>&1; then
+        printf '%s\n' "deployment accepted $config_state Machine configuration" >&2
+        exit 1
+    fi
+    grep -q 'expected exactly one matching Machine with configuration' "$tmp/config-error.log"
+done
 for exec_state in missing stderr nonzero null; do
     for script in backup-production deploy-production; do
         if PATH="$tmp/bin:$PATH" PWMTF_TEST_TMP="$tmp" PWMTF_TEST_EXEC_STATE="$exec_state" \

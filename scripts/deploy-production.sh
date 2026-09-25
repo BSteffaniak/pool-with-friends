@@ -78,8 +78,11 @@ wait_for_started_machine() {
     return 1
 }
 machine_id=$(wait_for_started_machine)
-machine_configuration=$(flyctl machine status "$machine_id" --app "$app" --display-config 2>/dev/null \
-    | sed -n '/^Config:$/,$p' | sed '1d')
+machines=$(flyctl machine list --app "$app" --json)
+machine_configuration=$(printf '%s' "$machines" | jq -er --arg id "$machine_id" '
+    [.[] | select(.id == $id)] |
+    if length == 1 and (.[0].config | type) == "object" then .[0].config
+    else error("expected exactly one matching Machine with configuration") end')
 if ! jq -e --arg volume "$volume_name" '
     any(.mounts[]?; .name == $volume and .path == "/data" and .encrypted == true)
     and any(.services[]?;
