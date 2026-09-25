@@ -62,21 +62,27 @@ requires the same sole Machine to return started, and reruns canonical readiness
 and production smoke checks. This qualifies startup migration/recovery mechanics
 for the deployed database without pretending to prove recovery after real play.
 The
-runtime image includes only the SQLite CLI and reviewed backup/restore helpers
-needed for application-consistent operational backups. After deployment,
-`scripts/backup-production.sh` creates a timestamped backup on the encrypted
-volume and verifies it by restoring and checking a temporary copy.
+runtime image includes SQLite backup/restore helpers for offline maintenance only.
+Do not run `scripts/backup-production.sh` against the live Turso database: it
+holds a lock incompatible with the SQLite CLI's online backup.
 
 Production deployment, edge configuration, and backup scripts reject any
 `FLY_APP_NAME` other than the canonical `pwmtf` app so protected credentials
 cannot be redirected to another Fly application through workflow environment
 overrides.
 
-The deployment workflow invokes `scripts/backup-production.sh --if-running`
-before changing DNS or deploying. First deployment skips cleanly because no
-Machine exists; every later deployment requires exactly one started Machine and
-creates and restore-checks a timestamped pre-deploy database backup. After a
-successful deployment it performs the same backup/restore verification again.
+The deployment workflow runs `python3 scripts/snapshot-production.py` before
+releasing the image. As in WWMTF, it saves the original Machine configuration,
+disables proxy autostart/minimum-Machine triggers using `skip_launch`, waits for
+the Machine to stop, snapshots the attached encrypted volume, then restores the
+configuration and starts the Machine. Restoration is attempted even if snapshot
+creation fails; failures block deployment. First deployment skips only when no
+Machine exists. This causes bounded downtime. No online SQLite backup or
+post-deploy backup/restore test runs. PWMTF has no WWMTF supervisor archive hook;
+the stopped-volume snapshot preserves the database and WAL together instead.
+A snapshot API success does not claim a tested restore. If the runner is killed
+during this operation, inspect the Machine and restore its autostart/minimum
+settings from `fly.toml` before resuming releases.
 
 Production operation scripts have hermetic adapter self-tests in
 `scripts/test-production-operations.sh`; CI runs them without requiring live
@@ -196,10 +202,10 @@ browser profiles and two real Google accounts:
 5. Verify reconnect, deployed-process restart, result recovery, concession, and
    a linked rematch with alternating breaker.
 6. Repeat the complete flow on supported iOS Safari and Android Chrome devices.
-7. Perform and verify an application-consistent backup and restore after real
-   accepted play. The deployment workflow's initial empty-database check proves
-   the mechanism only; repeat `scripts/backup-production.sh` after the played
-   match before accepting this criterion.
+7. Create a stopped-volume snapshot after real accepted play and verify restoration
+   to an isolated recovery environment before accepting this criterion. Deployment
+   snapshot creation alone does not prove restore correctness. Do not use the
+   SQLite CLI against the live Turso database.
 
 Record only non-secret outcomes. Never record credentials, cookies, OIDC values,
 raw invitation/session tokens, provider claims, or complete identity-linked shot

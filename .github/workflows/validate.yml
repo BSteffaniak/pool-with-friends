@@ -70,6 +70,7 @@ jobs:
       - run: python3 scripts/test-provision-production-secrets.py
       - run: ./scripts/test-production-operations.sh
       - run: ./scripts/test-local-development-login.sh
+      - run: python3 scripts/test-snapshot-production.py
       - run: ./scripts/test-backup-restore.sh
       - run: ./scripts/test-native-deployment-smoke.sh
       - run: ./scripts/check-architecture.sh

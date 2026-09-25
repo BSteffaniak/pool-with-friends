@@ -72,8 +72,6 @@ jobs:
       - name: Install operational tools
         run: sudo apt-get update && sudo apt-get install --yes jq
       - name: Snapshot existing production database
-        run: ./scripts/backup-production.sh --if-running
+        run: python3 scripts/snapshot-production.py
       - name: Deploy one authoritative Machine
         run: ./scripts/deploy-production.sh
-      - name: Verify application-consistent production backup and restore
-        run: ./scripts/backup-production.sh
