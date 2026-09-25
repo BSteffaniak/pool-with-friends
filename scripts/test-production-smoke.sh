@@ -212,8 +212,8 @@ if [ "$status" != 401 ]; then
     printf '%s\n' "unauthenticated session endpoint returned $status instead of 401" >&2
     exit 1
 fi
-if [ -s "$response_body" ]; then
-    printf '%s\n' "unauthenticated session endpoint returned a response body" >&2
+if ! printf '%s' 'request is not authenticated' | cmp -s - "$response_body"; then
+    printf '%s\n' "unauthenticated session endpoint returned an unexpected response body" >&2
     exit 1
 fi
 
@@ -238,15 +238,16 @@ for protected_path in challenges invitations invitations/redeem; do
         printf '%s\n' "unauthenticated $protected_path endpoint returned $status instead of 401" >&2
         exit 1
     fi
-    if [ -s "$response_body" ]; then
-        printf '%s\n' "unauthenticated $protected_path endpoint returned a response body" >&2
+    if ! printf '%s' 'request is not authenticated' | cmp -s - "$response_body"; then
+        printf '%s\n' "unauthenticated $protected_path endpoint returned an unexpected response body" >&2
         exit 1
     fi
 done
 
 # WebSocket subscriptions are state-bearing and must reject an unauthenticated
-# same-origin upgrade before protocol negotiation.
+# Use a valid query and HTTP/1.1 upgrade so extraction reaches authentication.
 "$curl_bin" \
+    --http1.1 \
     --silent \
     --show-error \
     --connect-timeout "$max_time" \
@@ -259,14 +260,14 @@ done
     --header 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
     --dump-header "$response_headers" \
     --output "$response_body" \
-    "$canonical_origin/ws"
+    "$canonical_origin/ws?match_id=0"
 status=$(awk 'NR == 1 { print $2 }' "$response_headers")
 if [ "$status" != 401 ]; then
     printf '%s\n' "unauthenticated WebSocket upgrade returned $status instead of 401" >&2
     exit 1
 fi
-if [ -s "$response_body" ]; then
-    printf '%s\n' "unauthenticated WebSocket upgrade returned a response body" >&2
+if ! printf '%s' 'request is not authenticated' | cmp -s - "$response_body"; then
+    printf '%s\n' "unauthenticated WebSocket upgrade returned an unexpected response body" >&2
     exit 1
 fi
 

@@ -24,7 +24,7 @@ while [ "$#" -gt 0 ]; do
         --connect-timeout|--max-time|--max-redirs|--request|--header|--data)
             shift 2
             ;;
-        --fail|--silent|--show-error)
+        --http1.1|--fail|--silent|--show-error)
             shift
             ;;
         *)
@@ -60,15 +60,15 @@ case "$url" in
         ;;
     https://pwmtf.hyperchad.dev/api/session)
         printf 'HTTP/1.1 %s Unauthorized\r\nContent-Type: text/plain\r\n\r\n' "${PWMTF_FAKE_SESSION_STATUS:-401}" >"$headers"
-        printf '%s' "${PWMTF_FAKE_SESSION_BODY:-}" >"$body"
+        printf '%s' "${PWMTF_FAKE_SESSION_BODY-request is not authenticated}" >"$body"
         ;;
     https://pwmtf.hyperchad.dev/api/challenges|https://pwmtf.hyperchad.dev/api/invitations|https://pwmtf.hyperchad.dev/api/invitations/redeem)
         printf 'HTTP/1.1 %s Unauthorized\r\nContent-Type: text/plain\r\n\r\n' "${PWMTF_FAKE_PROTECTED_STATUS:-401}" >"$headers"
-        printf '%s' "${PWMTF_FAKE_PROTECTED_BODY:-}" >"$body"
+        printf '%s' "${PWMTF_FAKE_PROTECTED_BODY-request is not authenticated}" >"$body"
         ;;
-    https://pwmtf.hyperchad.dev/ws)
+    https://pwmtf.hyperchad.dev/ws\?match_id=0)
         printf 'HTTP/1.1 %s Unauthorized\r\nContent-Type: text/plain\r\n\r\n' "${PWMTF_FAKE_WEBSOCKET_STATUS:-401}" >"$headers"
-        printf '%s' "${PWMTF_FAKE_WEBSOCKET_BODY:-}" >"$body"
+        printf '%s' "${PWMTF_FAKE_WEBSOCKET_BODY-request is not authenticated}" >"$body"
         ;;
     https://hyperchad.dev/games/pool-with-more-than-friends)
         printf 'HTTP/1.1 %s Redirect\r\nLocation: %s\r\n\r\n' "${PWMTF_FAKE_REDIRECT_STATUS:-308}" "${PWMTF_FAKE_REDIRECT_TARGET:-https://pwmtf.hyperchad.dev}" >"$headers"
@@ -191,7 +191,7 @@ if PWMTF_CURL_BIN="$tmp/curl" PWMTF_FAKE_SESSION_BODY=identity-data \
     printf '%s\n' "production smoke accepted unauthenticated identity data" >&2
     exit 1
 fi
-grep -q 'unauthenticated session endpoint returned a response body' "$tmp/rejected.err"
+grep -q 'unauthenticated session endpoint returned an unexpected response body' "$tmp/rejected.err"
 
 if PWMTF_CURL_BIN="$tmp/curl" PWMTF_FAKE_PROTECTED_STATUS=200 \
     "$root/scripts/test-production-smoke.sh" >"$tmp/rejected.out" 2>"$tmp/rejected.err"; then
@@ -205,7 +205,7 @@ if PWMTF_CURL_BIN="$tmp/curl" PWMTF_FAKE_PROTECTED_BODY=workflow-data \
     printf '%s\n' "production smoke accepted leaked social workflow data" >&2
     exit 1
 fi
-grep -q 'endpoint returned a response body' "$tmp/rejected.err"
+grep -q 'endpoint returned an unexpected response body' "$tmp/rejected.err"
 
 if PWMTF_CURL_BIN="$tmp/curl" PWMTF_FAKE_WEBSOCKET_STATUS=101 \
     "$root/scripts/test-production-smoke.sh" >"$tmp/rejected.out" 2>"$tmp/rejected.err"; then
@@ -219,7 +219,7 @@ if PWMTF_CURL_BIN="$tmp/curl" PWMTF_FAKE_WEBSOCKET_BODY=subscription-data \
     printf '%s\n' "production smoke accepted leaked WebSocket data" >&2
     exit 1
 fi
-grep -q 'unauthenticated WebSocket upgrade returned a response body' "$tmp/rejected.err"
+grep -q 'unauthenticated WebSocket upgrade returned an unexpected response body' "$tmp/rejected.err"
 
 if PWMTF_CURL_BIN="$tmp/curl" PWMTF_CANONICAL_ORIGIN=https://evil.example \
     "$root/scripts/test-production-smoke.sh" >"$tmp/rejected.out" 2>"$tmp/rejected.err"; then
