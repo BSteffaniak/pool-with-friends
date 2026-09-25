@@ -1107,6 +1107,17 @@ fn release_shot(input: &PrototypeInput) -> Result<(), wasm_bindgen::JsValue> {
     )
 }
 
+// Keep the cue's physical length independent of clearance; the viewport clips
+// the butt naturally rather than compressing the artwork near a screen edge.
+fn cue_transform(cue_ball: Vec2, aim_angle: f32, power: f32) -> Transform {
+    let direction = Vec2::from_angle(aim_angle);
+    let pullback = power.mul_add(42.0, 12.0);
+    Transform::from_translation(
+        (cue_ball - direction * (pullback + cue_art::LENGTH / 2.0)).extend(7.0),
+    )
+    .with_rotation(Quat::from_rotation_z(aim_angle))
+}
+
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 fn update_aim(
     presentation: Res<CanonicalPresentation>,
@@ -1119,28 +1130,7 @@ fn update_aim(
         .get(&0)
         .copied()
         .unwrap_or(Vec2::new(-330.0, 0.0));
-    let direction = Vec2::from_angle(input.aim_angle);
-    let desired = input.power.mul_add(42.0, 12.0);
-    let half = DESIGN_SIZE / 2.0 - Vec2::splat(8.0);
-    let backward = -direction;
-    let available = [
-        if backward.x.abs() > 0.001 {
-            backward.x.signum().mul_add(-cue_ball.x, half.x) / backward.x.abs()
-        } else {
-            f32::INFINITY
-        },
-        if backward.y.abs() > 0.001 {
-            backward.y.signum().mul_add(-cue_ball.y, half.y) / backward.y.abs()
-        } else {
-            f32::INFINITY
-        },
-    ]
-    .into_iter()
-    .fold(f32::INFINITY, f32::min);
-    let length = (available - desired).clamp(20.0, 420.0);
-    cue.scale.x = length / 420.0;
-    cue.translation = (cue_ball - direction * (desired + length / 2.0)).extend(7.0);
-    cue.rotation = Quat::from_rotation_z(input.aim_angle);
+    **cue = cue_transform(cue_ball, input.aim_angle, input.power);
 
     let fill_height = POWER_BAR_HEIGHT * input.power;
     power.0.custom_size = Some(Vec2::new(30.0, fill_height));
@@ -1208,6 +1198,32 @@ fn rearm_input_after_valid_landscape(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cue_keeps_length_and_tip_alignment_at_edges() {
+        for position in [Vec2::ZERO, DESIGN_SIZE / 2.0, -DESIGN_SIZE / 2.0] {
+            for angle in [0.0, 0.7, std::f32::consts::FRAC_PI_2, std::f32::consts::PI] {
+                for power in [0.0, 0.5, 1.0] {
+                    let transform = cue_transform(position, angle, power);
+                    let tip = transform.transform_point(Vec3::new(cue_art::LENGTH / 2.0, 0.0, 0.0));
+                    let butt =
+                        transform.transform_point(Vec3::new(-cue_art::LENGTH / 2.0, 0.0, 0.0));
+                    assert!(transform.scale.abs_diff_eq(Vec3::ONE, 0.0001));
+                    assert!((tip.distance(butt) - cue_art::LENGTH).abs() < 0.001);
+                    let expected_tip =
+                        position - Vec2::from_angle(angle) * power.mul_add(42.0, 12.0);
+                    assert!(tip.truncate().abs_diff_eq(expected_tip, 0.001));
+                }
+            }
+        }
+        let edge = -DESIGN_SIZE / 2.0;
+        let butt = cue_transform(edge, 0.0, 1.0).transform_point(Vec3::new(
+            -cue_art::LENGTH / 2.0,
+            0.0,
+            0.0,
+        ));
+        assert!(butt.x < edge.x);
+    }
 
     #[test]
     fn canonical_projection_drives_ball_targets_and_pockets() {

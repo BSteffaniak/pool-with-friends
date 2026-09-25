@@ -5,6 +5,9 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 
+/// Cue length in table presentation coordinates, unaffected by edge clearance.
+pub const LENGTH: f32 = 420.0;
+
 const WIDTH: u32 = 1024;
 const HEIGHT: u32 = 48;
 
@@ -23,7 +26,7 @@ pub fn spawn(commands: &mut Commands, images: &mut Assets<Image>) {
     commands.spawn((
         Sprite {
             image,
-            custom_size: Some(Vec2::new(420.0, 22.0)),
+            custom_size: Some(Vec2::new(LENGTH, 22.0)),
             ..default()
         },
         Transform::from_xyz(-552.0, 0.0, 7.0),
