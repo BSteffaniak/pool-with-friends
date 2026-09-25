@@ -35,7 +35,8 @@ The Fly application, dedicated IPv6 address, certificate request, and encrypted
 Fly remote build as a 41 MB image, including SQLite and the backup/restore
 helpers; build-only qualification did not create a release or Machine.
 `scripts/configure-production-edge.sh`
-idempotently configures the proxied AAAA record and Fly `_fly-ownership` TXT,
+idempotently configures the proxied AAAA record, Fly `_fly-ownership` TXT,
+and unproxied `_acme-challenge` CNAME for certificate issuance behind Cloudflare,
 and sets Cloudflare origin TLS to `strict`. Like WWMTF, it reads
 `dns_requirements.ownership.app_value` from `flyctl certs check --json`.
 All deployment workflows pin flyctl 0.4.107; use that version locally too.

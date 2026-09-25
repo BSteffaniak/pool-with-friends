@@ -75,6 +75,13 @@ $certificate
 EOF
 )
 validation_hostname="_fly-ownership.$hostname"
+step 'extract Fly ACME DNS challenge'
+acme_target=$(printf '%s' "$certificate" | jq -er '.dns_requirements.acme_challenge.target | if type == "string" and length > 0 then . else error("Fly ACME challenge target is missing") end')
+acme_hostname=$(printf '%s' "$certificate" | jq -er '.dns_requirements.acme_challenge.name | if type == "string" and length > 0 then . else error("Fly ACME challenge hostname is missing") end')
+if [ "$acme_hostname" != "_acme-challenge.$hostname" ]; then
+    printf '%s\n' 'Unexpected Fly ACME challenge hostname; refusing DNS mutation' >&2
+    exit 1
+fi
 
 upsert_record() {
     type=$1
@@ -112,6 +119,9 @@ EOF
 if [ "$mode" != redirect ]; then
     upsert_record AAAA "$hostname" "$fly_ipv6" true
     upsert_record TXT "$validation_hostname" "$validation_target" false
+    # Ownership alone does not issue a certificate. DNS-01 works through the
+    # Cloudflare proxy without requiring an already-valid origin TLS connection.
+    upsert_record CNAME "$acme_hostname" "$acme_target" false
 
     # Cloudflare must authenticate Fly's origin certificate. Flexible or Full mode
     # would weaken the canonical TLS boundary for every proxied request.

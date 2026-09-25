@@ -55,14 +55,29 @@ if [ "$volume_count" -ne 1 ]; then
 fi
 flyctl deploy --app "$app" --image "$PWMTF_DEPLOY_IMAGE" --ha=false --strategy immediate --wait-timeout 10m
 
-machine_count=$(flyctl status --app "$app" --json \
-    | jq '[.Machines[]? | select(.state != "destroyed")] | length')
-if [ "$machine_count" -ne 1 ]; then
-    printf '%s\n' "production must run exactly one Fly Machine; found $machine_count" >&2
-    exit 1
-fi
-machine_id=$(flyctl status --app "$app" --json \
-    | jq -er '[.Machines[]? | select(.state == "started")] | if length == 1 then .[0].id else error("expected exactly one started production Machine") end')
+wait_for_started_machine() {
+    attempt=0
+    while [ "$attempt" -lt 60 ]; do
+        snapshot=$(flyctl status --app "$app" --json) || return 1
+        count=$(printf '%s' "$snapshot" | jq '[.Machines[]? | select(.state != "destroyed")] | length')
+        if [ "$count" -gt 1 ]; then
+            printf 'production must run exactly one Fly Machine; found %s\n' "$count" >&2
+            return 1
+        fi
+        started=$(printf '%s' "$snapshot" | jq -r '.Machines[]? | select(.state == "started") | .id')
+        if [ "$count" -eq 1 ] && [ -n "$started" ]; then
+            printf '%s\n' "$started"
+            return 0
+        fi
+        printf 'Waiting for production Machine (%s/60); states: ' "$((attempt + 1))" >&2
+        printf '%s' "$snapshot" | jq -c '[.Machines[]? | {id,state}]' >&2
+        attempt=$((attempt + 1))
+        sleep 5
+    done
+    printf '%s\n' 'Production Machine did not start within five minutes; inspect Fly Machine events' >&2
+    return 1
+}
+machine_id=$(wait_for_started_machine)
 machine_configuration=$(flyctl machine status "$machine_id" --app "$app" --display-config 2>/dev/null \
     | sed -n '/^Config:$/,$p' | sed '1d')
 if ! jq -e --arg volume "$volume_name" '
@@ -119,8 +134,7 @@ curl --fail --silent --show-error --max-time 20 \
 # startup migrations and recovery for the deployed database head; acceptance
 # after real play remains a separate product criterion.
 flyctl machine restart "$machine_id" --app "$app" --signal SIGTERM --time 30
-restarted_machine_id=$(flyctl status --app "$app" --json \
-    | jq -er '[.Machines[]? | select(.state == "started")] | if length == 1 then .[0].id else error("expected exactly one restarted production Machine") end')
+restarted_machine_id=$(wait_for_started_machine)
 if [ "$restarted_machine_id" != "$machine_id" ]; then
     printf '%s\n' "production restart changed the canonical Machine identity" >&2
     exit 1

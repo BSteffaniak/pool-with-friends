@@ -18,11 +18,19 @@ case "$1 $2" in
         if [ "${PWMTF_TEST_CERTIFICATE_STATE:-ready}" = missing ]; then
             printf '%s\n' '{}'
         else
-            printf '%s\n' '{"dns_requirements":{"ownership":{"app_value":"example-ownership"}}}'
+            printf '%s\n' '{"dns_requirements":{"ownership":{"app_value":"example-ownership"},"acme_challenge":{"name":"_acme-challenge.pwmtf.hyperchad.dev","target":"example.flydns.net."}}}'
         fi
         ;;
     "status --app")
         case "${PWMTF_TEST_MACHINE_STATE:-one}" in
+            starting)
+                if [ -f "$PWMTF_TEST_TMP/starting-seen" ]; then
+                    printf '%s\n' '{"Machines":[{"id":"machine-1","state":"started"}]}'
+                else
+                    touch "$PWMTF_TEST_TMP/starting-seen"
+                    printf '%s\n' '{"Machines":[{"id":"machine-1","state":"starting"}]}'
+                fi
+                ;;
             one) printf '%s\n' '{"Machines":[{"id":"machine-1","state":"started"}]}' ;;
             two) printf '%s\n' '{"Machines":[{"id":"machine-1","state":"started"},{"id":"machine-2","state":"started"}]}' ;;
             *) printf '%s\n' '{"Machines":[]}' ;;
@@ -162,7 +170,8 @@ PATH="$tmp/bin:$PATH" PWMTF_TEST_TMP="$tmp" \
     CLOUDFLARE_API_TOKEN=test-token CLOUDFLARE_ACCOUNT_ID=account-1 \
     "$root/scripts/configure-production-edge.sh" >/dev/null
 
-[ "$(jq -s 'length' "$tmp/dns-payloads")" = 2 ]
+[ "$(jq -s 'length' "$tmp/dns-payloads")" = 3 ]
+jq -e 'select(.type == "CNAME" and .name == "_acme-challenge.pwmtf.hyperchad.dev" and .content == "example.flydns.net." and .proxied == false)' "$tmp/dns-payloads" >/dev/null
 jq -e 'select(.type == "AAAA" and .name == "pwmtf.hyperchad.dev" and .content == "2a09:8280:1::1234" and .proxied == true)' "$tmp/dns-payloads" >/dev/null
 jq -e 'select(.type == "TXT" and .name == "_fly-ownership.pwmtf.hyperchad.dev" and .content == "example-ownership" and .proxied == false)' "$tmp/dns-payloads" >/dev/null
 jq -e '.value == "strict"' "$tmp/ssl-payload" >/dev/null
@@ -258,7 +267,7 @@ for image in '' registry.fly.io/pwmtf:latest registry.fly.io/other:build-aaaaaaa
         exit 1
     fi
 done
-PATH="$tmp/bin:$PATH" PWMTF_TEST_TMP="$tmp" \
+PATH="$tmp/bin:$PATH" PWMTF_TEST_TMP="$tmp" PWMTF_TEST_MACHINE_STATE=starting \
     PWMTF_GOOGLE_CLIENT_ID=client-id PWMTF_GOOGLE_CLIENT_SECRET=client-secret \
     PWMTF_PRODUCTION_SMOKE_SCRIPT="$tmp/smoke" \
     "$root/scripts/deploy-production.sh" >/dev/null
