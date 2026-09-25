@@ -98,8 +98,10 @@ then
     exit 1
 fi
 identity_command='set -eu; build=$(cat /app/pwmtf-build-id); source=$(cat /app/pwmtf-source-hash); test -n "$build"; test ${#source} -eq 64; grep -Fq "const candidateBuildId = \"$build\";" /app/dist/bootstrap.js; grep -Fq "const candidateSourceHash = \"$source\";" /app/dist/bootstrap.js'
-identity_result=$(flyctl machine exec --app "$app" "$machine_id" "$identity_command" --timeout 30 --json)
-if ! jq -e '(.exit_code // 0) == 0' <<EOF
+identity_command="$identity_command; printf '%s\\n' pwmtf-identity-ok"
+quoted_command=$(printf '%s' "$identity_command" | sed "s/'/'\\\\''/g")
+identity_result=$(flyctl machine exec --app "$app" "$machine_id" "/bin/sh -c '$quoted_command'" --timeout 30 --json)
+if ! jq -e 'type == "object" and (if has("exit_code") then .exit_code == 0 else true end) and ((.stderr // "") == "") and .stdout == "pwmtf-identity-ok\n"' >/dev/null <<EOF
 $identity_result
 EOF
 then

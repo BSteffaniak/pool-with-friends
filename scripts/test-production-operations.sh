@@ -59,16 +59,26 @@ case "$1 $2" in
     "machine exec")
         command=$6
         case "$command" in
+            "/bin/sh -c '"*) ;;
+            *) printf '%s\n' 'remote program must explicitly invoke a shell' >&2; exit 1 ;;
+        esac
+        case "${PWMTF_TEST_EXEC_STATE:-valid}" in
+            missing) printf '%s\n' '{}'; exit 0 ;;
+            stderr) printf '%s\n' '{"stderr":"No such file or directory (os error 2)"}'; exit 0 ;;
+            nonzero) printf '%s\n' '{"exit_code":1}'; exit 0 ;;
+            null) printf '%s\n' '{"exit_code":null}'; exit 0 ;;
+        esac
+        case "$command" in
             *pwmtf-build-id*)
                 case "${PWMTF_TEST_IDENTITY_STATE:-valid}" in
-                    valid) printf '%s\n' '{"exit_code":0,"stdout":"","stderr":""}' ;;
+                    valid) printf '%s\n' '{"stdout":"pwmtf-identity-ok\n"}' ;;
                     *) printf '%s\n' '{"exit_code":1,"stdout":"","stderr":"identity mismatch"}' ;;
                 esac
                 ;;
             *)
                 backup=$(printf '%s' "$command" | sed -n "s|.*\(/data/backups/pwmtf-[0-9TZ]*\.db\).*|\1|p")
                 test -n "$backup"
-                printf '{"exit_code":0,"stdout":"%s\\n","stderr":""}\n' "$backup"
+                printf '{"stdout":"%s\\n"}\n' "$backup"
                 ;;
         esac
         ;;
@@ -259,6 +269,17 @@ set -eu
 : >"$PWMTF_TEST_TMP/smoke-ran"
 MOCK
 chmod +x "$tmp/smoke"
+for exec_state in missing stderr nonzero null; do
+    for script in backup-production deploy-production; do
+        if PATH="$tmp/bin:$PATH" PWMTF_TEST_TMP="$tmp" PWMTF_TEST_EXEC_STATE="$exec_state" \
+            PWMTF_GOOGLE_CLIENT_ID=client-id PWMTF_GOOGLE_CLIENT_SECRET=client-secret \
+            PWMTF_PRODUCTION_SMOKE_SCRIPT="$tmp/smoke" \
+            "$root/scripts/$script.sh" >"$tmp/exec-error.log" 2>&1; then
+            printf '%s\n' "$script accepted invalid exec response: $exec_state" >&2
+            exit 1
+        fi
+    done
+done
 for image in '' registry.fly.io/pwmtf:latest registry.fly.io/other:build-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-123-2 registry.fly.io/pwmtf:build-abc-123-2 registry.fly.io/pwmtf:build-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
     if PATH="$tmp/bin:$PATH" PWMTF_DEPLOY_IMAGE="$image" \
         PWMTF_GOOGLE_CLIENT_ID=client-id PWMTF_GOOGLE_CLIENT_SECRET=client-secret \
